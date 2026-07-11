@@ -3,6 +3,7 @@ package com.recorder.voicenote
 import android.content.ContentUris
 import android.content.ContentValues
 import android.content.Context
+import android.content.IntentSender
 import android.content.SharedPreferences
 import android.media.MediaScannerConnection
 import android.net.Uri
@@ -38,12 +39,30 @@ sealed class RecordingTarget {
     data class FileTarget(val file: File) : RecordingTarget()
 }
 
+/** 폴더 이름 변경 결과. 다른 앱이 만든 파일 등 권한이 없어 못 옮긴 항목은 pendingUris로 알려준다. */
+data class RenameFolderResult(
+    val finalName: String,
+    val pendingUris: List<Uri>,
+    val newRelativePath: String
+)
+
+/** 녹음 파일 이름 변경 결과 */
+sealed class RenameRecordingResult {
+    object Success : RenameRecordingResult()
+    object Failed : RenameRecordingResult()
+    /** 다른 앱이 만든 파일이라 시스템 승인이 별도로 필요한 경우 */
+    data class NeedsPermission(val uri: Uri, val newDisplayName: String) : RenameRecordingResult()
+}
+
 /**
  * "내부 저장소 > Recordings > Voice Recorder > [폴더명]" 위치에 녹음 파일을 저장/조회한다.
  *
  * - Android 10(API 29) 이상: MediaStore(Scoped Storage)를 통해 공용 Recordings 폴더에 저장.
  *   빈 폴더는 파일 시스템에 실체가 없으므로 SharedPreferences에 폴더 이름을 별도로 기록해 관리한다.
  * - Android 9(API 28) 이하: 공용 저장소에 실제 디렉터리/파일로 직접 저장 (WRITE_EXTERNAL_STORAGE 필요).
+ *
+ * "Voice Recorder" 폴더 바로 아래(하위 폴더 없이)에 있는 파일들은 이름이 [ROOT_FOLDER_NAME]인
+ * 가상의 폴더로 취급해서 목록에 노출한다. (예: 일부 제조사 기본 녹음 앱은 하위 폴더 없이 이 위치에 바로 저장한다)
  */
 class RecordingStore(private val context: Context) {
 
@@ -71,6 +90,20 @@ class RecordingStore(private val context: Context) {
     /** 사용자에게 보여줄 저장 위치 안내 문구 */
     val displayLocation: String get() = "내부 저장소 > Recordings > $ROOT_FOLDER_NAME"
 
+    /** [folderName]에 해당하는 MediaStore RELATIVE_PATH. 최상위 가상 폴더는 basePath 자체를 가리킨다. */
+    private fun relativePathFor(folderName: String): String {
+        return if (folderName == ROOT_FOLDER_NAME) basePath else "$basePath$folderName/"
+    }
+
+    /** [folderName]에 해당하는 실제 레거시(API 28 이하) 디렉터리. */
+    private fun legacyDirFor(folderName: String): File {
+        return if (folderName == ROOT_FOLDER_NAME) {
+            legacyRootDir
+        } else {
+            File(legacyRootDir, folderName).apply { if (!exists()) mkdirs() }
+        }
+    }
+
     // ----------------------------------------------------------------------------------
     // 폴더 목록
     // ----------------------------------------------------------------------------------
@@ -82,10 +115,10 @@ class RecordingStore(private val context: Context) {
                 .toSortedSet(String.CASE_INSENSITIVE_ORDER)
                 .toList()
         } else {
-            legacyRootDir.listFiles { f -> f.isDirectory }
-                ?.map { it.name }
-                ?.sortedBy { it.lowercase(Locale.getDefault()) }
-                ?: emptyList()
+            val subDirs = legacyRootDir.listFiles { f -> f.isDirectory }?.map { it.name } ?: emptyList()
+            val hasRootLevelFiles = legacyRootDir.listFiles { f -> f.isFile }?.isNotEmpty() == true
+            val all = if (hasRootLevelFiles) subDirs + ROOT_FOLDER_NAME else subDirs
+            all.distinct().sortedBy { it.lowercase(Locale.getDefault()) }
         }
         return names.map { FolderInfo(it, listRecordings(it).size) }
     }
@@ -117,10 +150,16 @@ class RecordingStore(private val context: Context) {
             val col = cursor.getColumnIndexOrThrow(MediaStore.Audio.Media.RELATIVE_PATH)
             while (cursor.moveToNext()) {
                 val relativePath = cursor.getString(col) ?: continue
-                if (relativePath.startsWith(basePath)) {
-                    val remainder = relativePath.removePrefix(basePath).trim('/')
-                    val folderName = remainder.substringBefore('/')
-                    if (folderName.isNotBlank()) names.add(folderName)
+                when {
+                    relativePath == basePath -> {
+                        // Voice Recorder 폴더 바로 아래(하위 폴더 없이) 있는 파일 -> 가상 최상위 폴더
+                        names.add(ROOT_FOLDER_NAME)
+                    }
+                    relativePath.startsWith(basePath) -> {
+                        val remainder = relativePath.removePrefix(basePath).trim('/')
+                        val folderName = remainder.substringBefore('/')
+                        if (folderName.isNotBlank()) names.add(folderName)
+                    }
                 }
             }
         }
@@ -134,7 +173,7 @@ class RecordingStore(private val context: Context) {
     fun listRecordings(folderName: String): List<RecordingItem> {
         return if (isScopedStorage) {
             val items = mutableListOf<RecordingItem>()
-            val relativePath = "$basePath$folderName/"
+            val relativePath = relativePathFor(folderName)
             val projection = arrayOf(
                 MediaStore.Audio.Media._ID,
                 MediaStore.Audio.Media.DISPLAY_NAME,
@@ -169,7 +208,7 @@ class RecordingStore(private val context: Context) {
             }
             items
         } else {
-            val dir = File(legacyRootDir, folderName)
+            val dir = legacyDirFor(folderName)
             dir.listFiles { f -> f.isFile }
                 ?.sortedByDescending { it.lastModified() }
                 ?.map { RecordingItem(it.name, it.lastModified(), it.length(), filePath = it.absolutePath) }
@@ -192,7 +231,7 @@ class RecordingStore(private val context: Context) {
             val values = ContentValues().apply {
                 put(MediaStore.Audio.Media.DISPLAY_NAME, fileName)
                 put(MediaStore.Audio.Media.MIME_TYPE, "audio/mp4")
-                put(MediaStore.Audio.Media.RELATIVE_PATH, "$basePath$folderName/")
+                put(MediaStore.Audio.Media.RELATIVE_PATH, relativePathFor(folderName))
                 put(MediaStore.Audio.Media.IS_PENDING, 1)
             }
             val uri = context.contentResolver.insert(MediaStore.Audio.Media.EXTERNAL_CONTENT_URI, values)
@@ -205,7 +244,7 @@ class RecordingStore(private val context: Context) {
             } ?: return null
             RecordingTarget.MediaStoreTarget(uri, pfd)
         } else {
-            val dir = File(legacyRootDir, folderName).apply { if (!exists()) mkdirs() }
+            val dir = legacyDirFor(folderName)
             RecordingTarget.FileTarget(File(dir, fileName))
         }
     }
@@ -257,77 +296,144 @@ class RecordingStore(private val context: Context) {
     // 이름 변경
     // ----------------------------------------------------------------------------------
 
-    /** 폴더 이름을 변경한다. 실제로 적용된 최종 이름을 반환한다(중복 시 자동으로 접미사가 붙음). */
-    fun renameFolder(oldName: String, newName: String): String {
-        val safeBase = sanitize(newName).ifBlank { return oldName }
-        if (safeBase == oldName) return oldName
+    /**
+     * 폴더 이름을 변경한다. 우리 앱이 소유한 파일은 즉시 옮겨지고,
+     * 다른 앱이 만들어서 권한이 없는 파일은 [RenameFolderResult.pendingUris]로 반환된다.
+     * (Android 11 이상에서는 createWriteRequestIntentSender로 사용자 승인을 받은 뒤
+     * applyPendingRelativePathUpdate를 호출해 마저 처리해야 한다.)
+     */
+    fun renameFolder(oldName: String, newName: String): RenameFolderResult {
+        val safeBase = sanitize(newName).ifBlank {
+            return RenameFolderResult(oldName, emptyList(), relativePathFor(oldName))
+        }
+        if (safeBase == oldName) {
+            return RenameFolderResult(oldName, emptyList(), relativePathFor(oldName))
+        }
 
         val existing = listFolders().map { it.name }.toSet() - oldName
         val finalName = uniqueName(safeBase, existing)
+        val newRelativePath = relativePathFor(finalName)
 
-        if (isScopedStorage) {
-            // 빈 폴더로 등록되어 있었다면 등록된 이름도 같이 갱신
-            val set = (prefs.getStringSet(KEY_FOLDER_NAMES, emptySet()) ?: emptySet()).toMutableSet()
-            if (set.remove(oldName)) {
-                set.add(finalName)
-                prefs.edit().putStringSet(KEY_FOLDER_NAMES, set).apply()
-            }
-
-            // 폴더 안에 실제 파일이 있다면 각 파일의 RELATIVE_PATH를 새 폴더 경로로 갱신
-            val oldRelativePath = "$basePath$oldName/"
-            val newRelativePath = "$basePath$finalName/"
-            val projection = arrayOf(MediaStore.Audio.Media._ID)
-            val selection = "${MediaStore.Audio.Media.RELATIVE_PATH} = ?"
-            val args = arrayOf(oldRelativePath)
-            context.contentResolver.query(
-                MediaStore.Audio.Media.EXTERNAL_CONTENT_URI,
-                projection, selection, args, null
-            )?.use { cursor ->
-                val idCol = cursor.getColumnIndexOrThrow(MediaStore.Audio.Media._ID)
-                while (cursor.moveToNext()) {
-                    val uri = ContentUris.withAppendedId(
-                        MediaStore.Audio.Media.EXTERNAL_CONTENT_URI, cursor.getLong(idCol)
-                    )
-                    try {
-                        val values = ContentValues().apply {
-                            put(MediaStore.Audio.Media.RELATIVE_PATH, newRelativePath)
-                        }
-                        context.contentResolver.update(uri, values, null, null)
-                    } catch (_: Exception) {
-                        // 다른 앱이 만든 파일 등, 권한이 없어 이동하지 못한 항목은 건너뛴다.
-                    }
+        if (!isScopedStorage) {
+            val oldDir = legacyDirFor(oldName)
+            val newDir = File(legacyRootDir, finalName)
+            if (oldName == ROOT_FOLDER_NAME) {
+                // 최상위에 흩어진 파일들을 새 하위 폴더로 옮긴다.
+                newDir.mkdirs()
+                oldDir.listFiles { f -> f.isFile }?.forEach { file ->
+                    file.renameTo(File(newDir, file.name))
                 }
+            } else {
+                oldDir.renameTo(newDir)
             }
-        } else {
-            File(legacyRootDir, oldName).renameTo(File(legacyRootDir, finalName))
+            return RenameFolderResult(finalName, emptyList(), newRelativePath)
         }
-        return finalName
+
+        // 빈 폴더로 등록되어 있었다면 등록된 이름도 같이 갱신
+        val set = (prefs.getStringSet(KEY_FOLDER_NAMES, emptySet()) ?: emptySet()).toMutableSet()
+        if (set.remove(oldName)) {
+            set.add(finalName)
+            prefs.edit().putStringSet(KEY_FOLDER_NAMES, set).apply()
+        }
+
+        // 폴더 안에 실제 파일이 있다면 각 파일의 RELATIVE_PATH를 새 폴더 경로로 갱신
+        val oldRelativePath = relativePathFor(oldName)
+        val pendingUris = mutableListOf<Uri>()
+        val projection = arrayOf(MediaStore.Audio.Media._ID)
+        val selection = "${MediaStore.Audio.Media.RELATIVE_PATH} = ?"
+        val args = arrayOf(oldRelativePath)
+        context.contentResolver.query(
+            MediaStore.Audio.Media.EXTERNAL_CONTENT_URI,
+            projection, selection, args, null
+        )?.use { cursor ->
+            val idCol = cursor.getColumnIndexOrThrow(MediaStore.Audio.Media._ID)
+            while (cursor.moveToNext()) {
+                val uri = ContentUris.withAppendedId(
+                    MediaStore.Audio.Media.EXTERNAL_CONTENT_URI, cursor.getLong(idCol)
+                )
+                val moved = tryUpdateRelativePath(uri, newRelativePath)
+                if (!moved) pendingUris.add(uri)
+            }
+        }
+        return RenameFolderResult(finalName, pendingUris, newRelativePath)
     }
 
-    /** 녹음 파일 이름을 변경한다(확장자는 유지). 성공하면 true. */
-    fun renameRecording(item: RecordingItem, newBaseName: String): Boolean {
+    /** 녹음 파일 이름을 변경한다(확장자는 유지). */
+    fun renameRecording(item: RecordingItem, newBaseName: String): RenameRecordingResult {
         val safeBase = sanitize(newBaseName)
-        if (safeBase.isBlank()) return false
+        if (safeBase.isBlank()) return RenameRecordingResult.Failed
         val extension = item.displayName.substringAfterLast('.', "")
         val newDisplayName = if (extension.isNotEmpty()) "$safeBase.$extension" else safeBase
-        if (newDisplayName == item.displayName) return true
+        if (newDisplayName == item.displayName) return RenameRecordingResult.Success
 
         return if (isScopedStorage) {
-            val uri = item.contentUri ?: return false
-            try {
-                val values = ContentValues().apply {
-                    put(MediaStore.Audio.Media.DISPLAY_NAME, newDisplayName)
-                }
-                context.contentResolver.update(uri, values, null, null) > 0
-            } catch (e: Exception) {
-                false
+            val uri = item.contentUri ?: return RenameRecordingResult.Failed
+            when {
+                tryUpdateDisplayName(uri, newDisplayName) -> RenameRecordingResult.Success
+                isSecurityRestricted(uri, MediaStore.Audio.Media.DISPLAY_NAME, newDisplayName) ->
+                    RenameRecordingResult.NeedsPermission(uri, newDisplayName)
+                else -> RenameRecordingResult.Failed
             }
         } else {
-            val path = item.filePath ?: return false
+            val path = item.filePath ?: return RenameRecordingResult.Failed
             val oldFile = File(path)
             val newFile = File(oldFile.parentFile, newDisplayName)
-            oldFile.renameTo(newFile)
+            if (oldFile.renameTo(newFile)) RenameRecordingResult.Success else RenameRecordingResult.Failed
         }
+    }
+
+    /** [uris]에 대한 시스템 쓰기 승인 요청(IntentSender)을 만든다. Android 11 미만이면 null. */
+    fun createWriteRequestIntentSender(uris: List<Uri>): IntentSender? {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.R || uris.isEmpty()) return null
+        return try {
+            MediaStore.createWriteRequest(context.contentResolver, uris).intentSender
+        } catch (e: Exception) {
+            null
+        }
+    }
+
+    /** 사용자가 시스템 승인 다이얼로그에서 허용한 뒤, 폴더 이동을 마저 적용한다. */
+    fun applyPendingFolderMove(uris: List<Uri>, newRelativePath: String) {
+        val values = ContentValues().apply { put(MediaStore.Audio.Media.RELATIVE_PATH, newRelativePath) }
+        for (uri in uris) {
+            try {
+                context.contentResolver.update(uri, values, null, null)
+            } catch (_: Exception) {
+            }
+        }
+    }
+
+    /** 사용자가 시스템 승인 다이얼로그에서 허용한 뒤, 파일 이름 변경을 마저 적용한다. */
+    fun applyPendingRename(uri: Uri, newDisplayName: String): Boolean {
+        return tryUpdateDisplayName(uri, newDisplayName)
+    }
+
+    private fun tryUpdateRelativePath(uri: Uri, newRelativePath: String): Boolean {
+        return try {
+            val values = ContentValues().apply { put(MediaStore.Audio.Media.RELATIVE_PATH, newRelativePath) }
+            context.contentResolver.update(uri, values, null, null) > 0
+        } catch (e: SecurityException) {
+            false
+        } catch (e: Exception) {
+            false
+        }
+    }
+
+    private fun tryUpdateDisplayName(uri: Uri, newDisplayName: String): Boolean {
+        return try {
+            val values = ContentValues().apply { put(MediaStore.Audio.Media.DISPLAY_NAME, newDisplayName) }
+            context.contentResolver.update(uri, values, null, null) > 0
+        } catch (e: SecurityException) {
+            false
+        } catch (e: Exception) {
+            false
+        }
+    }
+
+    /** 위 업데이트가 실패한 이유가 "다른 앱 소유"로 인한 권한 문제였는지 대략적으로 판단한다. */
+    private fun isSecurityRestricted(uri: Uri, column: String, value: String): Boolean {
+        // Android 11(R) 이상에서만 createWriteRequest로 복구 가능하다.
+        return Build.VERSION.SDK_INT >= Build.VERSION_CODES.R
     }
 
     // ----------------------------------------------------------------------------------

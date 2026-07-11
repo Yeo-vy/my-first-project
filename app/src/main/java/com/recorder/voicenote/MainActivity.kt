@@ -3,11 +3,13 @@
 package com.recorder.voicenote
 
 import android.Manifest
+import android.app.Activity
 import android.content.pm.PackageManager
 import android.os.Build
 import android.os.Bundle
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
+import androidx.activity.result.IntentSenderRequest
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.core.RepeatMode
@@ -128,6 +130,24 @@ fun VoiceRecorderApp(viewModel: RecorderViewModel = viewModel()) {
         uiState.message?.let {
             snackbarHostState.showSnackbar(it)
             viewModel.consumeMessage()
+        }
+    }
+
+    // 다른 앱이 만든 파일의 이름/위치를 바꾸려면(Android 11+) 시스템 승인 다이얼로그가 필요하다.
+    val writeRequestLauncher = androidx.activity.compose.rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.StartIntentSenderForResult()
+    ) { result ->
+        viewModel.onWriteRequestResult(result.resultCode == Activity.RESULT_OK)
+    }
+
+    LaunchedEffect(uiState.pendingWriteRequest) {
+        if (uiState.pendingWriteRequest != null) {
+            val intentSender = viewModel.writeRequestIntentSender()
+            if (intentSender != null) {
+                writeRequestLauncher.launch(IntentSenderRequest.Builder(intentSender).build())
+            } else {
+                viewModel.onWriteRequestUnavailable()
+            }
         }
     }
 

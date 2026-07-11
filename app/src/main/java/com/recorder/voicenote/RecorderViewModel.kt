@@ -2,6 +2,8 @@ package com.recorder.voicenote
 
 import android.app.Application
 import android.content.Intent
+import android.content.IntentSender
+import android.net.Uri
 import androidx.core.content.ContextCompat
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
@@ -16,6 +18,16 @@ sealed class RenameTarget {
     data class Recording(val item: RecordingItem) : RenameTarget()
 }
 
+/**
+ * 다른 앱이 만든 파일 등, 우리 앱이 소유하지 않은 항목을 옮기거나 이름을 바꾸려면
+ * Android 11 이상에서는 시스템 승인 다이얼로그(MediaStore.createWriteRequest)가 필요하다.
+ * 그 승인을 기다리는 동안의 대기 상태를 나타낸다.
+ */
+sealed class PendingWriteRequest {
+    data class FolderMove(val uris: List<Uri>, val newRelativePath: String) : PendingWriteRequest()
+    data class RecordingRename(val uri: Uri, val newDisplayName: String) : PendingWriteRequest()
+}
+
 data class RecorderUiState(
     val folders: List<FolderInfo> = emptyList(),
     // null 이면 폴더 목록(홈) 화면, 값이 있으면 해당 폴더 상세 화면
@@ -25,6 +37,7 @@ data class RecorderUiState(
     val elapsedSeconds: Int = 0,
     val showAddFolderDialog: Boolean = false,
     val renameTarget: RenameTarget? = null,
+    val pendingWriteRequest: PendingWriteRequest? = null,
     /** 현재 재생 중인 녹음 파일의 이름 (없으면 재생 중이 아님) */
     val playingRecordingName: String? = null,
     val message: String? = null
@@ -203,28 +216,83 @@ class RecorderViewModel(application: Application) : AndroidViewModel(application
         when (val target = _uiState.value.renameTarget) {
             is RenameTarget.Folder -> {
                 if (newName.isNotBlank()) {
-                    val finalName = store.renameFolder(target.name, newName)
+                    val result = store.renameFolder(target.name, newName)
                     refreshFolders()
                     if (_uiState.value.selectedFolder == target.name) {
                         _uiState.value = _uiState.value.copy(
-                            selectedFolder = finalName,
-                            recordings = store.listRecordings(finalName)
+                            selectedFolder = result.finalName,
+                            recordings = store.listRecordings(result.finalName)
+                        )
+                    }
+                    if (result.pendingUris.isNotEmpty()) {
+                        _uiState.value = _uiState.value.copy(
+                            pendingWriteRequest = PendingWriteRequest.FolderMove(
+                                result.pendingUris, result.newRelativePath
+                            )
                         )
                     }
                 }
             }
             is RenameTarget.Recording -> {
                 if (newName.isNotBlank()) {
-                    val success = store.renameRecording(target.item, newName)
-                    if (!success) {
-                        _uiState.value = _uiState.value.copy(message = "이름을 변경할 수 없습니다")
+                    when (val result = store.renameRecording(target.item, newName)) {
+                        is RenameRecordingResult.Success -> refreshRecordings()
+                        is RenameRecordingResult.Failed -> {
+                            _uiState.value = _uiState.value.copy(message = "이름을 변경할 수 없습니다")
+                        }
+                        is RenameRecordingResult.NeedsPermission -> {
+                            _uiState.value = _uiState.value.copy(
+                                pendingWriteRequest = PendingWriteRequest.RecordingRename(
+                                    result.uri, result.newDisplayName
+                                )
+                            )
+                        }
                     }
-                    refreshRecordings()
                 }
             }
             null -> Unit
         }
         _uiState.value = _uiState.value.copy(renameTarget = null)
+    }
+
+    /** MainActivity가 시스템 승인 다이얼로그를 띄울 때 필요한 IntentSender를 요청한다. */
+    fun writeRequestIntentSender(): IntentSender? {
+        val pending = _uiState.value.pendingWriteRequest ?: return null
+        val uris = when (pending) {
+            is PendingWriteRequest.FolderMove -> pending.uris
+            is PendingWriteRequest.RecordingRename -> listOf(pending.uri)
+        }
+        return store.createWriteRequestIntentSender(uris)
+    }
+
+    /** IntentSender를 만들 수 없는 경우(API 30 미만 등) 대기 상태를 정리한다. */
+    fun onWriteRequestUnavailable() {
+        if (_uiState.value.pendingWriteRequest != null) {
+            _uiState.value = _uiState.value.copy(
+                message = "일부 항목은 시스템 제한으로 변경하지 못했습니다",
+                pendingWriteRequest = null
+            )
+        }
+    }
+
+    /** 시스템 승인 다이얼로그 결과 처리 */
+    fun onWriteRequestResult(granted: Boolean) {
+        val pending = _uiState.value.pendingWriteRequest
+        _uiState.value = _uiState.value.copy(pendingWriteRequest = null)
+        if (pending == null) return
+
+        if (granted) {
+            when (pending) {
+                is PendingWriteRequest.FolderMove ->
+                    store.applyPendingFolderMove(pending.uris, pending.newRelativePath)
+                is PendingWriteRequest.RecordingRename ->
+                    store.applyPendingRename(pending.uri, pending.newDisplayName)
+            }
+            refreshFolders()
+            refreshRecordings()
+        } else {
+            _uiState.value = _uiState.value.copy(message = "권한이 없어 일부 항목을 변경하지 못했습니다")
+        }
     }
 
     /** 저장소 읽기 권한이 새로 승인되었을 때 등, 목록을 다시 불러와야 할 때 호출한다. */
