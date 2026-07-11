@@ -1,0 +1,85 @@
+# 음성녹음 (VoiceRecorder)
+
+Kotlin + Jetpack Compose로 만든 간단한 폴더 기반 음성녹음 앱입니다.
+
+## 주요 기능
+- **홈 화면**: 폴더 목록 + `폴더 추가` 버튼 + `녹음` 버튼
+- 폴더를 탭하면 해당 폴더 안의 녹음파일 목록 화면으로 이동
+- **폴더 안에 들어간 상태에서 녹음 버튼을 누르면** 녹음이 시작되고,
+  정지 시 파일명이 `[해당 폴더 이름]_[녹음 시작 시각].m4a` 형식으로 저장됩니다.
+  - 예: `회의록` 폴더에서 2026년 7월 10일 14시 32분 5초에 녹음을 시작하면
+    → `회의록_20260710_143205.m4a`
+- 홈 화면(폴더에 들어가지 않은 상태)에서 녹음 버튼을 누르면
+  "먼저 폴더를 선택해주세요" 안내가 표시됩니다. (요청하신 동작대로 폴더 진입 상태에서만 녹음됨)
+- 녹음 파일은 앱 전용 저장공간(`Android/data/com.recorder.voicenote/files/Recordings/폴더명/`)에
+  저장되므로 별도의 저장소 권한(WRITE_EXTERNAL_STORAGE) 없이 마이크 권한만 있으면 됩니다.
+
+## 열기 / 실행 방법
+1. Android Studio (최신 버전 권장, Hedgehog 이상)에서 `VoiceRecorder` 폴더를 **Open**으로 엽니다.
+2. Gradle Sync가 끝날 때까지 기다립니다. (처음 열 때 Gradle wrapper jar를
+   자동으로 내려받습니다. 인터넷 연결이 필요합니다.)
+3. 실제 기기 또는 마이크가 동작하는 에뮬레이터를 연결하고 Run ▶ 을 누릅니다.
+4. 앱 실행 후 녹음 버튼을 처음 누르면 마이크 권한을 요청합니다. 허용해주세요.
+
+## 프로젝트 구조
+```
+app/src/main/java/com/recorder/voicenote/
+ ├─ MainActivity.kt        # 전체 Compose UI (홈 화면 / 폴더 상세 화면)
+ ├─ RecorderViewModel.kt   # 화면 상태 관리 (폴더 선택, 녹음 상태, 타이머 등)
+ ├─ FolderRepository.kt    # 폴더 생성 / 목록 조회, 파일명 생성 로직
+ ├─ RecorderManager.kt     # MediaRecorder 시작/정지 래퍼
+ └─ ui/theme/              # Compose 색상 / 타이포그래피 테마
+```
+
+## APK 만들기
+
+### 방법 A. Android Studio에서 바로 만들기 (가장 간단)
+1. Android Studio에서 프로젝트를 엽니다.
+2. 상단 메뉴 `Build` → `Build Bundle(s) / APK(s)` → `Build APK(s)` 클릭.
+3. 빌드가 끝나면 우측 아래 알림에 뜨는 `locate` 링크를 클릭하면
+   `app/build/outputs/apk/debug/app-debug.apk` 파일을 바로 찾을 수 있습니다.
+4. 이 apk 파일을 폰으로 옮겨서 설치하면 됩니다. (출처를 알 수 없는 앱 설치 허용 필요)
+
+### 방법 B. GitHub에 올려서 자동으로 APK 만들기 (Android Studio 없이 가능)
+이 프로젝트에는 이미 `.github/workflows/build-apk.yml` 이 포함되어 있어서,
+GitHub에 올리기만 하면 자동으로 APK를 빌드해줍니다.
+
+1. **새 저장소 만들기**
+   - GitHub 로그인 → 우측 상단 `+` → `New repository`
+   - 이름 입력(예: `voice-recorder`) 후 `Create repository` (Public/Private 상관없음)
+
+2. **프로젝트 업로드**
+   - 방금 만든 빈 저장소 페이지에서 `uploading an existing file` 링크 클릭
+   - 압축 푼 `VoiceRecorder` 폴더 안의 내용 전체(모든 파일/폴더)를
+     드래그 앤 드롭으로 업로드 (크롬/엣지 등 최신 브라우저는 폴더째 드래그 가능)
+   - 하단 `Commit changes` 클릭
+   - (터미널 사용이 익숙하다면 아래처럼 git으로 올려도 됩니다)
+     ```bash
+     cd VoiceRecorder
+     git init
+     git add .
+     git commit -m "init"
+     git branch -M main
+     git remote add origin https://github.com/사용자명/voice-recorder.git
+     git push -u origin main
+     ```
+
+3. **자동 빌드 확인**
+   - 저장소 상단 메뉴의 `Actions` 탭 클릭
+   - `Build Debug APK` 워크플로우가 자동으로 실행 중인 것을 확인 (초록 체크가 뜰 때까지 1~3분 대기)
+
+4. **APK 다운로드**
+   - 완료된 워크플로우 실행(런) 클릭 → 페이지 하단 `Artifacts` 항목에서
+     `VoiceRecorder-debug-apk` 클릭 → zip 파일이 다운로드됨
+   - 압축을 풀면 안에 `app-debug.apk` 파일이 들어있습니다. 폰에 옮겨 설치하세요.
+
+> 참고: 이 워크플로우는 서명되지 않은 **디버그 APK**를 만듭니다. 테스트/개인 설치용으로는
+> 문제없이 설치·실행되지만, Play 스토어에 올리려면 별도로 릴리즈 서명이 필요합니다.
+
+## 커스터마이징 팁
+
+- 파일 저장 위치를 공용 저장소(다른 파일 관리자 앱에서 바로 보이는 위치)로 바꾸고 싶다면
+  `FolderRepository.kt`의 `rootDir`를 `MediaStore` 기반 저장으로 바꾸면 됩니다.
+- 녹음 포맷을 mp3/wav 등으로 바꾸려면 `RecorderManager.kt`의
+  `setOutputFormat` / `setAudioEncoder` 값을 수정하세요.
+- 재생 기능이 필요하면 `RecordingCard`에 `MediaPlayer`를 연결해 추가할 수 있습니다.
