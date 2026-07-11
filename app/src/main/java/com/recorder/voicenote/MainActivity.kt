@@ -4,18 +4,18 @@ package com.recorder.voicenote
 
 import android.Manifest
 import android.content.pm.PackageManager
+import android.os.Build
 import android.os.Bundle
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.animation.AnimatedVisibility
-import androidx.compose.animation.core.infiniteRepeatable
 import androidx.compose.animation.core.RepeatMode
-import androidx.compose.animation.core.tween
 import androidx.compose.animation.core.animateFloat
+import androidx.compose.animation.core.infiniteRepeatable
 import androidx.compose.animation.core.rememberInfiniteTransition
+import androidx.compose.animation.core.tween
 import androidx.compose.foundation.background
-import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
@@ -37,7 +37,6 @@ import androidx.lifecycle.viewmodel.compose.viewModel
 import com.recorder.voicenote.ui.theme.RecordingRed
 import com.recorder.voicenote.ui.theme.TextSecondary
 import com.recorder.voicenote.ui.theme.VoiceRecorderTheme
-import java.io.File
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
@@ -62,31 +61,46 @@ fun VoiceRecorderApp(viewModel: RecorderViewModel = viewModel()) {
     val uiState by viewModel.uiState.collectAsState()
     val snackbarHostState = remember { SnackbarHostState() }
 
-    var hasAudioPermission by remember {
+    // Android 10(API 29) 미만에서는 공용 저장소에 직접 쓰기 위해 WRITE_EXTERNAL_STORAGE 도 필요하고,
+    // Android 13(API 33) 이상에서는 알림(녹음 중 상태 표시)을 위해 POST_NOTIFICATIONS 도 필요하다.
+    val requiredPermissions = remember {
+        buildList {
+            add(Manifest.permission.RECORD_AUDIO)
+            if (Build.VERSION.SDK_INT < Build.VERSION_CODES.Q) {
+                add(Manifest.permission.WRITE_EXTERNAL_STORAGE)
+            }
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                add(Manifest.permission.POST_NOTIFICATIONS)
+            }
+        }
+    }
+
+    var hasPermissions by remember {
         mutableStateOf(
-            ContextCompat.checkSelfPermission(context, Manifest.permission.RECORD_AUDIO) ==
-                PackageManager.PERMISSION_GRANTED
+            requiredPermissions.all {
+                ContextCompat.checkSelfPermission(context, it) == PackageManager.PERMISSION_GRANTED
+            }
         )
     }
     // 권한 승인 후 바로 녹음을 시작하기 위한 플래그
     var pendingRecordAfterPermission by remember { mutableStateOf(false) }
 
     val permissionLauncher = androidx.activity.compose.rememberLauncherForActivityResult(
-        contract = ActivityResultContracts.RequestPermission()
-    ) { granted ->
-        hasAudioPermission = granted
-        if (granted && pendingRecordAfterPermission) {
+        contract = ActivityResultContracts.RequestMultiplePermissions()
+    ) { result ->
+        hasPermissions = result.values.all { it }
+        if (hasPermissions && pendingRecordAfterPermission) {
             viewModel.startRecording()
         }
         pendingRecordAfterPermission = false
     }
 
     fun requestRecordOrStart() {
-        if (hasAudioPermission) {
+        if (hasPermissions) {
             viewModel.startRecording()
         } else {
             pendingRecordAfterPermission = true
-            permissionLauncher.launch(Manifest.permission.RECORD_AUDIO)
+            permissionLauncher.launch(requiredPermissions.toTypedArray())
         }
     }
 
@@ -103,7 +117,7 @@ fun VoiceRecorderApp(viewModel: RecorderViewModel = viewModel()) {
             TopAppBar(
                 title = {
                     Text(
-                        text = uiState.selectedFolder?.name ?: "내 녹음",
+                        text = uiState.selectedFolder ?: "내 녹음",
                         fontWeight = FontWeight.Bold
                     )
                 },
@@ -128,6 +142,7 @@ fun VoiceRecorderApp(viewModel: RecorderViewModel = viewModel()) {
             if (uiState.selectedFolder == null) {
                 FolderListScreen(
                     folders = uiState.folders,
+                    storageLocationLabel = viewModel.storageLocationLabel,
                     onFolderClick = { viewModel.openFolder(it) },
                     onAddFolderClick = { viewModel.openAddFolderDialog() },
                     onRecordClick = { requestRecordOrStart() }
@@ -162,28 +177,39 @@ fun VoiceRecorderApp(viewModel: RecorderViewModel = viewModel()) {
 // ---------------------------------------------------------------------------------
 @Composable
 fun FolderListScreen(
-    folders: List<File>,
-    onFolderClick: (File) -> Unit,
+    folders: List<FolderInfo>,
+    storageLocationLabel: String,
+    onFolderClick: (String) -> Unit,
     onAddFolderClick: () -> Unit,
     onRecordClick: () -> Unit
 ) {
     Box(modifier = Modifier.fillMaxSize()) {
-        if (folders.isEmpty()) {
-            EmptyState(
-                modifier = Modifier.align(Alignment.Center),
-                title = "폴더가 없습니다",
-                subtitle = "오른쪽 아래 + 버튼으로 폴더를 추가하세요"
+        Column(modifier = Modifier.fillMaxSize()) {
+            Text(
+                text = storageLocationLabel,
+                style = MaterialTheme.typography.labelSmall,
+                color = TextSecondary,
+                modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp)
             )
-        } else {
-            LazyColumn(
-                modifier = Modifier
-                    .fillMaxSize()
-                    .padding(horizontal = 16.dp),
-                contentPadding = PaddingValues(top = 12.dp, bottom = 120.dp),
-                verticalArrangement = Arrangement.spacedBy(10.dp)
-            ) {
-                items(folders, key = { it.absolutePath }) { folder ->
-                    FolderCard(folder = folder, onClick = { onFolderClick(folder) })
+
+            if (folders.isEmpty()) {
+                EmptyState(
+                    modifier = Modifier.weight(1f).fillMaxWidth(),
+                    title = "폴더가 없습니다",
+                    subtitle = "오른쪽 아래 + 버튼으로 폴더를 추가하세요"
+                )
+            } else {
+                LazyColumn(
+                    modifier = Modifier
+                        .weight(1f)
+                        .fillMaxWidth()
+                        .padding(horizontal = 16.dp),
+                    contentPadding = PaddingValues(top = 4.dp, bottom = 120.dp),
+                    verticalArrangement = Arrangement.spacedBy(10.dp)
+                ) {
+                    items(folders, key = { it.name }) { folder ->
+                        FolderCard(folder = folder, onClick = { onFolderClick(folder.name) })
+                    }
                 }
             }
         }
@@ -198,8 +224,7 @@ fun FolderListScreen(
 }
 
 @Composable
-fun FolderCard(folder: File, onClick: () -> Unit) {
-    val fileCount = folder.listFiles { f -> f.isFile }?.size ?: 0
+fun FolderCard(folder: FolderInfo, onClick: () -> Unit) {
     Surface(
         onClick = onClick,
         shape = RoundedCornerShape(16.dp),
@@ -234,7 +259,7 @@ fun FolderCard(folder: File, onClick: () -> Unit) {
                     style = MaterialTheme.typography.titleMedium
                 )
                 Text(
-                    text = "녹음파일 ${fileCount}개",
+                    text = "녹음파일 ${folder.recordingCount}개",
                     style = MaterialTheme.typography.bodyMedium,
                     color = TextSecondary
                 )
@@ -253,7 +278,7 @@ fun FolderCard(folder: File, onClick: () -> Unit) {
 // ---------------------------------------------------------------------------------
 @Composable
 fun FolderDetailScreen(
-    recordings: List<File>,
+    recordings: List<RecordingItem>,
     isRecording: Boolean,
     elapsedSeconds: Int,
     onRecordClick: () -> Unit
@@ -273,8 +298,8 @@ fun FolderDetailScreen(
                 contentPadding = PaddingValues(top = 12.dp, bottom = 160.dp),
                 verticalArrangement = Arrangement.spacedBy(10.dp)
             ) {
-                items(recordings, key = { it.absolutePath }) { file ->
-                    RecordingCard(file = file)
+                items(recordings, key = { it.displayName }) { item ->
+                    RecordingCard(item = item)
                 }
             }
         }
@@ -296,13 +321,16 @@ fun FolderDetailScreen(
 }
 
 @Composable
-fun RecordingCard(file: File) {
-    val dateText = remember(file) {
-        SimpleDateFormat("yyyy.MM.dd HH:mm", Locale.getDefault()).format(Date(file.lastModified()))
+fun RecordingCard(item: RecordingItem) {
+    val dateText = remember(item.dateAddedMillis) {
+        SimpleDateFormat("yyyy.MM.dd HH:mm", Locale.getDefault()).format(Date(item.dateAddedMillis))
     }
-    val sizeText = remember(file) {
-        val kb = file.length() / 1024
+    val sizeText = remember(item.sizeBytes) {
+        val kb = item.sizeBytes / 1024
         if (kb < 1024) "${kb}KB" else String.format(Locale.getDefault(), "%.1fMB", kb / 1024.0)
+    }
+    val nameWithoutExtension = remember(item.displayName) {
+        item.displayName.substringBeforeLast('.', item.displayName)
     }
     Surface(
         shape = RoundedCornerShape(16.dp),
@@ -333,7 +361,7 @@ fun RecordingCard(file: File) {
             Spacer(modifier = Modifier.width(14.dp))
             Column(modifier = Modifier.weight(1f)) {
                 Text(
-                    text = file.nameWithoutExtension,
+                    text = nameWithoutExtension,
                     style = MaterialTheme.typography.titleMedium,
                     maxLines = 1
                 )
@@ -440,7 +468,8 @@ fun RecordingIndicator(elapsedSeconds: Int) {
 fun EmptyState(modifier: Modifier = Modifier, title: String, subtitle: String) {
     Column(
         modifier = modifier.padding(32.dp),
-        horizontalAlignment = Alignment.CenterHorizontally
+        horizontalAlignment = Alignment.CenterHorizontally,
+        verticalArrangement = Arrangement.Center
     ) {
         Icon(
             Icons.Default.FolderOpen,
