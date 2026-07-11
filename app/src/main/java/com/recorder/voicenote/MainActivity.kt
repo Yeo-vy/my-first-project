@@ -1,4 +1,4 @@
-@file:OptIn(ExperimentalMaterial3Api::class)
+@file:OptIn(ExperimentalMaterial3Api::class, ExperimentalFoundationApi::class)
 
 package com.recorder.voicenote
 
@@ -15,7 +15,9 @@ import androidx.compose.animation.core.animateFloat
 import androidx.compose.animation.core.infiniteRepeatable
 import androidx.compose.animation.core.rememberInfiniteTransition
 import androidx.compose.animation.core.tween
+import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.background
+import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
@@ -62,12 +64,21 @@ fun VoiceRecorderApp(viewModel: RecorderViewModel = viewModel()) {
     val snackbarHostState = remember { SnackbarHostState() }
 
     // Android 10(API 29) 미만에서는 공용 저장소에 직접 쓰기 위해 WRITE_EXTERNAL_STORAGE 도 필요하고,
-    // Android 13(API 33) 이상에서는 알림(녹음 중 상태 표시)을 위해 POST_NOTIFICATIONS 도 필요하다.
+    // Android 10~12는 다른 앱이 만든 파일까지 읽으려면 READ_EXTERNAL_STORAGE,
+    // Android 13(API 33) 이상은 READ_MEDIA_AUDIO 와 POST_NOTIFICATIONS(녹음 중 알림 표시)가 필요하다.
     val requiredPermissions = remember {
         buildList {
             add(Manifest.permission.RECORD_AUDIO)
-            if (Build.VERSION.SDK_INT < Build.VERSION_CODES.Q) {
-                add(Manifest.permission.WRITE_EXTERNAL_STORAGE)
+            when {
+                Build.VERSION.SDK_INT < Build.VERSION_CODES.Q -> {
+                    add(Manifest.permission.WRITE_EXTERNAL_STORAGE)
+                }
+                Build.VERSION.SDK_INT < Build.VERSION_CODES.TIRAMISU -> {
+                    add(Manifest.permission.READ_EXTERNAL_STORAGE)
+                }
+                else -> {
+                    add(Manifest.permission.READ_MEDIA_AUDIO)
+                }
             }
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
                 add(Manifest.permission.POST_NOTIFICATIONS)
@@ -89,8 +100,11 @@ fun VoiceRecorderApp(viewModel: RecorderViewModel = viewModel()) {
         contract = ActivityResultContracts.RequestMultiplePermissions()
     ) { result ->
         hasPermissions = result.values.all { it }
-        if (hasPermissions && pendingRecordAfterPermission) {
-            viewModel.startRecording()
+        if (hasPermissions) {
+            viewModel.refresh()
+            if (pendingRecordAfterPermission) {
+                viewModel.startRecording()
+            }
         }
         pendingRecordAfterPermission = false
     }
@@ -100,6 +114,12 @@ fun VoiceRecorderApp(viewModel: RecorderViewModel = viewModel()) {
             viewModel.startRecording()
         } else {
             pendingRecordAfterPermission = true
+            permissionLauncher.launch(requiredPermissions.toTypedArray())
+        }
+    }
+
+    LaunchedEffect(Unit) {
+        if (!hasPermissions) {
             permissionLauncher.launch(requiredPermissions.toTypedArray())
         }
     }
@@ -144,14 +164,18 @@ fun VoiceRecorderApp(viewModel: RecorderViewModel = viewModel()) {
                     folders = uiState.folders,
                     storageLocationLabel = viewModel.storageLocationLabel,
                     onFolderClick = { viewModel.openFolder(it) },
+                    onFolderLongClick = { viewModel.requestRenameFolder(it) },
                     onAddFolderClick = { viewModel.openAddFolderDialog() },
                     onRecordClick = { requestRecordOrStart() }
                 )
             } else {
                 FolderDetailScreen(
                     recordings = uiState.recordings,
+                    playingRecordingName = uiState.playingRecordingName,
                     isRecording = uiState.isRecording,
                     elapsedSeconds = uiState.elapsedSeconds,
+                    onRecordingClick = { viewModel.onRecordingClick(it) },
+                    onRecordingLongClick = { viewModel.requestRenameRecording(it) },
                     onRecordClick = {
                         if (uiState.isRecording) {
                             viewModel.stopRecording()
@@ -163,9 +187,29 @@ fun VoiceRecorderApp(viewModel: RecorderViewModel = viewModel()) {
             }
 
             if (uiState.showAddFolderDialog) {
-                AddFolderDialog(
+                InputDialog(
+                    title = "새 폴더",
+                    placeholder = "폴더 이름",
+                    confirmLabel = "추가",
                     onDismiss = { viewModel.dismissAddFolderDialog() },
                     onConfirm = { name -> viewModel.confirmAddFolder(name) }
+                )
+            }
+
+            val renameTarget = uiState.renameTarget
+            if (renameTarget != null) {
+                val initialValue = when (renameTarget) {
+                    is RenameTarget.Folder -> renameTarget.name
+                    is RenameTarget.Recording ->
+                        renameTarget.item.displayName.substringBeforeLast('.', renameTarget.item.displayName)
+                }
+                InputDialog(
+                    title = "이름 변경",
+                    initialValue = initialValue,
+                    placeholder = "새 이름",
+                    confirmLabel = "변경",
+                    onDismiss = { viewModel.dismissRename() },
+                    onConfirm = { name -> viewModel.confirmRename(name) }
                 )
             }
         }
@@ -180,6 +224,7 @@ fun FolderListScreen(
     folders: List<FolderInfo>,
     storageLocationLabel: String,
     onFolderClick: (String) -> Unit,
+    onFolderLongClick: (String) -> Unit,
     onAddFolderClick: () -> Unit,
     onRecordClick: () -> Unit
 ) {
@@ -208,7 +253,11 @@ fun FolderListScreen(
                     verticalArrangement = Arrangement.spacedBy(10.dp)
                 ) {
                     items(folders, key = { it.name }) { folder ->
-                        FolderCard(folder = folder, onClick = { onFolderClick(folder.name) })
+                        FolderCard(
+                            folder = folder,
+                            onClick = { onFolderClick(folder.name) },
+                            onLongClick = { onFolderLongClick(folder.name) }
+                        )
                     }
                 }
             }
@@ -224,51 +273,70 @@ fun FolderListScreen(
 }
 
 @Composable
-fun FolderCard(folder: FolderInfo, onClick: () -> Unit) {
+fun FolderCard(folder: FolderInfo, onClick: () -> Unit, onLongClick: () -> Unit) {
+    var showMenu by remember { mutableStateOf(false) }
+
     Surface(
-        onClick = onClick,
         shape = RoundedCornerShape(16.dp),
         color = MaterialTheme.colorScheme.surface,
         tonalElevation = 1.dp,
         shadowElevation = 1.dp,
-        modifier = Modifier.fillMaxWidth()
-    ) {
-        Row(
-            modifier = Modifier
-                .fillMaxWidth()
-                .padding(16.dp),
-            verticalAlignment = Alignment.CenterVertically
-        ) {
-            Box(
-                modifier = Modifier
-                    .size(44.dp)
-                    .clip(RoundedCornerShape(12.dp))
-                    .background(MaterialTheme.colorScheme.primary.copy(alpha = 0.12f)),
-                contentAlignment = Alignment.Center
-            ) {
-                Icon(
-                    Icons.Default.Folder,
-                    contentDescription = null,
-                    tint = MaterialTheme.colorScheme.primary
-                )
-            }
-            Spacer(modifier = Modifier.width(14.dp))
-            Column(modifier = Modifier.weight(1f)) {
-                Text(
-                    text = folder.name,
-                    style = MaterialTheme.typography.titleMedium
-                )
-                Text(
-                    text = "녹음파일 ${folder.recordingCount}개",
-                    style = MaterialTheme.typography.bodyMedium,
-                    color = TextSecondary
-                )
-            }
-            Icon(
-                Icons.Default.ChevronRight,
-                contentDescription = null,
-                tint = TextSecondary
+        modifier = Modifier
+            .fillMaxWidth()
+            .combinedClickable(
+                onClick = onClick,
+                onLongClick = { showMenu = true }
             )
+    ) {
+        Box {
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(16.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Box(
+                    modifier = Modifier
+                        .size(44.dp)
+                        .clip(RoundedCornerShape(12.dp))
+                        .background(MaterialTheme.colorScheme.primary.copy(alpha = 0.12f)),
+                    contentAlignment = Alignment.Center
+                ) {
+                    Icon(
+                        Icons.Default.Folder,
+                        contentDescription = null,
+                        tint = MaterialTheme.colorScheme.primary
+                    )
+                }
+                Spacer(modifier = Modifier.width(14.dp))
+                Column(modifier = Modifier.weight(1f)) {
+                    Text(
+                        text = folder.name,
+                        style = MaterialTheme.typography.titleMedium
+                    )
+                    Text(
+                        text = "녹음파일 ${folder.recordingCount}개",
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = TextSecondary
+                    )
+                }
+                Icon(
+                    Icons.Default.ChevronRight,
+                    contentDescription = null,
+                    tint = TextSecondary
+                )
+            }
+
+            DropdownMenu(expanded = showMenu, onDismissRequest = { showMenu = false }) {
+                DropdownMenuItem(
+                    text = { Text("이름 변경") },
+                    leadingIcon = { Icon(Icons.Default.Edit, contentDescription = null) },
+                    onClick = {
+                        showMenu = false
+                        onLongClick()
+                    }
+                )
+            }
         }
     }
 }
@@ -279,8 +347,11 @@ fun FolderCard(folder: FolderInfo, onClick: () -> Unit) {
 @Composable
 fun FolderDetailScreen(
     recordings: List<RecordingItem>,
+    playingRecordingName: String?,
     isRecording: Boolean,
     elapsedSeconds: Int,
+    onRecordingClick: (RecordingItem) -> Unit,
+    onRecordingLongClick: (RecordingItem) -> Unit,
     onRecordClick: () -> Unit
 ) {
     Box(modifier = Modifier.fillMaxSize()) {
@@ -299,7 +370,12 @@ fun FolderDetailScreen(
                 verticalArrangement = Arrangement.spacedBy(10.dp)
             ) {
                 items(recordings, key = { it.displayName }) { item ->
-                    RecordingCard(item = item)
+                    RecordingCard(
+                        item = item,
+                        isPlaying = playingRecordingName == item.displayName,
+                        onClick = { onRecordingClick(item) },
+                        onLongClick = { onRecordingLongClick(item) }
+                    )
                 }
             }
         }
@@ -321,7 +397,14 @@ fun FolderDetailScreen(
 }
 
 @Composable
-fun RecordingCard(item: RecordingItem) {
+fun RecordingCard(
+    item: RecordingItem,
+    isPlaying: Boolean,
+    onClick: () -> Unit,
+    onLongClick: () -> Unit
+) {
+    var showMenu by remember { mutableStateOf(false) }
+
     val dateText = remember(item.dateAddedMillis) {
         SimpleDateFormat("yyyy.MM.dd HH:mm", Locale.getDefault()).format(Date(item.dateAddedMillis))
     }
@@ -334,41 +417,63 @@ fun RecordingCard(item: RecordingItem) {
     }
     Surface(
         shape = RoundedCornerShape(16.dp),
-        color = MaterialTheme.colorScheme.surface,
+        color = if (isPlaying) {
+            MaterialTheme.colorScheme.primary.copy(alpha = 0.08f)
+        } else {
+            MaterialTheme.colorScheme.surface
+        },
         tonalElevation = 1.dp,
         shadowElevation = 1.dp,
-        modifier = Modifier.fillMaxWidth()
+        modifier = Modifier
+            .fillMaxWidth()
+            .combinedClickable(
+                onClick = onClick,
+                onLongClick = { showMenu = true }
+            )
     ) {
-        Row(
-            modifier = Modifier
-                .fillMaxWidth()
-                .padding(16.dp),
-            verticalAlignment = Alignment.CenterVertically
-        ) {
-            Box(
+        Box {
+            Row(
                 modifier = Modifier
-                    .size(44.dp)
-                    .clip(CircleShape)
-                    .background(MaterialTheme.colorScheme.primary.copy(alpha = 0.12f)),
-                contentAlignment = Alignment.Center
+                    .fillMaxWidth()
+                    .padding(16.dp),
+                verticalAlignment = Alignment.CenterVertically
             ) {
-                Icon(
-                    Icons.Default.GraphicEq,
-                    contentDescription = null,
-                    tint = MaterialTheme.colorScheme.primary
-                )
+                Box(
+                    modifier = Modifier
+                        .size(44.dp)
+                        .clip(CircleShape)
+                        .background(MaterialTheme.colorScheme.primary.copy(alpha = 0.12f)),
+                    contentAlignment = Alignment.Center
+                ) {
+                    Icon(
+                        imageVector = if (isPlaying) Icons.Default.Pause else Icons.Default.PlayArrow,
+                        contentDescription = if (isPlaying) "재생 중" else "재생",
+                        tint = MaterialTheme.colorScheme.primary
+                    )
+                }
+                Spacer(modifier = Modifier.width(14.dp))
+                Column(modifier = Modifier.weight(1f)) {
+                    Text(
+                        text = nameWithoutExtension,
+                        style = MaterialTheme.typography.titleMedium,
+                        maxLines = 1
+                    )
+                    Text(
+                        text = "$dateText  ·  $sizeText",
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = TextSecondary
+                    )
+                }
             }
-            Spacer(modifier = Modifier.width(14.dp))
-            Column(modifier = Modifier.weight(1f)) {
-                Text(
-                    text = nameWithoutExtension,
-                    style = MaterialTheme.typography.titleMedium,
-                    maxLines = 1
-                )
-                Text(
-                    text = "$dateText  ·  $sizeText",
-                    style = MaterialTheme.typography.bodyMedium,
-                    color = TextSecondary
+
+            DropdownMenu(expanded = showMenu, onDismissRequest = { showMenu = false }) {
+                DropdownMenuItem(
+                    text = { Text("이름 변경") },
+                    leadingIcon = { Icon(Icons.Default.Edit, contentDescription = null) },
+                    onClick = {
+                        showMenu = false
+                        onLongClick()
+                    }
                 )
             }
         }
@@ -489,24 +594,31 @@ fun EmptyState(modifier: Modifier = Modifier, title: String, subtitle: String) {
 }
 
 @Composable
-fun AddFolderDialog(onDismiss: () -> Unit, onConfirm: (String) -> Unit) {
-    var text by remember { mutableStateOf("") }
+fun InputDialog(
+    title: String,
+    initialValue: String = "",
+    placeholder: String = "이름",
+    confirmLabel: String = "확인",
+    onDismiss: () -> Unit,
+    onConfirm: (String) -> Unit
+) {
+    var text by remember { mutableStateOf(initialValue) }
 
     AlertDialog(
         onDismissRequest = onDismiss,
-        title = { Text("새 폴더", fontWeight = FontWeight.Bold) },
+        title = { Text(title, fontWeight = FontWeight.Bold) },
         text = {
             OutlinedTextField(
                 value = text,
                 onValueChange = { text = it },
                 singleLine = true,
-                placeholder = { Text("폴더 이름") },
+                placeholder = { Text(placeholder) },
                 modifier = Modifier.fillMaxWidth()
             )
         },
         confirmButton = {
             TextButton(onClick = { onConfirm(text) }) {
-                Text("추가")
+                Text(confirmLabel)
             }
         },
         dismissButton = {

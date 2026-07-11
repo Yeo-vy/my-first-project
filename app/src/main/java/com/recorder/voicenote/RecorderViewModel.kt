@@ -10,6 +10,12 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
 
+/** 이름 변경 다이얼로그가 어떤 대상을 향한 것인지 나타낸다. */
+sealed class RenameTarget {
+    data class Folder(val name: String) : RenameTarget()
+    data class Recording(val item: RecordingItem) : RenameTarget()
+}
+
 data class RecorderUiState(
     val folders: List<FolderInfo> = emptyList(),
     // null 이면 폴더 목록(홈) 화면, 값이 있으면 해당 폴더 상세 화면
@@ -18,12 +24,16 @@ data class RecorderUiState(
     val isRecording: Boolean = false,
     val elapsedSeconds: Int = 0,
     val showAddFolderDialog: Boolean = false,
+    val renameTarget: RenameTarget? = null,
+    /** 현재 재생 중인 녹음 파일의 이름 (없으면 재생 중이 아님) */
+    val playingRecordingName: String? = null,
     val message: String? = null
 )
 
 class RecorderViewModel(application: Application) : AndroidViewModel(application) {
 
     private val store = RecordingStore(application)
+    private val playerManager = PlayerManager()
 
     private val _uiState = MutableStateFlow(RecorderUiState())
     val uiState: StateFlow<RecorderUiState> = _uiState.asStateFlow()
@@ -32,6 +42,8 @@ class RecorderViewModel(application: Application) : AndroidViewModel(application
     val storageLocationLabel: String get() = store.displayLocation
 
     init {
+        // 예전 버전에서 앱 전용 저장소에 남아있던 폴더/파일이 있다면 새 위치로 옮겨온다 (최초 1회).
+        store.migrateLegacyPrivateStorageIfNeeded()
         refreshFolders()
 
         // 실제 녹음은 RecordingService(포그라운드 서비스)가 담당한다.
@@ -69,6 +81,7 @@ class RecorderViewModel(application: Application) : AndroidViewModel(application
 
     /** 폴더를 눌러서 안으로 들어간다 (녹음 파일 목록 표시) */
     fun openFolder(folderName: String) {
+        stopPlayback()
         _uiState.value = _uiState.value.copy(
             selectedFolder = folderName,
             recordings = store.listRecordings(folderName)
@@ -78,6 +91,7 @@ class RecorderViewModel(application: Application) : AndroidViewModel(application
     /** 상세화면에서 뒤로가기 -> 폴더 목록 화면 */
     fun goBackToFolderList() {
         if (_uiState.value.isRecording) return // 녹음 중엔 못 나가게
+        stopPlayback()
         refreshFolders()
         _uiState.value = _uiState.value.copy(selectedFolder = null, recordings = emptyList())
     }
@@ -109,6 +123,7 @@ class RecorderViewModel(application: Application) : AndroidViewModel(application
             _uiState.value = _uiState.value.copy(message = "먼저 폴더를 선택해주세요")
             return
         }
+        stopPlayback()
 
         val context = getApplication<Application>()
         val intent = Intent(context, RecordingService::class.java).apply {
@@ -136,5 +151,92 @@ class RecorderViewModel(application: Application) : AndroidViewModel(application
 
     fun consumeMessage() {
         _uiState.value = _uiState.value.copy(message = null)
+    }
+
+    // ----------------------------------------------------------------------------------
+    // 재생
+    // ----------------------------------------------------------------------------------
+
+    /** 녹음 파일을 누르면 바로 재생한다. 재생 중인 파일을 다시 누르면 정지한다. */
+    fun onRecordingClick(item: RecordingItem) {
+        val context = getApplication<Application>()
+        if (_uiState.value.playingRecordingName == item.displayName) {
+            stopPlayback()
+            return
+        }
+        val started = playerManager.play(context, item.contentUri, item.filePath) {
+            // 재생이 끝까지 진행되어 자동으로 종료된 경우
+            if (_uiState.value.playingRecordingName == item.displayName) {
+                _uiState.value = _uiState.value.copy(playingRecordingName = null)
+            }
+        }
+        _uiState.value = if (started) {
+            _uiState.value.copy(playingRecordingName = item.displayName)
+        } else {
+            _uiState.value.copy(message = "재생할 수 없습니다")
+        }
+    }
+
+    fun stopPlayback() {
+        if (_uiState.value.playingRecordingName == null) return
+        playerManager.stop()
+        _uiState.value = _uiState.value.copy(playingRecordingName = null)
+    }
+
+    // ----------------------------------------------------------------------------------
+    // 이름 변경 (폴더 / 녹음 파일 길게 누르기)
+    // ----------------------------------------------------------------------------------
+
+    fun requestRenameFolder(folderName: String) {
+        _uiState.value = _uiState.value.copy(renameTarget = RenameTarget.Folder(folderName))
+    }
+
+    fun requestRenameRecording(item: RecordingItem) {
+        _uiState.value = _uiState.value.copy(renameTarget = RenameTarget.Recording(item))
+    }
+
+    fun dismissRename() {
+        _uiState.value = _uiState.value.copy(renameTarget = null)
+    }
+
+    fun confirmRename(newName: String) {
+        when (val target = _uiState.value.renameTarget) {
+            is RenameTarget.Folder -> {
+                if (newName.isNotBlank()) {
+                    val finalName = store.renameFolder(target.name, newName)
+                    refreshFolders()
+                    if (_uiState.value.selectedFolder == target.name) {
+                        _uiState.value = _uiState.value.copy(
+                            selectedFolder = finalName,
+                            recordings = store.listRecordings(finalName)
+                        )
+                    }
+                }
+            }
+            is RenameTarget.Recording -> {
+                if (newName.isNotBlank()) {
+                    val success = store.renameRecording(target.item, newName)
+                    if (!success) {
+                        _uiState.value = _uiState.value.copy(message = "이름을 변경할 수 없습니다")
+                    }
+                    refreshRecordings()
+                }
+            }
+            null -> Unit
+        }
+        _uiState.value = _uiState.value.copy(renameTarget = null)
+    }
+
+    /** 저장소 읽기 권한이 새로 승인되었을 때 등, 목록을 다시 불러와야 할 때 호출한다. */
+    fun refresh() {
+        if (_uiState.value.selectedFolder != null) {
+            refreshRecordings()
+        }
+        refreshFolders()
+    }
+
+    override fun onCleared() {
+        super.onCleared()
+        playerManager.stop()
     }
 }

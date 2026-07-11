@@ -1,4 +1,4 @@
-# 음성녹음 (VoiceRecorder) branch에서 테스트해보고있어요.
+# 음성녹음 (VoiceRecorder)
 
 Kotlin + Jetpack Compose로 만든 간단한 폴더 기반 음성녹음 앱입니다.
 
@@ -21,6 +21,16 @@ Kotlin + Jetpack Compose로 만든 간단한 폴더 기반 음성녹음 앱입�
   - Android 10(API 29) 이상: `MediaStore`(Scoped Storage) API로 저장하므로 별도의 저장소 권한이 필요 없습니다.
     단, 빈 폴더(아직 녹음이 하나도 없는 폴더)는 앱 안에서만 표시되고, 파일 관리자에는 첫 녹음이 저장된 후에 폴더가 나타납니다.
   - Android 9(API 28) 이하: 실제 디렉터리로 바로 생성되며, `저장소` 권한(WRITE_EXTERNAL_STORAGE) 허용이 필요합니다.
+- **기존에 있던 폴더/녹음파일도 자동으로 불러옵니다.**
+  - 이전 버전의 앱(앱 전용 저장소에 저장하던 버전)을 쓰고 있었다면, 최초 실행 시 자동으로
+    지금의 공용 저장 위치로 옮겨줍니다.
+  - 다른 앱이나 파일 관리자로 `Recordings/Voice Recorder` 폴더 안에 미리 넣어둔 파일이 있다면,
+    앱 실행 시 요청하는 **저장소 읽기 권한**(Android 13+: `READ_MEDIA_AUDIO`, Android 10~12:
+    `READ_EXTERNAL_STORAGE`)을 허용하면 그 파일들도 함께 표시됩니다.
+- **폴더/녹음파일 이름을 길게 누르면** "이름 변경" 버튼이 있는 메뉴가 뜨고,
+  눌러서 새 이름을 입력하면 바로 변경됩니다.
+- **녹음파일을 탭하면 바로 재생됩니다.** 재생 중인 파일을 다시 탭하면 정지하고,
+  재생이 끝까지 진행되면 자동으로 정지 상태로 돌아갑니다.
 
 ## 열기 / 실행 방법
 1. Android Studio (최신 버전 권장, Hedgehog 이상)에서 `VoiceRecorder` 폴더를 **Open**으로 엽니다.
@@ -34,9 +44,10 @@ Kotlin + Jetpack Compose로 만든 간단한 폴더 기반 음성녹음 앱입�
 app/src/main/java/com/recorder/voicenote/
  ├─ MainActivity.kt        # 전체 Compose UI (홈 화면 / 폴더 상세 화면)
  ├─ RecorderViewModel.kt   # 화면 상태 관리 (폴더 선택, 녹음 상태, 타이머 등)
- ├─ RecordingStore.kt      # 폴더/녹음파일 저장 및 조회 (MediaStore / 레거시 파일 저장 분기)
+ ├─ RecordingStore.kt      # 폴더/녹음파일 저장, 조회, 이름변경 (MediaStore / 레거시 파일 저장 분기)
  ├─ RecorderManager.kt     # MediaRecorder 시작/정지 래퍼
  ├─ RecordingService.kt    # 백그라운드에서도 녹음을 유지하는 포그라운드 서비스
+ ├─ PlayerManager.kt       # 녹음파일 재생을 담당하는 MediaPlayer 래퍼
  └─ ui/theme/              # Compose 색상 / 타이포그래피 테마
 ```
 
