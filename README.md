@@ -1,4 +1,4 @@
-# 음성녹음 (VoiceRecorder)
+# 음성녹음 (VoiceRecorder) branch에서 테스트해보고있어요.
 
 Kotlin + Jetpack Compose로 만든 간단한 폴더 기반 음성녹음 앱입니다.
 
