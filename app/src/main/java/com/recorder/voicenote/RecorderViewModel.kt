@@ -24,7 +24,11 @@ sealed class RenameTarget {
  * 그 승인을 기다리는 동안의 대기 상태를 나타낸다.
  */
 sealed class PendingWriteRequest {
-    data class FolderMove(val uris: List<Uri>, val newRelativePath: String) : PendingWriteRequest()
+    data class FolderMove(
+        val uris: List<Uri>,
+        val newRelativePath: String,
+        val oldRelativePath: String
+    ) : PendingWriteRequest()
     data class RecordingRename(val uri: Uri, val newDisplayName: String) : PendingWriteRequest()
 }
 
@@ -227,7 +231,7 @@ class RecorderViewModel(application: Application) : AndroidViewModel(application
                     if (result.pendingUris.isNotEmpty()) {
                         _uiState.value = _uiState.value.copy(
                             pendingWriteRequest = PendingWriteRequest.FolderMove(
-                                result.pendingUris, result.newRelativePath
+                                result.pendingUris, result.newRelativePath, result.oldRelativePath
                             )
                         )
                     }
@@ -284,7 +288,7 @@ class RecorderViewModel(application: Application) : AndroidViewModel(application
         if (granted) {
             when (pending) {
                 is PendingWriteRequest.FolderMove ->
-                    store.applyPendingFolderMove(pending.uris, pending.newRelativePath)
+                    store.applyPendingFolderMove(pending.uris, pending.newRelativePath, pending.oldRelativePath)
                 is PendingWriteRequest.RecordingRename ->
                     store.applyPendingRename(pending.uri, pending.newDisplayName)
             }

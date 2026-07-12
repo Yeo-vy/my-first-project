@@ -43,7 +43,8 @@ sealed class RecordingTarget {
 data class RenameFolderResult(
     val finalName: String,
     val pendingUris: List<Uri>,
-    val newRelativePath: String
+    val newRelativePath: String,
+    val oldRelativePath: String
 )
 
 /** 녹음 파일 이름 변경 결과 */
@@ -304,10 +305,10 @@ class RecordingStore(private val context: Context) {
      */
     fun renameFolder(oldName: String, newName: String): RenameFolderResult {
         val safeBase = sanitize(newName).ifBlank {
-            return RenameFolderResult(oldName, emptyList(), relativePathFor(oldName))
+            return RenameFolderResult(oldName, emptyList(), relativePathFor(oldName), relativePathFor(oldName))
         }
         if (safeBase == oldName) {
-            return RenameFolderResult(oldName, emptyList(), relativePathFor(oldName))
+            return RenameFolderResult(oldName, emptyList(), relativePathFor(oldName), relativePathFor(oldName))
         }
 
         val existing = listFolders().map { it.name }.toSet() - oldName
@@ -326,7 +327,7 @@ class RecordingStore(private val context: Context) {
             } else {
                 oldDir.renameTo(newDir)
             }
-            return RenameFolderResult(finalName, emptyList(), newRelativePath)
+            return RenameFolderResult(finalName, emptyList(), newRelativePath, relativePathFor(oldName))
         }
 
         // 빈 폴더로 등록되어 있었다면 등록된 이름도 같이 갱신
@@ -355,7 +356,11 @@ class RecordingStore(private val context: Context) {
                 if (!moved) pendingUris.add(uri)
             }
         }
-        return RenameFolderResult(finalName, pendingUris, newRelativePath)
+
+        // 모든 파일이 옮겨져서 예전 디렉터리가 비었다면, 파일탐색기에 남지 않도록 실제로 삭제한다.
+        deleteDirectoryIfEmpty(oldRelativePath)
+
+        return RenameFolderResult(finalName, pendingUris, newRelativePath, oldRelativePath)
     }
 
     /** 녹음 파일 이름을 변경한다(확장자는 유지). */
@@ -393,7 +398,7 @@ class RecordingStore(private val context: Context) {
     }
 
     /** 사용자가 시스템 승인 다이얼로그에서 허용한 뒤, 폴더 이동을 마저 적용한다. */
-    fun applyPendingFolderMove(uris: List<Uri>, newRelativePath: String) {
+    fun applyPendingFolderMove(uris: List<Uri>, newRelativePath: String, oldRelativePath: String) {
         val values = ContentValues().apply { put(MediaStore.Audio.Media.RELATIVE_PATH, newRelativePath) }
         for (uri in uris) {
             try {
@@ -401,6 +406,7 @@ class RecordingStore(private val context: Context) {
             } catch (_: Exception) {
             }
         }
+        deleteDirectoryIfEmpty(oldRelativePath)
     }
 
     /** 사용자가 시스템 승인 다이얼로그에서 허용한 뒤, 파일 이름 변경을 마저 적용한다. */
@@ -427,6 +433,27 @@ class RecordingStore(private val context: Context) {
             false
         } catch (e: Exception) {
             false
+        }
+    }
+
+    /**
+     * MediaStore 상의 RELATIVE_PATH만 바뀌었을 뿐, 실제 파일시스템에는 이제 비어버린
+     * 예전 디렉터리가 그대로 남는 경우가 있다 (파일탐색기에는 빈 폴더로 계속 보임).
+     * 더 이상 파일이 없는 게 확인되면 실제 디렉터리 자체를 지워서 깔끔하게 정리한다.
+     * 우리 앱의 최상위 컨테이너("Recordings/Voice Recorder" 자체)는 절대 지우지 않는다.
+     */
+    private fun deleteDirectoryIfEmpty(relativePath: String) {
+        if (relativePath.isBlank() || relativePath == basePath) return
+        try {
+            val dir = File(Environment.getExternalStorageDirectory(), relativePath.trimEnd('/'))
+            if (dir.exists() && dir.isDirectory) {
+                val remaining = dir.listFiles()
+                if (remaining == null || remaining.isEmpty()) {
+                    dir.delete()
+                }
+            }
+        } catch (_: Exception) {
+            // 일부 기기/버전에서 직접 파일 접근이 제한될 수 있다. 실패해도 앱 동작에는 지장이 없다.
         }
     }
 
