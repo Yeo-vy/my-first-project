@@ -1,15 +1,16 @@
+
 import os
 import re
 import shutil #파일들을 생성된 폴더 안으로 일괄 이동
+import tempfile
+import uuid
+import urllib.parse
 from google import genai
-
 # 1. API 클라이언트 초기화
 client = genai.Client(api_key="AQ.Ab8RN6Kqrr-di4lzHs5OIexGf4uGDfUw9sypL-yNvk28AxPx3A")
-
 # 2. 바탕화면 '강의 녹음 변환' 폴더 경로 자동 설정 (윈도우/맥 모두 호환)
-path = os.path.dirname(os.path.abspath(__file__))   #os.path.join(os.path.expanduser("~"), "Desktop") // C:\Users\pij19\Desktop
+path = os.path.dirname(os.path.abspath(__file__))
 target_folder = os.path.join(path, "강의 녹음 변환")
-
 # 폴더가 없다면 자동으로 생성하고 안내 후 종료
 if not os.path.exists(target_folder):
     os.makedirs(target_folder)
@@ -17,7 +18,6 @@ if not os.path.exists(target_folder):
     print("이 폴더 안에 변환할 오디오 파일(.m4a, .mp3 등)을 넣고 프로그램을 다시 실행해주세요.")
     input("종료하려면 엔터를 누르세요...")
     exit()
-
 # 폴더 안의 오디오 파일 찾기
 valid_extensions = ('.mp3', '.m4a', '.wav', '.mp4')
 audio_files = [f for f in os.listdir(target_folder) if f.lower().endswith(valid_extensions)]
@@ -29,10 +29,6 @@ if not audio_files:
 
 print(f"🔍 총 {len(audio_files)}개의 오디오 파일을 발견했습니다. 일괄 변환을 시작합니다!\n" + "="*50)
 
-
-
-
-
 # 타임스탬프 변환 함수
 def timestamp_to_seconds(ts_str):
     parts = list(map(int, ts_str.split(':')))
@@ -41,9 +37,6 @@ def timestamp_to_seconds(ts_str):
     elif len(parts) == 3:
         return parts[0] * 3600 + parts[1] * 60 + parts[2]
     return 0
-
-
-
 
 
 def move_files():
@@ -74,17 +67,13 @@ def move_files():
                 print(f"  ⚠️ 파일 이동 중 오류 발생 ({target_file}): {move_error}")
 
 
-
-
-
-
 pattern = r'\[(\d{2}:\d{2}(?::\d{2})?)\]'
 
 # 3. 발견된 오디오 파일을 하나씩 순회하며 처리
 for audio_file in audio_files:
     file_path = os.path.join(target_folder, audio_file)
     file_base_name = os.path.splitext(audio_file)[0]
-    
+
     txt_output_path = os.path.join(target_folder, f"{file_base_name}.txt")
     html_output_path = os.path.join(target_folder, f"{file_base_name}_강의스크립트.html")
     
@@ -95,12 +84,28 @@ for audio_file in audio_files:
         continue
 
     print(f"\n▶️ [{audio_file}] 작업 시작...")
-    
+
+    # 한글(비ASCII) 파일명은 업로드 시 인코딩 오류를 유발하므로,
+    # ASCII 안전한 임시 파일명으로 복사한 뒤 그 파일을 업로드한다.
+    upload_source_path = file_path
+    temp_upload_path = None
+    try:
+        file_path.encode('ascii')
+    except UnicodeEncodeError:
+        ext = os.path.splitext(file_path)[1]
+        temp_upload_path = os.path.join(tempfile.gettempdir(), f"upload_{uuid.uuid4().hex}{ext}")
+        shutil.copy2(file_path, temp_upload_path)
+        upload_source_path = temp_upload_path
+        print("   - 한글 파일명 감지: 임시 ASCII 파일명으로 업로드합니다.")
+
     try:
         # 파일 업로드 및 제미나이 처리
         print("   - Google AI Studio 서버로 업로드 중...")
-        uploaded_file = client.files.upload(file=file_path)
-        
+        uploaded_file = client.files.upload(
+            file=upload_source_path,
+            config={"display_name": "lecture_audio"}
+        )
+
         print("   - 제미나이 받아쓰기 진행 중 (시간이 소요됩니다)...")
         prompt = """
         이 오디오 파일을 처음부터 끝까지 빠짐없이 텍스트로 받아쓰기(Transcription) 해줘.
@@ -111,7 +116,7 @@ for audio_file in audio_files:
         3. 가급적 30초~40초 분량마다 문단을 나누고 새로운 타임스탬프를 갱신해서 찍어줘.
         4. 인사말이나 다른 설명 없이 오직 타임스탬프와 받아쓰기 내용만 출력해.
         """
-        
+
         response = client.models.generate_content(
             model="gemini-2.5-flash",
             contents=[uploaded_file, prompt]
@@ -125,13 +130,13 @@ for audio_file in audio_files:
 
         # 5. 인터랙티브 HTML 문서 생성 및 저장
         html_lines = []
-        last_seconds = 0 
-        
+        last_seconds = 0
+
         for line in transcript_text.split('\n'):
             line = line.strip()
             if not line:
                 continue
-            
+
             match = re.search(pattern, line)
             if match:
                 ts = match.group(1)
@@ -140,9 +145,12 @@ for audio_file in audio_files:
                 html_lines.append(f'<div class="script-block text-content" onclick="playAt({last_seconds})">{replaced_line}</div>')
             else:
                 html_lines.append(f'<div class="script-block text-content" onclick="playAt({last_seconds})">{line}</div>')
-        
+
         content_html = "\n".join(html_lines)
-        
+
+        # 오디오 src에 한글/공백이 있어도 브라우저가 깨지지 않도록 URL 인코딩
+        audio_src = urllib.parse.quote(audio_file)
+
         html_template = f"""<!DOCTYPE html>
 <html lang="ko">
 <head>
@@ -170,7 +178,7 @@ for audio_file in audio_files:
 </div>
 <div class="bottom-player-container">
     <audio id="audioPlayer" controls>
-        <source src="{audio_file}" type="audio/mp4">
+        <source src="{audio_src}" type="audio/mp4">
         브라우저가 오디오 태그를 지원하지 않습니다.
     </audio>
 </div>
@@ -189,8 +197,14 @@ for audio_file in audio_files:
         print(f"   ✔️ 인터랙티브 문서 저장 완료: {file_base_name}_강의스크립트.html")
 
         move_files()
-        
+
     except Exception as e:
         print(f"   ❌ 오류 발생: {e}")
+    finally:
+        if temp_upload_path and os.path.exists(temp_upload_path):
+            try:
+                os.remove(temp_upload_path)
+            except Exception:
+                pass
 
 print("\n✨ 모든 작업이 완료되었습니다!")
