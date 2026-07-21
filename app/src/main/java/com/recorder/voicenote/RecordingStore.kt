@@ -62,6 +62,14 @@ sealed class DeleteFolderResult {
     data class NeedsPermission(val uris: List<Uri>, val relativePath: String) : DeleteFolderResult()
 }
 
+/** 녹음 파일 하나 삭제 결과 */
+sealed class DeleteRecordingResult {
+    object Success : DeleteRecordingResult()
+    object Failed : DeleteRecordingResult()
+    /** 다른 앱이 만든 파일이라 시스템 승인이 별도로 필요한 경우 */
+    data class NeedsPermission(val uri: Uri) : DeleteRecordingResult()
+}
+
 /**
  * "내부 저장소 > Recordings > Voice Recorder > [폴더명]" 위치에 녹음 파일을 저장/조회한다.
  *
@@ -391,6 +399,35 @@ class RecordingStore(private val context: Context) {
             val oldFile = File(path)
             val newFile = File(oldFile.parentFile, newDisplayName)
             if (oldFile.renameTo(newFile)) RenameRecordingResult.Success else RenameRecordingResult.Failed
+        }
+    }
+
+    /**
+     * 녹음 파일 하나를 삭제한다. 우리 앱이 소유한 파일은 즉시 삭제되고,
+     * 다른 앱이 만들어서 권한이 없는 파일은 [DeleteRecordingResult.NeedsPermission]으로 반환된다.
+     */
+    fun deleteRecording(item: RecordingItem): DeleteRecordingResult {
+        return if (isScopedStorage) {
+            val uri = item.contentUri ?: return DeleteRecordingResult.Failed
+            try {
+                val deleted = context.contentResolver.delete(uri, null, null) > 0
+                if (deleted) DeleteRecordingResult.Success else DeleteRecordingResult.Failed
+            } catch (e: SecurityException) {
+                DeleteRecordingResult.NeedsPermission(uri)
+            } catch (e: Exception) {
+                DeleteRecordingResult.Failed
+            }
+        } else {
+            val path = item.filePath ?: return DeleteRecordingResult.Failed
+            if (File(path).delete()) DeleteRecordingResult.Success else DeleteRecordingResult.Failed
+        }
+    }
+
+    /** 사용자가 삭제 승인 다이얼로그에서 허용한 뒤, 녹음 파일 삭제를 마저 적용한다. */
+    fun applyPendingRecordingDelete(uri: Uri) {
+        try {
+            context.contentResolver.delete(uri, null, null)
+        } catch (_: Exception) {
         }
     }
 

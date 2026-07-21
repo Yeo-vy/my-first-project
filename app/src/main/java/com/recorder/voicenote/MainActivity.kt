@@ -197,9 +197,10 @@ fun VoiceRecorderApp(viewModel: RecorderViewModel = viewModel()) {
                     elapsedSeconds = uiState.elapsedSeconds,
                     onRecordingClick = { viewModel.onRecordingClick(it) },
                     onRecordingLongClick = { viewModel.requestRenameRecording(it) },
+                    onRecordingDeleteClick = { viewModel.requestDeleteRecording(it) },
                     onRecordClick = {
                         if (uiState.isRecording) {
-                            viewModel.stopRecording()
+                            viewModel.requestStopRecording()
                         } else {
                             requestRecordOrStart()
                         }
@@ -256,6 +257,45 @@ fun VoiceRecorderApp(viewModel: RecorderViewModel = viewModel()) {
                     },
                     dismissButton = {
                         TextButton(onClick = { viewModel.dismissDeleteFolder() }) {
+                            Text("취소")
+                        }
+                    }
+                )
+            }
+
+            val deleteRecordingTarget = uiState.deleteRecordingTarget
+            if (deleteRecordingTarget != null) {
+                val displayName = deleteRecordingTarget.displayName
+                    .substringBeforeLast('.', deleteRecordingTarget.displayName)
+                AlertDialog(
+                    onDismissRequest = { viewModel.dismissDeleteRecording() },
+                    title = { Text("녹음파일 삭제", fontWeight = FontWeight.Bold) },
+                    text = { Text("'$displayName' 파일을 삭제할까요?\n이 작업은 되돌릴 수 없습니다.") },
+                    confirmButton = {
+                        TextButton(onClick = { viewModel.confirmDeleteRecording() }) {
+                            Text("삭제", color = RecordingRed)
+                        }
+                    },
+                    dismissButton = {
+                        TextButton(onClick = { viewModel.dismissDeleteRecording() }) {
+                            Text("취소")
+                        }
+                    }
+                )
+            }
+
+            if (uiState.showStopConfirm) {
+                AlertDialog(
+                    onDismissRequest = { viewModel.dismissStopConfirm() },
+                    title = { Text("녹음 정지", fontWeight = FontWeight.Bold) },
+                    text = { Text("정말 녹음을 정지하시겠습니까?") },
+                    confirmButton = {
+                        TextButton(onClick = { viewModel.confirmStopRecording() }) {
+                            Text("정지", color = RecordingRed)
+                        }
+                    },
+                    dismissButton = {
+                        TextButton(onClick = { viewModel.dismissStopConfirm() }) {
                             Text("취소")
                         }
                     }
@@ -418,6 +458,7 @@ fun FolderDetailScreen(
     elapsedSeconds: Int,
     onRecordingClick: (RecordingItem) -> Unit,
     onRecordingLongClick: (RecordingItem) -> Unit,
+    onRecordingDeleteClick: (RecordingItem) -> Unit,
     onRecordClick: () -> Unit
 ) {
     Box(modifier = Modifier.fillMaxSize()) {
@@ -440,7 +481,8 @@ fun FolderDetailScreen(
                         item = item,
                         isPlaying = playingRecordingName == item.displayName,
                         onClick = { onRecordingClick(item) },
-                        onLongClick = { onRecordingLongClick(item) }
+                        onLongClick = { onRecordingLongClick(item) },
+                        onDeleteClick = { onRecordingDeleteClick(item) }
                     )
                 }
             }
@@ -467,7 +509,8 @@ fun RecordingCard(
     item: RecordingItem,
     isPlaying: Boolean,
     onClick: () -> Unit,
-    onLongClick: () -> Unit
+    onLongClick: () -> Unit,
+    onDeleteClick: () -> Unit
 ) {
     var showMenu by remember { mutableStateOf(false) }
 
@@ -539,6 +582,16 @@ fun RecordingCard(
                     onClick = {
                         showMenu = false
                         onLongClick()
+                    }
+                )
+                DropdownMenuItem(
+                    text = { Text("삭제", color = RecordingRed) },
+                    leadingIcon = {
+                        Icon(Icons.Default.Delete, contentDescription = null, tint = RecordingRed)
+                    },
+                    onClick = {
+                        showMenu = false
+                        onDeleteClick()
                     }
                 )
             }

@@ -31,6 +31,7 @@ sealed class PendingWriteRequest {
     ) : PendingWriteRequest()
     data class RecordingRename(val uri: Uri, val newDisplayName: String) : PendingWriteRequest()
     data class FolderDelete(val uris: List<Uri>, val relativePath: String) : PendingWriteRequest()
+    data class RecordingDelete(val uri: Uri) : PendingWriteRequest()
 }
 
 data class RecorderUiState(
@@ -43,6 +44,8 @@ data class RecorderUiState(
     val showAddFolderDialog: Boolean = false,
     val renameTarget: RenameTarget? = null,
     val deleteFolderTarget: String? = null,
+    val deleteRecordingTarget: RecordingItem? = null,
+    val showStopConfirm: Boolean = false,
     val pendingWriteRequest: PendingWriteRequest? = null,
     /** 현재 재생 중인 녹음 파일의 이름 (없으면 재생 중이 아님) */
     val playingRecordingName: String? = null,
@@ -150,6 +153,20 @@ class RecorderViewModel(application: Application) : AndroidViewModel(application
             putExtra(RecordingService.EXTRA_FOLDER_NAME, folder)
         }
         ContextCompat.startForegroundService(context, intent)
+    }
+
+    /** 녹음 정지 버튼을 누르면 바로 멈추지 않고 확인부터 받는다. */
+    fun requestStopRecording() {
+        _uiState.value = _uiState.value.copy(showStopConfirm = true)
+    }
+
+    fun dismissStopConfirm() {
+        _uiState.value = _uiState.value.copy(showStopConfirm = false)
+    }
+
+    fun confirmStopRecording() {
+        _uiState.value = _uiState.value.copy(showStopConfirm = false)
+        stopRecording()
     }
 
     fun stopRecording() {
@@ -261,6 +278,37 @@ class RecorderViewModel(application: Application) : AndroidViewModel(application
         _uiState.value = _uiState.value.copy(renameTarget = null)
     }
 
+    fun requestDeleteRecording(item: RecordingItem) {
+        _uiState.value = _uiState.value.copy(deleteRecordingTarget = item)
+    }
+
+    fun dismissDeleteRecording() {
+        _uiState.value = _uiState.value.copy(deleteRecordingTarget = null)
+    }
+
+    fun confirmDeleteRecording() {
+        val item = _uiState.value.deleteRecordingTarget ?: return
+        _uiState.value = _uiState.value.copy(deleteRecordingTarget = null)
+        if (_uiState.value.playingRecordingName == item.displayName) {
+            stopPlayback()
+        }
+
+        when (val result = store.deleteRecording(item)) {
+            is DeleteRecordingResult.Success -> {
+                refreshRecordings()
+                refreshFolders()
+            }
+            is DeleteRecordingResult.Failed -> {
+                _uiState.value = _uiState.value.copy(message = "삭제할 수 없습니다")
+            }
+            is DeleteRecordingResult.NeedsPermission -> {
+                _uiState.value = _uiState.value.copy(
+                    pendingWriteRequest = PendingWriteRequest.RecordingDelete(result.uri)
+                )
+            }
+        }
+    }
+
     fun requestDeleteFolder(folderName: String) {
         _uiState.value = _uiState.value.copy(deleteFolderTarget = folderName)
     }
@@ -296,6 +344,7 @@ class RecorderViewModel(application: Application) : AndroidViewModel(application
             is PendingWriteRequest.FolderMove -> store.createWriteRequestIntentSender(pending.uris)
             is PendingWriteRequest.RecordingRename -> store.createWriteRequestIntentSender(listOf(pending.uri))
             is PendingWriteRequest.FolderDelete -> store.createDeleteRequestIntentSender(pending.uris)
+            is PendingWriteRequest.RecordingDelete -> store.createDeleteRequestIntentSender(listOf(pending.uri))
             null -> null
         }
     }
@@ -324,6 +373,8 @@ class RecorderViewModel(application: Application) : AndroidViewModel(application
                     store.applyPendingRename(pending.uri, pending.newDisplayName)
                 is PendingWriteRequest.FolderDelete ->
                     store.applyPendingFolderDelete(pending.uris, pending.relativePath)
+                is PendingWriteRequest.RecordingDelete ->
+                    store.applyPendingRecordingDelete(pending.uri)
             }
             refreshFolders()
             refreshRecordings()
