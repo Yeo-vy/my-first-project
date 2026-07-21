@@ -30,6 +30,7 @@ sealed class PendingWriteRequest {
         val oldRelativePath: String
     ) : PendingWriteRequest()
     data class RecordingRename(val uri: Uri, val newDisplayName: String) : PendingWriteRequest()
+    data class FolderDelete(val uris: List<Uri>, val relativePath: String) : PendingWriteRequest()
 }
 
 data class RecorderUiState(
@@ -41,6 +42,7 @@ data class RecorderUiState(
     val elapsedSeconds: Int = 0,
     val showAddFolderDialog: Boolean = false,
     val renameTarget: RenameTarget? = null,
+    val deleteFolderTarget: String? = null,
     val pendingWriteRequest: PendingWriteRequest? = null,
     /** 현재 재생 중인 녹음 파일의 이름 (없으면 재생 중이 아님) */
     val playingRecordingName: String? = null,
@@ -259,14 +261,43 @@ class RecorderViewModel(application: Application) : AndroidViewModel(application
         _uiState.value = _uiState.value.copy(renameTarget = null)
     }
 
+    fun requestDeleteFolder(folderName: String) {
+        _uiState.value = _uiState.value.copy(deleteFolderTarget = folderName)
+    }
+
+    fun dismissDeleteFolder() {
+        _uiState.value = _uiState.value.copy(deleteFolderTarget = null)
+    }
+
+    fun confirmDeleteFolder() {
+        val folderName = _uiState.value.deleteFolderTarget ?: return
+        _uiState.value = _uiState.value.copy(deleteFolderTarget = null)
+        stopPlayback()
+
+        val result = store.deleteFolder(folderName)
+        refreshFolders()
+        if (_uiState.value.selectedFolder == folderName) {
+            _uiState.value = _uiState.value.copy(selectedFolder = null, recordings = emptyList())
+        }
+
+        when (result) {
+            is DeleteFolderResult.NeedsPermission -> {
+                _uiState.value = _uiState.value.copy(
+                    pendingWriteRequest = PendingWriteRequest.FolderDelete(result.uris, result.relativePath)
+                )
+            }
+            is DeleteFolderResult.Success -> Unit
+        }
+    }
+
     /** MainActivity가 시스템 승인 다이얼로그를 띄울 때 필요한 IntentSender를 요청한다. */
     fun writeRequestIntentSender(): IntentSender? {
-        val pending = _uiState.value.pendingWriteRequest ?: return null
-        val uris = when (pending) {
-            is PendingWriteRequest.FolderMove -> pending.uris
-            is PendingWriteRequest.RecordingRename -> listOf(pending.uri)
+        return when (val pending = _uiState.value.pendingWriteRequest) {
+            is PendingWriteRequest.FolderMove -> store.createWriteRequestIntentSender(pending.uris)
+            is PendingWriteRequest.RecordingRename -> store.createWriteRequestIntentSender(listOf(pending.uri))
+            is PendingWriteRequest.FolderDelete -> store.createDeleteRequestIntentSender(pending.uris)
+            null -> null
         }
-        return store.createWriteRequestIntentSender(uris)
     }
 
     /** IntentSender를 만들 수 없는 경우(API 30 미만 등) 대기 상태를 정리한다. */
@@ -291,6 +322,8 @@ class RecorderViewModel(application: Application) : AndroidViewModel(application
                     store.applyPendingFolderMove(pending.uris, pending.newRelativePath, pending.oldRelativePath)
                 is PendingWriteRequest.RecordingRename ->
                     store.applyPendingRename(pending.uri, pending.newDisplayName)
+                is PendingWriteRequest.FolderDelete ->
+                    store.applyPendingFolderDelete(pending.uris, pending.relativePath)
             }
             refreshFolders()
             refreshRecordings()

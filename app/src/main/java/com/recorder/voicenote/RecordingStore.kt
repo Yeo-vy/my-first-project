@@ -55,6 +55,13 @@ sealed class RenameRecordingResult {
     data class NeedsPermission(val uri: Uri, val newDisplayName: String) : RenameRecordingResult()
 }
 
+/** 폴더 삭제 결과 */
+sealed class DeleteFolderResult {
+    data class Success(val deletedCount: Int) : DeleteFolderResult()
+    /** 다른 앱이 만든 파일이 섞여 있어 삭제 승인이 별도로 필요한 경우 */
+    data class NeedsPermission(val uris: List<Uri>, val relativePath: String) : DeleteFolderResult()
+}
+
 /**
  * "내부 저장소 > Recordings > Voice Recorder > [폴더명]" 위치에 녹음 파일을 저장/조회한다.
  *
@@ -385,6 +392,86 @@ class RecordingStore(private val context: Context) {
             val newFile = File(oldFile.parentFile, newDisplayName)
             if (oldFile.renameTo(newFile)) RenameRecordingResult.Success else RenameRecordingResult.Failed
         }
+    }
+
+    /**
+     * 폴더를 통째로 삭제한다 (안의 녹음 파일 전부 포함).
+     * 우리 앱이 소유한 파일은 즉시 삭제되고, 다른 앱이 만들어서 권한이 없는 파일은
+     * [DeleteFolderResult.NeedsPermission]으로 반환된다.
+     * (최상위 가상 폴더["Voice Recorder"]를 삭제하면 그 안의 파일들만 지워지고,
+     * 앱의 저장 위치 자체는 남아있는다.)
+     */
+    fun deleteFolder(folderName: String): DeleteFolderResult {
+        if (!isScopedStorage) {
+            val dir = legacyDirFor(folderName)
+            val files = dir.listFiles { f -> f.isFile } ?: emptyArray()
+            var deletedCount = 0
+            files.forEach { if (it.delete()) deletedCount++ }
+            if (folderName != ROOT_FOLDER_NAME) {
+                dir.deleteRecursively()
+            }
+            return DeleteFolderResult.Success(deletedCount)
+        }
+
+        // 빈 폴더로 등록되어 있었다면 등록에서도 제거
+        val set = (prefs.getStringSet(KEY_FOLDER_NAMES, emptySet()) ?: emptySet()).toMutableSet()
+        if (set.remove(folderName)) {
+            prefs.edit().putStringSet(KEY_FOLDER_NAMES, set).apply()
+        }
+
+        val relativePath = relativePathFor(folderName)
+        val pendingUris = mutableListOf<Uri>()
+        var deletedCount = 0
+        val projection = arrayOf(MediaStore.Audio.Media._ID)
+        val selection = "${MediaStore.Audio.Media.RELATIVE_PATH} = ?"
+        val args = arrayOf(relativePath)
+        context.contentResolver.query(
+            MediaStore.Audio.Media.EXTERNAL_CONTENT_URI,
+            projection, selection, args, null
+        )?.use { cursor ->
+            val idCol = cursor.getColumnIndexOrThrow(MediaStore.Audio.Media._ID)
+            while (cursor.moveToNext()) {
+                val uri = ContentUris.withAppendedId(
+                    MediaStore.Audio.Media.EXTERNAL_CONTENT_URI, cursor.getLong(idCol)
+                )
+                val deleted = try {
+                    context.contentResolver.delete(uri, null, null) > 0
+                } catch (e: SecurityException) {
+                    false
+                } catch (e: Exception) {
+                    false
+                }
+                if (deleted) deletedCount++ else pendingUris.add(uri)
+            }
+        }
+
+        return if (pendingUris.isEmpty()) {
+            deleteDirectoryIfEmpty(relativePath)
+            DeleteFolderResult.Success(deletedCount)
+        } else {
+            DeleteFolderResult.NeedsPermission(pendingUris, relativePath)
+        }
+    }
+
+    /** [uris]에 대한 시스템 삭제 승인 요청(IntentSender)을 만든다. Android 11 미만이면 null. */
+    fun createDeleteRequestIntentSender(uris: List<Uri>): IntentSender? {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.R || uris.isEmpty()) return null
+        return try {
+            MediaStore.createDeleteRequest(context.contentResolver, uris).intentSender
+        } catch (e: Exception) {
+            null
+        }
+    }
+
+    /** 사용자가 삭제 승인 다이얼로그에서 허용한 뒤, 남은 항목 삭제를 마저 적용한다. */
+    fun applyPendingFolderDelete(uris: List<Uri>, relativePath: String) {
+        for (uri in uris) {
+            try {
+                context.contentResolver.delete(uri, null, null)
+            } catch (_: Exception) {
+            }
+        }
+        deleteDirectoryIfEmpty(relativePath)
     }
 
     /** [uris]에 대한 시스템 쓰기 승인 요청(IntentSender)을 만든다. Android 11 미만이면 null. */

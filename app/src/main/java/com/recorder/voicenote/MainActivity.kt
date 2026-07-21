@@ -185,6 +185,7 @@ fun VoiceRecorderApp(viewModel: RecorderViewModel = viewModel()) {
                     storageLocationLabel = viewModel.storageLocationLabel,
                     onFolderClick = { viewModel.openFolder(it) },
                     onFolderLongClick = { viewModel.requestRenameFolder(it) },
+                    onFolderDeleteClick = { viewModel.requestDeleteFolder(it) },
                     onAddFolderClick = { viewModel.openAddFolderDialog() },
                     onRecordClick = { requestRecordOrStart() }
                 )
@@ -232,6 +233,34 @@ fun VoiceRecorderApp(viewModel: RecorderViewModel = viewModel()) {
                     onConfirm = { name -> viewModel.confirmRename(name) }
                 )
             }
+
+            val deleteFolderTarget = uiState.deleteFolderTarget
+            if (deleteFolderTarget != null) {
+                val recordingCount = uiState.folders.find { it.name == deleteFolderTarget }?.recordingCount ?: 0
+                AlertDialog(
+                    onDismissRequest = { viewModel.dismissDeleteFolder() },
+                    title = { Text("폴더 삭제", fontWeight = FontWeight.Bold) },
+                    text = {
+                        Text(
+                            if (recordingCount > 0) {
+                                "'$deleteFolderTarget' 폴더와 안에 있는 녹음파일 ${recordingCount}개를 삭제할까요?\n이 작업은 되돌릴 수 없습니다."
+                            } else {
+                                "'$deleteFolderTarget' 폴더를 삭제할까요?\n이 작업은 되돌릴 수 없습니다."
+                            }
+                        )
+                    },
+                    confirmButton = {
+                        TextButton(onClick = { viewModel.confirmDeleteFolder() }) {
+                            Text("삭제", color = RecordingRed)
+                        }
+                    },
+                    dismissButton = {
+                        TextButton(onClick = { viewModel.dismissDeleteFolder() }) {
+                            Text("취소")
+                        }
+                    }
+                )
+            }
         }
     }
 }
@@ -245,6 +274,7 @@ fun FolderListScreen(
     storageLocationLabel: String,
     onFolderClick: (String) -> Unit,
     onFolderLongClick: (String) -> Unit,
+    onFolderDeleteClick: (String) -> Unit,
     onAddFolderClick: () -> Unit,
     onRecordClick: () -> Unit
 ) {
@@ -276,7 +306,8 @@ fun FolderListScreen(
                         FolderCard(
                             folder = folder,
                             onClick = { onFolderClick(folder.name) },
-                            onLongClick = { onFolderLongClick(folder.name) }
+                            onLongClick = { onFolderLongClick(folder.name) },
+                            onDeleteClick = { onFolderDeleteClick(folder.name) }
                         )
                     }
                 }
@@ -293,7 +324,12 @@ fun FolderListScreen(
 }
 
 @Composable
-fun FolderCard(folder: FolderInfo, onClick: () -> Unit, onLongClick: () -> Unit) {
+fun FolderCard(
+    folder: FolderInfo,
+    onClick: () -> Unit,
+    onLongClick: () -> Unit,
+    onDeleteClick: () -> Unit
+) {
     var showMenu by remember { mutableStateOf(false) }
 
     Surface(
@@ -354,6 +390,16 @@ fun FolderCard(folder: FolderInfo, onClick: () -> Unit, onLongClick: () -> Unit)
                     onClick = {
                         showMenu = false
                         onLongClick()
+                    }
+                )
+                DropdownMenuItem(
+                    text = { Text("삭제", color = RecordingRed) },
+                    leadingIcon = {
+                        Icon(Icons.Default.Delete, contentDescription = null, tint = RecordingRed)
+                    },
+                    onClick = {
+                        showMenu = false
+                        onDeleteClick()
                     }
                 )
             }
