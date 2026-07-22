@@ -31,7 +31,7 @@ sealed class PendingWriteRequest {
     ) : PendingWriteRequest()
     data class RecordingRename(val uri: Uri, val newDisplayName: String) : PendingWriteRequest()
     data class FolderDelete(val uris: List<Uri>, val relativePath: String) : PendingWriteRequest()
-    data class RecordingDelete(val uri: Uri) : PendingWriteRequest()
+    data class RecordingDelete(val uri: Uri, val folderName: String?) : PendingWriteRequest()
 }
 
 data class RecorderUiState(
@@ -288,6 +288,7 @@ class RecorderViewModel(application: Application) : AndroidViewModel(application
 
     fun confirmDeleteRecording() {
         val item = _uiState.value.deleteRecordingTarget ?: return
+        val folder = _uiState.value.selectedFolder
         _uiState.value = _uiState.value.copy(deleteRecordingTarget = null)
         if (_uiState.value.playingRecordingName == item.displayName) {
             stopPlayback()
@@ -295,6 +296,8 @@ class RecorderViewModel(application: Application) : AndroidViewModel(application
 
         when (val result = store.deleteRecording(item)) {
             is DeleteRecordingResult.Success -> {
+                // 마지막 파일을 지워서 0개가 되어도 폴더 자체는 앱 목록에 계속 남도록 한다.
+                if (folder != null) store.keepFolderRegistered(folder)
                 refreshRecordings()
                 refreshFolders()
             }
@@ -303,7 +306,7 @@ class RecorderViewModel(application: Application) : AndroidViewModel(application
             }
             is DeleteRecordingResult.NeedsPermission -> {
                 _uiState.value = _uiState.value.copy(
-                    pendingWriteRequest = PendingWriteRequest.RecordingDelete(result.uri)
+                    pendingWriteRequest = PendingWriteRequest.RecordingDelete(result.uri, folder)
                 )
             }
         }
@@ -373,8 +376,10 @@ class RecorderViewModel(application: Application) : AndroidViewModel(application
                     store.applyPendingRename(pending.uri, pending.newDisplayName)
                 is PendingWriteRequest.FolderDelete ->
                     store.applyPendingFolderDelete(pending.uris, pending.relativePath)
-                is PendingWriteRequest.RecordingDelete ->
+                is PendingWriteRequest.RecordingDelete -> {
                     store.applyPendingRecordingDelete(pending.uri)
+                    if (pending.folderName != null) store.keepFolderRegistered(pending.folderName)
+                }
             }
             refreshFolders()
             refreshRecordings()

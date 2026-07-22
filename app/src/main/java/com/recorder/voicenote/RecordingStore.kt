@@ -612,7 +612,7 @@ class RecordingStore(private val context: Context) {
                 }
                 // 파일이 하나도 없던 빈 폴더라도 목록에 나타나도록 폴더 이름은 등록해둔다.
                 if (!anyFileMigrated || isScopedStorage) {
-                    registerFolderName(folderDir.name)
+                    keepFolderRegistered(folderDir.name)
                 }
             }
             legacyPrivateRoot.deleteRecursively()
@@ -621,11 +621,16 @@ class RecordingStore(private val context: Context) {
         prefs.edit().putBoolean(KEY_MIGRATED_LEGACY_PRIVATE, true).apply()
     }
 
-    private fun registerFolderName(name: String) {
-        if (!isScopedStorage) return
+    /**
+     * 폴더가 앱 목록에서 사라지지 않도록 등록해둔다. (예: 폴더 안의 마지막 파일을 지워서
+     * 실제 파일이 0개가 되더라도, 사용자가 만든 폴더 자체는 계속 남아있어야 한다)
+     */
+    fun keepFolderRegistered(name: String) {
+        if (!isScopedStorage || name == ROOT_FOLDER_NAME) return
         val updated = (prefs.getStringSet(KEY_FOLDER_NAMES, emptySet()) ?: emptySet()).toMutableSet()
-        updated.add(name)
-        prefs.edit().putStringSet(KEY_FOLDER_NAMES, updated).apply()
+        if (updated.add(name)) {
+            prefs.edit().putStringSet(KEY_FOLDER_NAMES, updated).apply()
+        }
     }
 
     /** 예전 파일 하나를 새 저장 위치로 복사한다. 성공하면 true. */
