@@ -37,7 +37,10 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.core.content.ContextCompat
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.LifecycleEventObserver
 import androidx.lifecycle.viewmodel.compose.viewModel
+import androidx.compose.ui.platform.LocalLifecycleOwner
 import com.recorder.voicenote.ui.theme.RecordingRed
 import com.recorder.voicenote.ui.theme.TextSecondary
 import com.recorder.voicenote.ui.theme.VoiceRecorderTheme
@@ -64,6 +67,19 @@ fun VoiceRecorderApp(viewModel: RecorderViewModel = viewModel()) {
     val context = LocalContext.current
     val uiState by viewModel.uiState.collectAsState()
     val snackbarHostState = remember { SnackbarHostState() }
+
+    // 앱을 처음 열 때뿐 아니라, 다른 화면에 갔다가 돌아올 때마다(ON_RESUME) 항상 새로고침한다.
+    // 파일탐색기 등 앱 밖에서 폴더/파일을 조작했을 수 있기 때문.
+    val lifecycleOwner = LocalLifecycleOwner.current
+    DisposableEffect(lifecycleOwner) {
+        val observer = LifecycleEventObserver { _, event ->
+            if (event == Lifecycle.Event.ON_RESUME) {
+                viewModel.refresh()
+            }
+        }
+        lifecycleOwner.lifecycle.addObserver(observer)
+        onDispose { lifecycleOwner.lifecycle.removeObserver(observer) }
+    }
 
     // Android 10(API 29) 미만에서는 공용 저장소에 직접 쓰기 위해 WRITE_EXTERNAL_STORAGE 도 필요하고,
     // Android 10~12는 다른 앱이 만든 파일까지 읽으려면 READ_EXTERNAL_STORAGE,

@@ -127,7 +127,7 @@ class RecordingStore(private val context: Context) {
     fun listFolders(): List<FolderInfo> {
         val names = if (isScopedStorage) {
             val registered = prefs.getStringSet(KEY_FOLDER_NAMES, emptySet()) ?: emptySet()
-            (registered + queryFolderNamesFromMediaStore())
+            (registered + queryFolderNamesFromMediaStore() + queryPhysicalSubfolderNames())
                 .toSortedSet(String.CASE_INSENSITIVE_ORDER)
                 .toList()
         } else {
@@ -182,6 +182,27 @@ class RecordingStore(private val context: Context) {
         return names
     }
 
+    /** [relativePath]에 대응하는 실제 파일시스템 경로 (파일탐색기가 보는 것과 동일한 위치). */
+    private fun physicalDirFor(relativePath: String): File {
+        return File(Environment.getExternalStorageDirectory(), relativePath.trimEnd('/'))
+    }
+
+    /**
+     * MediaStore 색인과 별개로, 파일탐색기 등에서 직접 만들거나 옮긴 실제 하위 디렉터리도
+     * 폴더 목록에 잡히도록 파일시스템을 직접 확인한다. (MediaStore만 보면, 폴더 안 파일을
+     * 전부 밖으로 빼냈을 때 실제로는 폴더가 남아있는데도 앱에서는 사라져 보이는 문제가 있었다)
+     */
+    private fun queryPhysicalSubfolderNames(): Set<String> {
+        return try {
+            physicalDirFor(basePath).listFiles { f -> f.isDirectory }
+                ?.map { it.name }
+                ?.toSet()
+                ?: emptySet()
+        } catch (_: Exception) {
+            emptySet()
+        }
+    }
+
     // ----------------------------------------------------------------------------------
     // 녹음 파일 목록
     // ----------------------------------------------------------------------------------
@@ -222,7 +243,28 @@ class RecordingStore(private val context: Context) {
                     )
                 }
             }
-            items
+
+            // MediaStore가 아직 색인하지 못한 파일(파일탐색기로 방금 옮기거나 복사해 넣은 파일 등)도
+            // 최대한 함께 보여주고, 다음부터는 정식으로 색인되도록 미디어 스캔을 걸어준다.
+            try {
+                val knownNames = items.map { it.displayName }.toSet()
+                physicalDirFor(relativePath).listFiles { f -> f.isFile }?.forEach { file ->
+                    if (file.name !in knownNames) {
+                        items.add(
+                            RecordingItem(
+                                displayName = file.name,
+                                dateAddedMillis = file.lastModified(),
+                                sizeBytes = file.length(),
+                                filePath = file.absolutePath
+                            )
+                        )
+                        MediaScannerConnection.scanFile(context, arrayOf(file.absolutePath), null, null)
+                    }
+                }
+            } catch (_: Exception) {
+            }
+
+            items.sortedByDescending { it.dateAddedMillis }
         } else {
             val dir = legacyDirFor(folderName)
             dir.listFiles { f -> f.isFile }
@@ -569,7 +611,7 @@ class RecordingStore(private val context: Context) {
     private fun deleteDirectoryIfEmpty(relativePath: String) {
         if (relativePath.isBlank() || relativePath == basePath) return
         try {
-            val dir = File(Environment.getExternalStorageDirectory(), relativePath.trimEnd('/'))
+            val dir = physicalDirFor(relativePath)
             if (dir.exists() && dir.isDirectory) {
                 val remaining = dir.listFiles()
                 if (remaining == null || remaining.isEmpty()) {
