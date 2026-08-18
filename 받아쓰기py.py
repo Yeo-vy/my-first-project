@@ -4,7 +4,6 @@ import shutil
 import tempfile
 import uuid
 import urllib.parse
-import time # 🌟 휴식 기능을 위한 time 모듈 추가
 from google import genai
 from dotenv import load_dotenv
 
@@ -12,8 +11,6 @@ try:
     from pydub import AudioSegment
 except ImportError:
     print("❌ 오류: pydub 라이브러리가 설치되어 있지 않습니다.")
-    print("터미널에 'pip install pydub'를 입력하여 설치해주세요.")
-    input("종료하려면 엔터를 누르세요...")
     exit()
 
 # --- [API 키 설정] ---
@@ -22,10 +19,8 @@ api_key = os.getenv("GEMINI_API_KEY")
 
 if not api_key:
     print("❌ 오류: .env 파일에서 GEMINI_API_KEY를 찾을 수 없습니다.")
-    input("종료하려면 엔터를 누르세요...")
     exit()
 
-# 1. API 클라이언트 초기화
 client = genai.Client(api_key=api_key)
 # ---------------------
 
@@ -49,10 +44,7 @@ for root_dir, _, files in os.walk(audio_folder):
 
 if not audio_files:
     print(f"📁 [{audio_folder}] 폴더가 준비되었습니다!")
-    input("종료하려면 엔터를 누르세요...")
     exit()
-
-print(f"🔍 [녹음파일원본] 및 하위 폴더에서 총 {len(audio_files)}개의 파일을 발견했습니다.\n" + "="*50)
 
 def timestamp_to_seconds(ts_str):
     parts = list(map(int, ts_str.split(':')))
@@ -82,7 +74,6 @@ def offset_timestamps(text, offset_seconds):
             
     return re.sub(pattern, repl, text)
 
-# 분할 기준 시간 (1시간)
 CHUNK_LENGTH_MS = 60 * 60 * 1000
 pattern = r'\[(\d{2}:\d{2}(?::\d{2})?)\]'
 
@@ -99,116 +90,114 @@ for audio_file in audio_files:
     txt_output_path = os.path.join(current_result_dir, f"{file_base_name}.txt")
     html_output_path = os.path.join(current_result_dir, f"{file_base_name}_강의스크립트.html")
     
+    # 1. 최종 완성본이 이미 있으면 패스
     if os.path.exists(txt_output_path) and os.path.exists(html_output_path):
-        print(f"⏭️ [{pure_file_name}] 파일은 이미 변환 완료되어 건너뜁니다.")
+        print(f"⏭️ [{pure_file_name}] 완료된 파일입니다. 건너뜁니다.")
         continue
 
     print(f"\n▶️ [{audio_file}] 작업 시작...")
     
     try:
-        print("   - 오디오 파일을 분석하는 중입니다...")
         audio = AudioSegment.from_file(file_path)
-        total_length_ms = len(audio)
-        chunks = [audio[i:i + CHUNK_LENGTH_MS] for i in range(0, total_length_ms, CHUNK_LENGTH_MS)]
+        chunks = [audio[i:i + CHUNK_LENGTH_MS] for i in range(0, len(audio), CHUNK_LENGTH_MS)]
         print(f"   - 총 {len(chunks)}개의 조각으로 나누어 처리를 시작합니다.")
         
         full_transcript = ""
+        is_all_success = True # 🌟 모든 조각이 성공했는지 체크하는 변수
 
         for i, chunk in enumerate(chunks):
-            print(f"   - [{i+1}/{len(chunks)}] 번째 조각 처리 중...")
+            # 🌟 조각별 임시 저장 파일 경로 (예: 강의1_chunk_0.txt)
+            chunk_cache_path = os.path.join(current_result_dir, f"{file_base_name}_chunk_{i}.txt")
+            
+            # 🌟 이어하기 핵심: 이미 처리된 조각 텍스트가 있다면 API 호출 없이 바로 읽어옴
+            if os.path.exists(chunk_cache_path):
+                print(f"   - [{i+1}/{len(chunks)}] 번째 조각은 이미 완료되어 불러옵니다 (API 절약).")
+                with open(chunk_cache_path, "r", encoding="utf-8") as f:
+                    full_transcript += f.read() + "\n\n"
+                continue
+
+            print(f"   - [{i+1}/{len(chunks)}] 번째 조각 API 변환 중...")
             
             temp_chunk_path = os.path.join(tempfile.gettempdir(), f"chunk_{uuid.uuid4().hex}.mp3")
             chunk.export(temp_chunk_path, format="mp3")
             
-            success = False
-            
-            # 🌟 에러 발생 시 최대 3번까지 재시도하는 로직
-            for attempt in range(3):
-                try:
-                    uploaded_file = client.files.upload(
-                        file=temp_chunk_path,
-                        config={"display_name": f"lecture_chunk_{i+1}"}
-                    )
+            try:
+                uploaded_file = client.files.upload(
+                    file=temp_chunk_path,
+                    config={"display_name": f"lecture_chunk_{i+1}"}
+                )
 
-                    prompt = """
-                    이 오디오 파일을 처음부터 끝까지 빠짐없이 텍스트로 받아쓰기(Transcription) 해줘.
-                    작성할 때 아래의 규칙을 아주 엄격하게 지켜야 해:
-                    1. 문단이 바뀌거나 내용이 전환될 때마다 반드시 문장 맨 앞에 [MM:SS] 형식으로 정확한 타임스탬프를 적어줘.
-                    2. 절대 동일한 타임스탬프(예: [00:00])를 연속해서 여러 번 출력하지 마! 시간이 흐름에 따라 반드시 증가해야 해.
-                    3. 가급적 30초~40초 분량마다 문단을 나누고 새로운 타임스탬프를 갱신해서 찍어줘.
-                    4. 인사말이나 다른 설명 없이 오직 타임스탬프와 받아쓰기 내용만 출력해.
-                    """
+                prompt = """
+                이 오디오 파일을 처음부터 끝까지 빠짐없이 텍스트로 받아쓰기(Transcription) 해줘.
+                작성할 때 아래 규칙을 엄격하게 지켜:
+                1. 문단이 바뀔 때마다 맨 앞에 [MM:SS] 타임스탬프를 적어줘.
+                2. 동일한 타임스탬프 연속 출력 금지, 시간은 증가해야 해.
+                3. 인사말 없이 타임스탬프와 텍스트만 출력해.
+                """
 
-                    response = client.models.generate_content(
-                        model="gemini-2.5-flash",
-                        contents=[uploaded_file, prompt]
-                    )
+                response = client.models.generate_content(
+                    model="gemini-2.5-flash",
+                    contents=[uploaded_file, prompt]
+                )
+                
+                offset_seconds = i * (CHUNK_LENGTH_MS // 1000)
+                adjusted_text = offset_timestamps(response.text, offset_seconds)
+                
+                # 🌟 API 변환 성공 시: 해당 조각만 따로 텍스트로 저장 (세이브 포인트)
+                with open(chunk_cache_path, "w", encoding="utf-8") as f:
+                    f.write(adjusted_text)# type: ignore #VSCODE에서 static type checking을 켜면 오류가 나서 ignore 처리함
                     
-                    success = True
-                    break # 성공 시 재시도 반복문을 빠져나감
-                    
-                except Exception as api_err:
-                    print(f"     ⚠️ API 호출 에러 발생! 서버가 바쁩니다. 60초 대기 후 재시도합니다... (시도 {attempt+1}/3)")
-                    time.sleep(60)
-            
-            # 3번 모두 실패했을 경우 처리
-            if not success:
-                print(f"   ❌ [{i+1}/{len(chunks)}] 번째 조각에서 최종 실패했습니다. 지금까지 작업한 내용만 우선 저장합니다.")
-                break # 전체 조각 for문을 빠져나가서 HTML 저장 단계로 넘어감
-            
-            offset_seconds = i * (CHUNK_LENGTH_MS // 1000)
-            adjusted_text = offset_timestamps(response.text, offset_seconds)
-            
-            full_transcript += adjusted_text + "\n\n"
-            
-            # 🌟 한 조각이 성공할 때마다 즉시 중간 저장 (데이터 유실 완벽 차단)
+                full_transcript += adjusted_text + "\n\n"# type: ignore #VSCODE에서 static type checking을 켜면 오류가 나서 ignore 처리함
+                
+            except Exception as api_err:
+                print(f"   ❌ [{i+1}/{len(chunks)}] 번째 조각에서 API 한도 초과 등으로 실패했습니다.")
+                print(f"   ⚠️ 에러 내용: {api_err}")
+                print(f"   ⏸️ 내일 다시 실행하면 실패한 [{i+1}] 번째 조각부터 이어하기가 진행됩니다.")
+                is_all_success = False
+                break # 더 이상 진행하지 않고 중단
+                
+            finally:
+                if os.path.exists(temp_chunk_path):
+                    os.remove(temp_chunk_path)
+
+        # ==========================================
+        # 🌟 모든 조각이 100% 성공했을 때만 최종 HTML/TXT 생성
+        # ==========================================
+        if is_all_success:
             with open(txt_output_path, "w", encoding="utf-8") as f:
                 f.write(full_transcript.strip())
             
-            if os.path.exists(temp_chunk_path):
-                os.remove(temp_chunk_path)
-            '''
-            # 🌟 다음 조각으로 넘어가기 전 15초 휴식 (단, 마지막 조각은 제외)
-            if i < len(chunks) - 1 and success:
-                print("   - API 한도 보호를 위해 15초간 휴식합니다... ☕")
-                time.sleep(15)
-            '''
-        # 5. HTML 자막 블록 생성
-        html_lines = []
-        last_seconds = 0
+            html_lines = []
+            last_seconds = 0
+            for line in full_transcript.strip().split('\n'):
+                line = line.strip()
+                if not line: continue
 
-        for line in full_transcript.strip().split('\n'):
-            line = line.strip()
-            if not line:
-                continue
+                match = re.search(pattern, line)
+                if match:
+                    ts = match.group(1)
+                    last_seconds = timestamp_to_seconds(ts)
+                    text_only = line.replace(f"[{ts}]", "").strip()
+                    html_lines.append(
+                        f'<div class="script-block" data-ts="[{ts}]" data-seconds="{last_seconds}">'
+                        f'<span class="timestamp" onclick="playAt({last_seconds})" title="오디오 재생">[{ts}] 🔊</span> '
+                        f'<p class="text-content" contenteditable="true">{text_only}</p></div>'
+                    )
+                else:
+                    html_lines.append(
+                        f'<div class="script-block" data-seconds="{last_seconds}">'
+                        f'<p class="text-content" contenteditable="true">{line}</p></div>'
+                    )
 
-            match = re.search(pattern, line)
-            if match:
-                ts = match.group(1)
-                last_seconds = timestamp_to_seconds(ts)
-                text_only = line.replace(f"[{ts}]", "").strip()
-                
-                html_lines.append(
-                    f'<div class="script-block" data-ts="[{ts}]" data-seconds="{last_seconds}">'
-                    f'<span class="timestamp" onclick="playAt({last_seconds})" title="클릭하여 오디오 재생">[{ts}] 🔊</span> '
-                    f'<p class="text-content" contenteditable="true" title="클릭하여 자막 수정">{text_only}</p>'
-                    f'</div>'
-                )
-            else:
-                html_lines.append(
-                    f'<div class="script-block" data-seconds="{last_seconds}">'
-                    f'<p class="text-content" contenteditable="true" title="클릭하여 자막 수정">{line}</p>'
-                    f'</div>'
-                )
+            content_html = "\n".join(html_lines)
+            
+            rel_audio_path = os.path.relpath(file_path, current_result_dir)
+            safe_parts = [urllib.parse.quote(p) for p in rel_audio_path.replace('\\', '/').split('/')]
+            audio_src = "/".join(safe_parts)
+            mime_type = "audio/mpeg" if ext == ".mp3" else "audio/wav" if ext == ".wav" else "audio/mp4"
 
-        content_html = "\n".join(html_lines)
-        
-        rel_audio_path = os.path.relpath(file_path, current_result_dir)
-        safe_parts = [urllib.parse.quote(p) for p in rel_audio_path.replace('\\', '/').split('/')]
-        audio_src = "/".join(safe_parts)
-        mime_type = "audio/mpeg" if ext == ".mp3" else "audio/wav" if ext == ".wav" else "audio/mp4"
-
-        html_template = f"""<!DOCTYPE html>
+            # (HTML 템플릿 부분은 이전과 완전히 동일하므로 간략화하여 결합)
+            html_template = f"""<!DOCTYPE html>
 <html lang="ko">
 <head>
     <meta charset="UTF-8">
@@ -236,23 +225,20 @@ for audio_file in audio_files:
 </head>
 <body>
 <div class="main-container">
-    <h2 style="font-size: 22px; margin-bottom: 30px; border-bottom: 2px solid #333; padding-bottom: 10px;">📝 강의 스크립트 (수정 감지 시 자동 저장 & 싱크 스크롤)</h2>
+    <h2 style="font-size: 22px; margin-bottom: 30px; border-bottom: 2px solid #333; padding-bottom: 10px;">📝 강의 스크립트</h2>
     <div class="transcript-box">
         {content_html}
     </div>
 </div>
-
 <button class="save-btn" onclick="exportToFile()">💾 .txt 파일로 다운로드</button>
 <div id="toast">저장되었습니다</div>
-
 <div class="bottom-player-container">
-    <div class="shortcut-info">⌨️ 단축키 안내 : [F2] 재생/일시정지 | [F1] 5초 이전 | [F3] 5초 이후 | [Ctrl+S] 브라우저 내 임시 저장</div>
+    <div class="shortcut-info">⌨️ 단축키 : [F2] 재생/일시정지 | [F1] 5초 이전 | [F3] 5초 이후 | [Ctrl+S] 임시 저장</div>
     <audio id="audioPlayer" controls>
         <source src="{audio_src}" type="{mime_type}">
         브라우저가 오디오 태그를 지원하지 않습니다.
     </audio>
 </div>
-
 <script>
     const STORAGE_KEY = "transcript_v2_{file_base_name}";
     let isModified = false;
@@ -263,39 +249,27 @@ for audio_file in audio_files:
         player.currentTime = seconds;
         player.play();
     }}
-
     function showToast() {{
         var toast = document.getElementById("toast");
         toast.classList.add("show");
-        setTimeout(function() {{
-            toast.classList.remove("show");
-        }}, 2000);
+        setTimeout(function() {{ toast.classList.remove("show"); }}, 2000);
     }}
-
     function saveToLocal() {{
         const containerClone = document.querySelector('.transcript-box').cloneNode(true);
         containerClone.querySelectorAll('.script-block.active').forEach(el => el.classList.remove('active'));
         localStorage.setItem(STORAGE_KEY, containerClone.innerHTML);
         showToast();
     }}
-
     function exportToFile() {{
         let newContent = "";
-        const blocks = document.querySelectorAll('.script-block');
-        
-        blocks.forEach(block => {{
+        document.querySelectorAll('.script-block').forEach(block => {{
             const ts = block.getAttribute('data-ts');
             const textElement = block.querySelector('.text-content');
             if (textElement) {{
                 const text = textElement.innerText.trim();
-                if (ts) {{
-                    newContent += ts + " " + text + "\\n\\n";
-                }} else {{
-                    newContent += text + "\\n\\n";
-                }}
+                newContent += (ts ? ts + " " : "") + text + "\\n\\n";
             }}
         }});
-
         const blob = new Blob([newContent], {{type: "text/plain;charset=utf-8"}});
         const url = URL.createObjectURL(blob);
         const link = document.createElement("a");
@@ -306,100 +280,62 @@ for audio_file in audio_files:
         document.body.removeChild(link);
         URL.revokeObjectURL(url);
     }}
-
     window.addEventListener('DOMContentLoaded', () => {{
         const savedData = localStorage.getItem(STORAGE_KEY);
-        if (savedData) {{
-            document.querySelector('.transcript-box').innerHTML = savedData;
-        }}
+        if (savedData) document.querySelector('.transcript-box').innerHTML = savedData;
     }});
-
-    document.querySelector('.transcript-box').addEventListener('focusin', function(e) {{
-        if (e.target.classList.contains('text-content')) {{
-            isUserEditing = true;
-        }}
+    document.querySelector('.transcript-box').addEventListener('focusin', e => {{
+        if (e.target.classList.contains('text-content')) isUserEditing = true;
     }});
-
-    document.querySelector('.transcript-box').addEventListener('input', function(e) {{
-        if (e.target.classList.contains('text-content')) {{
-            isModified = true;
-        }}
+    document.querySelector('.transcript-box').addEventListener('input', e => {{
+        if (e.target.classList.contains('text-content')) isModified = true;
     }});
-
-    document.querySelector('.transcript-box').addEventListener('focusout', function(e) {{
+    document.querySelector('.transcript-box').addEventListener('focusout', e => {{
         if (e.target.classList.contains('text-content')) {{
             isUserEditing = false; 
-            if (isModified) {{
-                saveToLocal();
-                isModified = false;
-            }}
+            if (isModified) {{ saveToLocal(); isModified = false; }}
         }}
     }});
-
     const audio = document.getElementById('audioPlayer');
     let currentActiveBlock = null;
-
     audio.addEventListener('timeupdate', () => {{
         const currentTime = audio.currentTime;
         const blocks = document.querySelectorAll('.script-block[data-seconds]');
         let activeBlock = null;
-
         for (let i = 0; i < blocks.length; i++) {{
-            if (parseFloat(blocks[i].dataset.seconds) <= currentTime) {{
-                activeBlock = blocks[i];
-            }}
+            if (parseFloat(blocks[i].dataset.seconds) <= currentTime) activeBlock = blocks[i];
         }}
-
         if (activeBlock && activeBlock !== currentActiveBlock) {{
-            if (currentActiveBlock) {{
-                currentActiveBlock.classList.remove('active');
-            }}
+            if (currentActiveBlock) currentActiveBlock.classList.remove('active');
             activeBlock.classList.add('active');
             currentActiveBlock = activeBlock;
-
-            if (!isUserEditing) {{
-                activeBlock.scrollIntoView({{ behavior: 'smooth', block: 'center' }});
-            }}
+            if (!isUserEditing) activeBlock.scrollIntoView({{ behavior: 'smooth', block: 'center' }});
         }}
     }});
-
-    document.addEventListener('keydown', function(e) {{
+    document.addEventListener('keydown', e => {{
         var player = document.getElementById('audioPlayer');
-        
         if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 's') {{
-            e.preventDefault(); 
-            saveToLocal();      
-            isModified = false; 
+            e.preventDefault(); saveToLocal(); isModified = false; 
         }}
-        
-        if (e.key === 'F2') {{
-            e.preventDefault();
-            if (player.paused) {{
-                player.play();
-            }} else {{
-                player.pause();
-            }}
-        }}
-        
-        if (e.key === 'F1') {{
-            e.preventDefault();
-            player.currentTime = Math.max(0, player.currentTime - 5);
-        }}
-        
-        if (e.key === 'F3') {{
-            e.preventDefault();
-            player.currentTime = Math.min(player.duration || 0, player.currentTime + 5);
-        }}
+        if (e.key === 'F2') {{ e.preventDefault(); player.paused ? player.play() : player.pause(); }}
+        if (e.key === 'F1') {{ e.preventDefault(); player.currentTime = Math.max(0, player.currentTime - 5); }}
+        if (e.key === 'F3') {{ e.preventDefault(); player.currentTime = Math.min(player.duration || 0, player.currentTime + 5); }}
     }});
 </script>
 </body>
-</html>
-"""
-        with open(html_output_path, "w", encoding="utf-8") as f:
-            f.write(html_template)
-        print(f"   ✔️ 인터랙티브 문서 저장 완료: {file_base_name}_강의스크립트.html")
+</html>"""
+            with open(html_output_path, "w", encoding="utf-8") as f:
+                f.write(html_template)
+            
+            # (선택 사항) 최종 완성되었으므로 지저분한 임시 chunk.txt 파일들 삭제
+            for i in range(len(chunks)):
+                chunk_cache_path = os.path.join(current_result_dir, f"{file_base_name}_chunk_{i}.txt")
+                if os.path.exists(chunk_cache_path):
+                    os.remove(chunk_cache_path)
+                    
+            print(f"   ✔️ 모든 조각 결합 완료! 인터랙티브 문서 저장 완료: {file_base_name}_강의스크립트.html")
 
     except Exception as e:
         print(f"   ❌ 오류 발생: {e}")
 
-print("\n✨ 모든 작업이 완료되었습니다!")
+print("\n✨ 프로그램 실행이 종료되었습니다.")
