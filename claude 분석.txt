@@ -1,0 +1,116 @@
+셸이 Y: 드라이브에 접근하지 못해(네트워크 드라이브로 보입니다) git 명령은 못 돌렸고, 파일 읽기만으로 분석했습니다.
+
+---
+
+# 전체 구조
+
+`Y:\daglo 구현하기` 한 폴더 안에 **성격이 다른 3개**가 들어있습니다.
+
+| #   | 프로젝트                               | 스택                              | 상태                           |
+| --- | -------------------------------------- | --------------------------------- | ------------------------------ |
+| 1   | **강의 녹음 받아쓰기 AI** (daglo 대체) | Python + Gemini 2.5 Flash + pydub | 동작 중, 서버 자동화까지 완료  |
+| 2   | **VoiceRecorder** 안드로이드 앱        | Kotlin + Jetpack Compose          | 동작 중, 기능 대부분 완성      |
+| 3   | `MiraeAsset_AIFestival/`               | Python + FastAPI + DuckDB + HCX   | **중첩 git 저장소**, untracked |
+
+1번과 2번은 하나의 파이프라인입니다:
+
+```
+[폰] VoiceRecorder 앱 ─ m4a 녹음
+   └→ Recordings/Voice Recorder/[폴더명]/
+[PC] RaiDrive(SFTP) ──┐
+                      ├→ Azure VM ~/my_files
+[웹] Filebrowser  ────┘        │
+                      inotifywait (debounce 5s + lock)
+                               │
+                      받아쓰기py.py ─ 1시간 청크 → Gemini → 타임스탬프 보정
+                               │
+                      강의 녹음 변환/[폴더]/*.txt + *_강의스크립트.html
+```
+
+`서버만들기.txt`에 기록된 Debounce+Mutex 설계는 실제로 잘 잡은 구조입니다. SFTP 복사가 `close_write`를 여러 번 던지는 문제를 트리거 파일 타이머로 흡수하고, 락으로 중복 실행을 막은 건 정석입니다.
+
+---
+
+# 1. 받아쓰기py.py
+
+**좋은 점** — 청크별 `_chunk_N.txt` 세이브포인트(`받아쓰기py.py:110-117`)로 429가 나도 다음 날 이어하기가 되고, 전 청크 성공 시에만 최종본을 쓰고 캐시를 지우는 원자성(`:166`, `:331-334`)이 잡혀 있습니다. `offset_timestamps`로 청크 경계 타임스탬프를 누적 보정하는 것도 정확합니다.
+
+**미해결 3건에 대한 답**
+
+**① 한글 파일명 `'ascii' codec can't encode` 오류**
+파이썬 코드 문제가 아니라 **서버 로케일** 문제입니다. systemd 서비스는 유저 셸 환경을 물려받지 않아 `LANG`이 `POSIX`(=ascii)로 뜨고, 그 상태에서 pydub가 ffmpeg를 subprocess로 부를 때 한글 경로 인코딩에서 터집니다. `file-watcher.service`와 파이썬 실행 유닛 양쪽에 추가하세요.
+
+```ini
+[Service]
+Environment=LANG=C.UTF-8
+Environment=LC_ALL=C.UTF-8
+Environment=PYTHONUTF8=1
+```
+
+**② HTML 수정 → txt 실시간 동기화**
+지금은 편집분이 `localStorage`(`:243`, `:260`)에만 들어가서 **서버 txt와 영구히 분리**됩니다. 게다가 키가 파일명 기반이라 파일 이름을 바꾸면 편집본이 사라지고, HTML을 재생성해도 localStorage가 우선 적용돼 새 내용이 안 보입니다.
+서버가 이미 있으니 Filebrowser 옆에 작은 FastAPI 하나 띄우고 `focusout` 시 `fetch(PUT /save)` → 서버가 txt·html을 함께 갱신하는 게 가장 짧은 길입니다. localStorage는 오프라인 백업으로만 남기고요.
+
+**③ 유료 키 자동 폴백** — README 메모에만 있고 코드에는 없습니다. `except` 블록(`:152`)에서 바로 `break`하는 대신 키 리스트를 순회하도록 바꾸면 됩니다.
+
+**발견한 버그·리스크**
+
+- **출력 잘림이 조용히 통과합니다** (가장 위험). 1시간 청크의 한국어 받아쓰기는 출력 3만 토큰을 넘길 수 있는데 `finish_reason`을 확인하지 않아(`:138-144`), `MAX_TOKENS`로 잘려도 그대로 저장되고 캐시까지 남습니다. **`CHUNK_LENGTH_MS`를 15~20분으로 줄이고 `finish_reason` 검사를 추가**하세요. 지금 구조상 이어하기 세이브포인트가 있으니 청크를 잘게 써도 손해가 없습니다.
+- **HTML 이스케이프 누락** (`:184`, `:189`). 받아쓰기 결과에 `<`나 `&`가 들어가면 문서가 깨집니다. `html.escape(text_only)` 한 줄이면 됩니다.
+- **mp3 재인코딩 낭비** (`:122`). m4a(AAC 128k) → mp3 기본 비트레이트로 다시 굽습니다. STT 목적이면 `chunk.set_frame_rate(16000).set_channels(1).export(..., bitrate="32k")`로 충분하고, 업로드 용량과 시간이 크게 줄어듭니다.
+- 청크 경계에 오버랩이 없어 60분 지점 문장이 잘립니다. 30초 정도 겹치고 중복 제거하는 방식이 일반적입니다.
+- 업로드한 파일을 `client.files.delete()`로 정리하지 않습니다(48시간 후 자동 삭제되긴 합니다).
+- 오디오 원본을 옮기면 HTML의 상대경로 `../녹음파일원본/...`(`:194-196`)이 깨져 재생이 안 됩니다.
+- 타임스탬프가 STT 세그먼트가 아니라 LLM 생성값이라 정확도가 낮습니다. 메모에 적으신 "1분 단위 대분류 + 그 안의 자막"을 하려면 이 부분이 병목이 됩니다.
+
+---
+
+# 2. VoiceRecorder (Android)
+
+MediaStore/레거시 분기(`RecordingStore.kt:83-121`), 포그라운드 서비스 위임, `createWriteRequest`/`createDeleteRequest` 승인 플로우까지 스코프드 스토리지 대응이 꼼꼼합니다. 특히 MediaStore 색인과 실제 파일시스템을 **둘 다** 확인하는 처리(`:195-204`, `:247-265`)는 실제로 겪은 문제를 제대로 해결한 코드입니다.
+
+**버그**
+
+- **`isSecurityRestricted()`가 인자를 전혀 안 씁니다** (`RecordingStore.kt:627-630`). `SDK_INT >= R`만 반환하므로 Android 11+에서는 이름 변경 실패 원인이 무엇이든(중복 이름, 잘못된 문자 등) 항상 시스템 승인 다이얼로그가 뜨고, 승인해도 또 실패합니다. `catch (e: RecoverableSecurityException)`로 실제 원인을 구분하세요.
+- **타이머가 실제 녹음 길이와 어긋납니다** (`RecordingService.kt:148-155`). `delay(1000)` 누적이라 doze/스로틀링에서 드리프트가 쌓입니다. 1~3시간 강의 녹음이 주 용도라 눈에 띌 겁니다. `SystemClock.elapsedRealtime()` 기준으로 바꾸세요.
+- **녹음 중 프로세스가 죽으면 파일이 유실됩니다.** `START_NOT_STICKY`(`:80`)라 재시작이 안 되고, `IS_PENDING=1`로 남은 항목은 목록 쿼리(`RecordingStore.kt:221`)에서 걸러져 보이지도 않습니다. 앱 시작 시 자기 소유의 pending 항목을 정리·복구하는 로직이 필요합니다.
+
+**성능**
+
+- `listFolders()`가 폴더마다 `listRecordings()`를 다시 돌립니다(`RecordingStore.kt:139`) — N+1 쿼리. 개수만 필요하니 `RELATIVE_PATH` GROUP BY 한 번으로 끝낼 수 있습니다.
+- 이 모든 게 `RecorderViewModel.init`의 메인 스레드에서 실행됩니다(`RecorderViewModel.kt:66-69`). 마이그레이션은 파일 복사까지 하므로 파일이 많으면 ANR 위험이 있습니다. `viewModelScope.launch(Dispatchers.IO)`로 감싸세요.
+
+**남은 TODO(일시정지 버튼)** — `minSdk 24`라 `MediaRecorder.pause()/resume()`(API 24)를 바로 쓸 수 있습니다.
+
+**녹음 설정** — AAC 128kbps / 44.1kHz(`RecorderManager.kt:32-33`)는 음악용 스펙입니다. 강의 음성이면 32~64kbps / 16kHz 모노로 충분하고, **파일이 1/4로 줄어 SFTP 전송과 Gemini 업로드가 그만큼 빨라집니다.** 파이프라인 전체에서 가장 체감되는 개선일 겁니다.
+
+---
+
+# 3. 저장소 위생 — 확인이 필요한 항목
+
+**`MiraeAsset_AIFestival/`의 소스가 워킹트리에 없습니다.** `README.md`·`DESIGN.md`·`CODEMAP.md`·`Dockerfile`·`requirements*.txt`·`.env`·`.venv`만 있고, CODEMAP이 설명하는 `disclosure_agent/`, `scripts/`, `goldset/`이 하나도 안 보입니다. `.venv`도 패키지가 일부만 있어서, **네트워크 드라이브 동기화가 덜 됐거나 복사가 중단된 것**으로 보입니다. README에 제출 마감(09.06)과 배포 서버가 적혀 있으니 이건 먼저 확인하세요.
+
+```
+git -C "MiraeAsset_AIFestival" status
+git -C "MiraeAsset_AIFestival" log --oneline -5
+```
+
+**그 밖에**
+
+- `MiraeAsset_AIFestival`은 **중첩 git 저장소**인데 바깥 저장소에서 untracked입니다. 이 상태로 `git add .`를 하면 내용 없이 gitlink 하나만 커밋됩니다. 별도 폴더로 빼내는 게 맞습니다.
+- 바깥 저장소 하나에 Python STT와 Android 앱이 루트에서 섞여 있습니다. `.gitignore`가 Python용이라 Gradle 산출물(`app/build/`, `.gradle/`, `local.properties`)이 안 걸러집니다 — 지금은 빌드를 안 해서 안 잡힌 것뿐입니다.
+- `.venv`를 네트워크 드라이브에 두면 느리고 깨지기 쉽습니다. 로컬 디스크로 옮기세요.
+- 루트 `.env`는 `.gitignore`에 있습니다(양호). 커밋 이력의 키 노출은 이미 재발급하셨으니 정리된 것으로 봅니다.
+
+---
+
+# 우선순위 제안
+
+1. `MiraeAsset_AIFestival` 소스 유실 여부 확인 — 마감이 걸려 있음
+2. 청크 길이 축소 + `finish_reason` 검사 — 받아쓰기 내용이 조용히 잘리는 걸 막음
+3. systemd 로케일 설정 — 한글 파일명 오류 해결
+4. 녹음 비트레이트 하향 — 파이프라인 전체 속도 개선
+5. HTML→txt 서버 저장 API — 미해결 ② 해결
+6. `isSecurityRestricted` 수정 + 타이머 드리프트 수정
+
+원하시면 이 중 아무거나 바로 고쳐드리겠습니다. 다만 셸이 Y: 드라이브를 못 봐서 빌드·테스트 검증은 못 합니다 — 로컬 디스크로 옮기시거나, 제가 파일 수정만 하고 실행은 직접 하시는 방식이 됩니다.
