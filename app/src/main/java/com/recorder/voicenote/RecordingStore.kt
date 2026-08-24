@@ -1,5 +1,6 @@
 package com.recorder.voicenote
 
+import android.app.RecoverableSecurityException
 import android.content.ContentUris
 import android.content.ContentValues
 import android.content.Context
@@ -125,6 +126,8 @@ class RecordingStore(private val context: Context) {
     // ----------------------------------------------------------------------------------
 
     fun listFolders(): List<FolderInfo> {
+        val counts = queryRecordingCountsByPath()
+        fun countFor(folderName: String): Int = counts[relativePathFor(folderName)] ?: 0
         val names = if (isScopedStorage) {
             val registered = prefs.getStringSet(KEY_FOLDER_NAMES, emptySet()) ?: emptySet()
             (registered + queryFolderNamesFromMediaStore() + queryPhysicalSubfolderNames())
@@ -136,7 +139,36 @@ class RecordingStore(private val context: Context) {
             val all = if (hasRootLevelFiles) subDirs + ROOT_FOLDER_NAME else subDirs
             all.distinct().sortedBy { it.lowercase(Locale.getDefault()) }
         }
-        return names.map { FolderInfo(it, listRecordings(it).size) }
+        return names.map { FolderInfo(it, countFor(it)) }
+    }
+
+    /** 폴더별 녹음 개수를 한 번의 조회로 센다. (폴더마다 목록 쿼리를 다시 돌리는 N+1 방지) */
+    private fun queryRecordingCountsByPath(): Map<String, Int> {
+        if (!isScopedStorage) {
+            val counts = mutableMapOf<String, Int>()
+            counts[relativePathFor(ROOT_FOLDER_NAME)] =
+                legacyRootDir.listFiles { f -> f.isFile }?.size ?: 0
+            legacyRootDir.listFiles { f -> f.isDirectory }?.forEach { dir ->
+                counts["${basePath}${dir.name}/"] = dir.listFiles { f -> f.isFile }?.size ?: 0
+            }
+            return counts
+        }
+
+        val counts = mutableMapOf<String, Int>()
+        val projection = arrayOf(MediaStore.Audio.Media.RELATIVE_PATH)
+        val selection = "${MediaStore.Audio.Media.RELATIVE_PATH} LIKE ?"
+        val args = arrayOf("$basePath%")
+        context.contentResolver.query(
+            MediaStore.Audio.Media.EXTERNAL_CONTENT_URI,
+            projection, selection, args, null
+        )?.use { cursor ->
+            val col = cursor.getColumnIndexOrThrow(MediaStore.Audio.Media.RELATIVE_PATH)
+            while (cursor.moveToNext()) {
+                val relativePath = cursor.getString(col) ?: continue
+                counts[relativePath] = (counts[relativePath] ?: 0) + 1
+            }
+        }
+        return counts
     }
 
     fun createFolder(name: String): String {
@@ -409,8 +441,13 @@ class RecordingStore(private val context: Context) {
                 val uri = ContentUris.withAppendedId(
                     MediaStore.Audio.Media.EXTERNAL_CONTENT_URI, cursor.getLong(idCol)
                 )
-                val moved = tryUpdateRelativePath(uri, newRelativePath)
-                if (!moved) pendingUris.add(uri)
+                // 실제 권한 문제가 있을 때만 승인 대상에 넣는다. (중복 이름 등 일반 실패는
+                // 승인 다이얼로그를 띄워도 어차피 다시 실패하므로 제외)
+                if (updateMediaItem(uri, MediaStore.Audio.Media.RELATIVE_PATH, newRelativePath)
+                    == MediaUpdateOutcome.NeedsPermission
+                ) {
+                    pendingUris.add(uri)
+                }
             }
         }
 
@@ -430,11 +467,12 @@ class RecordingStore(private val context: Context) {
 
         return if (isScopedStorage) {
             val uri = item.contentUri ?: return RenameRecordingResult.Failed
-            when {
-                tryUpdateDisplayName(uri, newDisplayName) -> RenameRecordingResult.Success
-                isSecurityRestricted(uri, MediaStore.Audio.Media.DISPLAY_NAME, newDisplayName) ->
+            when (updateMediaItem(uri, MediaStore.Audio.Media.DISPLAY_NAME, newDisplayName)) {
+                MediaUpdateOutcome.Success -> RenameRecordingResult.Success
+                // 실제 권한 문제(다른 앱 소유 등)일 때만 승인 다이얼로그로 연결한다.
+                MediaUpdateOutcome.NeedsPermission ->
                     RenameRecordingResult.NeedsPermission(uri, newDisplayName)
-                else -> RenameRecordingResult.Failed
+                MediaUpdateOutcome.Failed -> RenameRecordingResult.Failed
             }
         } else {
             val path = item.filePath ?: return RenameRecordingResult.Failed
@@ -580,26 +618,46 @@ class RecordingStore(private val context: Context) {
         return tryUpdateDisplayName(uri, newDisplayName)
     }
 
-    private fun tryUpdateRelativePath(uri: Uri, newRelativePath: String): Boolean {
+    /** [updateMediaItem]의 결과. 실패 원인이 사용자 승인으로 풀리는 것인지 구분한다. */
+    private enum class MediaUpdateOutcome {
+        Success,
+        /** 다른 앱 소유 항목 등 — Android 11+ 에서 createWriteRequest로 복구 가능 */
+        NeedsPermission,
+        /** 중복 이름·잘못된 값 등 승인과 무관한 실패 */
+        Failed
+    }
+
+    /**
+     * MediaStore 항목의 한 컬럼 값을 갱신한다.
+     * RecoverableSecurityException(다른 앱 소유 항목)만 승인 필요로 보고하고, 그 외
+     * SecurityException은 일반 실패로 구분한다 — 실패 원인을 묻지 않고 무조건 승인
+     * 다이얼로그를 띄웠다가 또 실패하던 문제를 막기 위함이다.
+     */
+    private fun updateMediaItem(uri: Uri, column: String, value: String): MediaUpdateOutcome {
         return try {
-            val values = ContentValues().apply { put(MediaStore.Audio.Media.RELATIVE_PATH, newRelativePath) }
-            context.contentResolver.update(uri, values, null, null) > 0
-        } catch (e: SecurityException) {
-            false
-        } catch (e: Exception) {
-            false
+            val values = ContentValues().apply { put(column, value) }
+            if (context.contentResolver.update(uri, values, null, null) > 0) {
+                MediaUpdateOutcome.Success
+            } else {
+                MediaUpdateOutcome.Failed
+            }
+        } catch (e: RecoverableSecurityException) {
+            MediaUpdateOutcome.NeedsPermission
+        } catch (_: SecurityException) {
+            MediaUpdateOutcome.Failed
+        } catch (_: Exception) {
+            MediaUpdateOutcome.Failed
         }
     }
 
+    private fun tryUpdateRelativePath(uri: Uri, newRelativePath: String): Boolean {
+        return updateMediaItem(uri, MediaStore.Audio.Media.RELATIVE_PATH, newRelativePath)
+            == MediaUpdateOutcome.Success
+    }
+
     private fun tryUpdateDisplayName(uri: Uri, newDisplayName: String): Boolean {
-        return try {
-            val values = ContentValues().apply { put(MediaStore.Audio.Media.DISPLAY_NAME, newDisplayName) }
-            context.contentResolver.update(uri, values, null, null) > 0
-        } catch (e: SecurityException) {
-            false
-        } catch (e: Exception) {
-            false
-        }
+        return updateMediaItem(uri, MediaStore.Audio.Media.DISPLAY_NAME, newDisplayName)
+            == MediaUpdateOutcome.Success
     }
 
     /**
@@ -623,10 +681,24 @@ class RecordingStore(private val context: Context) {
         }
     }
 
-    /** 위 업데이트가 실패한 이유가 "다른 앱 소유"로 인한 권한 문제였는지 대략적으로 판단한다. */
-    private fun isSecurityRestricted(uri: Uri, column: String, value: String): Boolean {
-        // Android 11(R) 이상에서만 createWriteRequest로 복구 가능하다.
-        return Build.VERSION.SDK_INT >= Build.VERSION_CODES.R
+    /**
+     * 녹음 도중 프로세스가 죽어 IS_PENDING=1로 남아 버려진 항목을 정리한다.
+     * 서비스가 START_NOT_STICKY라 재시작이 안 되고, pending 항목은 목록 쿼리에서도
+     * 걸러져 보이지 않으므로 앱 시작 시 우리 소유 항목만 골라 삭제한다.
+     * 방금 시작한 진짜 녹음과 겹치지 않도록 녹음 중에는 호출하지 않아야 한다.
+     */
+    fun cleanupPendingRecordings() {
+        if (!isScopedStorage) return
+        val selection =
+            "${MediaStore.Audio.Media.IS_PENDING} = 1 AND ${MediaStore.Audio.Media.OWNER_PACKAGE_NAME} = ?"
+        val args = arrayOf(context.packageName)
+        try {
+            context.contentResolver.delete(
+                MediaStore.Audio.Media.EXTERNAL_CONTENT_URI, selection, args
+            )
+        } catch (_: Exception) {
+            // OWNER_PACKAGE_NAME 을 지원하지 않는 기기 등에서도 앱 동작에는 지장 없도록 무시한다.
+        }
     }
 
     // ----------------------------------------------------------------------------------

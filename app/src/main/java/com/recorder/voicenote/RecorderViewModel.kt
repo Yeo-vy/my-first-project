@@ -7,6 +7,7 @@ import android.net.Uri
 import androidx.core.content.ContextCompat
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -64,9 +65,17 @@ class RecorderViewModel(application: Application) : AndroidViewModel(application
     val storageLocationLabel: String get() = store.displayLocation
 
     init {
-        // 예전 버전에서 앱 전용 저장소에 남아있던 폴더/파일이 있다면 새 위치로 옮겨온다 (최초 1회).
-        store.migrateLegacyPrivateStorageIfNeeded()
-        refreshFolders()
+        // 파일 복사·MediaStore 쿼리가 포함된 초기화 작업은 메인 스레드에서 하면 ANR 위험이 있어 IO로 돌린다.
+        viewModelScope.launch(Dispatchers.IO) {
+            // 예전 버전에서 앱 전용 저장소에 남아있던 폴더/파일이 있다면 새 위치로 옮겨온다 (최초 1회).
+            store.migrateLegacyPrivateStorageIfNeeded()
+            // 녹음 도중 프로세스가 죽어 남은(IS_PENDING=1) 항목을 정리한다.
+            // 방금 시작한 진짜 녹음과 겹치지 않도록 녹음 중일 때는 건너뛴다.
+            if (!RecordingService.state.value.isRecording) {
+                store.cleanupPendingRecordings()
+            }
+            refreshFolders()
+        }
 
         // 실제 녹음은 RecordingService(포그라운드 서비스)가 담당한다.
         // 화면이 꺼지거나 앱이 백그라운드로 가도 서비스가 계속 살아있으므로,
@@ -93,21 +102,28 @@ class RecorderViewModel(application: Application) : AndroidViewModel(application
     }
 
     private fun refreshFolders() {
-        _uiState.value = _uiState.value.copy(folders = store.listFolders())
+        viewModelScope.launch(Dispatchers.IO) {
+            val folders = store.listFolders()
+            _uiState.value = _uiState.value.copy(folders = folders)
+        }
     }
 
     private fun refreshRecordings() {
         val folder = _uiState.value.selectedFolder ?: return
-        _uiState.value = _uiState.value.copy(recordings = store.listRecordings(folder))
+        viewModelScope.launch(Dispatchers.IO) {
+            val recordings = store.listRecordings(folder)
+            // 로드하는 동안 다른 폴더로 이동했다면 결과를 무시한다.
+            if (_uiState.value.selectedFolder == folder) {
+                _uiState.value = _uiState.value.copy(recordings = recordings)
+            }
+        }
     }
 
     /** 폴더를 눌러서 안으로 들어간다 (녹음 파일 목록 표시) */
     fun openFolder(folderName: String) {
         stopPlayback()
-        _uiState.value = _uiState.value.copy(
-            selectedFolder = folderName,
-            recordings = store.listRecordings(folderName)
-        )
+        _uiState.value = _uiState.value.copy(selectedFolder = folderName, recordings = emptyList())
+        refreshRecordings()
     }
 
     /** 상세화면에서 뒤로가기 -> 폴더 목록 화면 */
@@ -242,10 +258,8 @@ class RecorderViewModel(application: Application) : AndroidViewModel(application
                     val result = store.renameFolder(target.name, newName)
                     refreshFolders()
                     if (_uiState.value.selectedFolder == target.name) {
-                        _uiState.value = _uiState.value.copy(
-                            selectedFolder = result.finalName,
-                            recordings = store.listRecordings(result.finalName)
-                        )
+                        _uiState.value = _uiState.value.copy(selectedFolder = result.finalName)
+                        refreshRecordings()
                     }
                     if (result.pendingUris.isNotEmpty()) {
                         _uiState.value = _uiState.value.copy(

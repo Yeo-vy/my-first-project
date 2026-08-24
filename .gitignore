@@ -11,3 +11,11 @@ __pycache__/
 # 프로그램이 생성하는 결과물 폴더 제외 (선택 사항)
 강의 녹음 변환/
 녹음파일원본/
+
+# Android / Gradle 빌드 산출물 제외
+.gradle/
+app/build/
+build/
+local.properties
+*.apk
+*.aab

@@ -29,8 +29,10 @@ class RecorderManager(private val context: Context) {
             mr.setAudioSource(MediaRecorder.AudioSource.MIC)
             mr.setOutputFormat(MediaRecorder.OutputFormat.MPEG_4)
             mr.setAudioEncoder(MediaRecorder.AudioEncoder.AAC)
-            mr.setAudioEncodingBitRate(128000)
-            mr.setAudioSamplingRate(44100)
+            // 강의 음성 기준 충분한 스펙. 파일이 1/4 수준으로 줄어 SFTP 전송과 Gemini 업로드가 빨라진다.
+            mr.setAudioEncodingBitRate(64000)
+            mr.setAudioSamplingRate(16000)
+            mr.setAudioChannels(1)
 
             when (target) {
                 is RecordingTarget.MediaStoreTarget -> mr.setOutputFile(target.pfd.fileDescriptor)

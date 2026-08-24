@@ -9,6 +9,7 @@ import android.content.Intent
 import android.content.pm.ServiceInfo
 import android.os.Build
 import android.os.IBinder
+import android.os.SystemClock
 import androidx.core.app.NotificationCompat
 import androidx.core.app.ServiceCompat
 import kotlinx.coroutines.CoroutineScope
@@ -146,11 +147,14 @@ class RecordingService : Service() {
     private fun startTimer(folderName: String) {
         timerJob?.cancel()
         timerJob = serviceScope.launch {
+            // delay 누적으로 초를 세면 doze/스로틀링에서 드리프트가 쌓이므로,
+            // 부팅 후 흐른 실제 시간(elapsedRealtime) 기준으로 경과 시간을 계산한다.
+            val startedAt = SystemClock.elapsedRealtime()
             while (true) {
                 delay(1000)
-                val newElapsed = _state.value.elapsedSeconds + 1
-                _state.value = _state.value.copy(elapsedSeconds = newElapsed)
-                updateNotification(folderName, newElapsed)
+                val elapsedSeconds = ((SystemClock.elapsedRealtime() - startedAt) / 1000L).toInt()
+                _state.value = _state.value.copy(elapsedSeconds = elapsedSeconds)
+                updateNotification(folderName, elapsedSeconds)
             }
         }
     }
