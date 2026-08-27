@@ -18,6 +18,8 @@ google-genai
 python-dotenv
 pydub
 
-# 자막저장서버.py (HTML 편집 → 서버 txt 저장) 실행 시 필요
+# 자막저장서버 및 다글로 웹 서버 실행 시 필요
 fastapi
 uvicorn
+sqlalchemy
+python-multipart

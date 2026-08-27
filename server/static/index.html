@@ -1,0 +1,388 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>다글로 (daglo) AI - 완전 대체 웹 서비스</title>
+    <link rel="stylesheet" href="/static/style.css">
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.1/css/all.min.css">
+    <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
+</head>
+<body>
+    <div id="app-container">
+        <!-- 좌측 사이드바 -->
+        <aside id="sidebar">
+            <div class="sidebar-header">
+                <div class="user-badge">
+                    <div class="avatar">백승</div>
+                    <span class="brand-name">daglo AI</span>
+                </div>
+            </div>
+
+            <nav class="sidebar-nav">
+                <a href="javascript:void(0)" class="nav-item active" id="nav-all" onclick="changeFilter('all')">
+                    <i class="fa-solid fa-table-cells-large"></i>
+                    <span>전체 보드</span>
+                </a>
+                <a href="javascript:void(0)" class="nav-item" id="nav-starred" onclick="changeFilter('starred')">
+                    <i class="fa-solid fa-star" style="color: #eab308;"></i>
+                    <span>중요 보드</span>
+                </a>
+                <a href="javascript:void(0)" class="nav-item" id="nav-processing" onclick="changeFilter('processing')">
+                    <i class="fa-solid fa-clock-rotate-left" style="color: #3b82f6;"></i>
+                    <span>미완료 녹음</span>
+                </a>
+                <a href="javascript:void(0)" class="nav-item" id="nav-trash" onclick="changeFilter('trash')">
+                    <i class="fa-regular fa-trash-can"></i>
+                    <span>휴지통</span>
+                </a>
+            </nav>
+
+            <div class="sidebar-section">
+                <div class="section-title">
+                    <span>폴더</span>
+                    <button class="icon-btn-small" onclick="openNewFolderModal()" title="새 폴더 추가">
+                        <i class="fa-solid fa-plus"></i>
+                    </button>
+                </div>
+                <div id="folder-list" class="folder-list">
+                    <!-- 폴더 목록 동적 렌더링 -->
+                </div>
+            </div>
+
+            <div class="sidebar-footer">
+                <button class="new-task-btn" onclick="openUploadModal()">
+                    <i class="fa-solid fa-plus"></i> 새 받아쓰기
+                </button>
+            </div>
+        </aside>
+
+        <!-- 메인 영역 -->
+        <main id="main-content">
+            <!-- 1. 대시보드 뷰 -->
+            <section id="dashboard-view" class="view-panel">
+                <header class="dash-header">
+                    <div class="search-bar-container">
+                        <i class="fa-solid fa-magnifying-glass search-icon"></i>
+                        <input type="text" id="board-search-input" placeholder="보드 제목 또는 자막 내용 검색..." oninput="handleSearch(this.value)">
+                    </div>
+                    <div class="header-actions">
+                        <button class="primary-btn" onclick="openUploadModal()">
+                            <i class="fa-solid fa-plus"></i> 새 받아쓰기
+                        </button>
+                    </div>
+                </header>
+
+                <div class="dash-title-row">
+                    <div class="title-with-count">
+                        <h2 id="current-folder-title">전체 보드</h2>
+                        <span class="count-badge" id="boards-total-count">0</span>
+                    </div>
+                    <div class="batch-actions" id="batch-actions" style="display: none;">
+                        <span id="selected-count">0개 선택됨</span>
+                        <button class="btn-sm" id="batch-move-btn" onclick="batchMoveBoards()"><i class="fa-solid fa-folder-open"></i> 이동</button>
+                        <button class="btn-sm danger" id="batch-del-btn" onclick="batchDeleteBoards()"><i class="fa-solid fa-trash"></i> 삭제</button>
+                    </div>
+                </div>
+
+                <div class="table-container">
+                    <table class="boards-table">
+                        <thead>
+                            <tr>
+                                <th width="35"><input type="checkbox" id="select-all-checkbox" onchange="toggleSelectAll(this)"></th>
+                                <th width="35"></th>
+                                <th>보드 이름</th>
+                                <th width="90">길이</th>
+                                <th width="140">폴더 위치</th>
+                                <th width="170">생성일</th>
+                                <th width="60"></th>
+                            </tr>
+                        </thead>
+                        <tbody id="boards-table-body">
+                            <!-- 보드 리스트 렌더링 -->
+                        </tbody>
+                    </table>
+                    <div id="no-boards-msg" class="empty-msg" style="display: none;">
+                        <i class="fa-regular fa-folder-open"></i>
+                        <p id="empty-hint-text">등록된 보드가 없습니다.</p>
+                    </div>
+                </div>
+            </section>
+
+            <!-- 2. 보드 상세 뷰 -->
+            <section id="board-detail-view" class="view-panel" style="display: none;">
+                <header class="detail-header">
+                    <div class="detail-left-header">
+                        <button class="icon-btn" onclick="showDashboard()" title="목록으로 (Esc)">
+                            <i class="fa-solid fa-chevron-left"></i>
+                        </button>
+                        <button class="icon-btn star-btn" id="detail-star-btn" onclick="toggleDetailStar()" title="중요 보드">
+                            <i class="fa-regular fa-star"></i>
+                        </button>
+                        <span class="breadcrumb" id="detail-folder-name">기본 폴더</span>
+                        <span class="divider">/</span>
+                        <h3 class="detail-title" id="detail-title" contenteditable="true" onblur="saveBoardTitle(this.innerText)">보드 제목</h3>
+                    </div>
+                    <div class="detail-right-header">
+                        <button class="btn-secondary" onclick="openSpeakerModal()"><i class="fa-solid fa-user-pen"></i> 화자 이름 변경</button>
+                        <button class="btn-secondary" onclick="openExportModal()"><i class="fa-solid fa-download"></i> 내보내기</button>
+                        <button class="icon-btn danger" onclick="deleteCurrentBoard()" title="삭제">
+                            <i class="fa-regular fa-trash-can"></i>
+                        </button>
+                    </div>
+                </header>
+
+                <div class="board-body-grid">
+                    <!-- 좌측: 스크립트 에디터 패널 -->
+                    <div class="script-panel">
+                        <!-- 키워드 바 -->
+                        <div class="keywords-bar">
+                            <span class="keywords-label"><i class="fa-solid fa-tags"></i> 핵심 키워드</span>
+                            <div id="keywords-container" class="keywords-container"></div>
+                            <button class="btn-text-sm" onclick="regenerateKeywords()" title="AI로 키워드 새로 추출">
+                                <i class="fa-solid fa-rotate-right"></i>
+                            </button>
+                        </div>
+
+                        <!-- 자막 본문 검색 바 -->
+                        <div class="script-search-bar" id="script-search-bar">
+                            <i class="fa-solid fa-magnifying-glass"></i>
+                            <input type="text" id="script-find-input" placeholder="본문 검색 (단어 찾기)" oninput="findInTranscript(this.value)">
+                            <button class="icon-btn-small" onclick="clearScriptFind()"><i class="fa-solid fa-xmark"></i></button>
+                        </div>
+
+                        <!-- 자막 세그먼트 박스 -->
+                        <div class="transcript-container" id="transcript-container"></div>
+                    </div>
+
+                    <!-- 우측: AI 어시스턴트 패널 -->
+                    <div class="ai-panel">
+                        <div class="ai-tabs">
+                            <button class="ai-tab active" data-tab="chat" onclick="switchAiTab('chat')">
+                                <i class="fa-solid fa-comments"></i> 보드챗
+                            </button>
+                            <button class="ai-tab" data-tab="summary" onclick="switchAiTab('summary')">
+                                <i class="fa-solid fa-file-lines"></i> 기본 요약
+                            </button>
+                            <button class="ai-tab" data-tab="template" onclick="switchAiTab('template')">
+                                <i class="fa-solid fa-list-check"></i> 템플릿 요약
+                            </button>
+                            <button class="ai-tab" data-tab="bookmarks" onclick="switchAiTab('bookmarks')">
+                                <i class="fa-solid fa-bookmark"></i> 북마크
+                            </button>
+                        </div>
+
+                        <!-- 탭 1: 보드챗 -->
+                        <div id="ai-tab-chat" class="ai-tab-content active">
+                            <div class="quick-prompts">
+                                <button class="prompt-chip" onclick="sendQuickPrompt('이 강의/회의의 핵심 내용을 3줄로 요약해줘')">
+                                    ⭐ 핵심 요약 정리
+                                </button>
+                                <button class="prompt-chip" onclick="sendQuickPrompt('논의된 안건과 결정사항을 회의록 형태로 정리해줘')">
+                                    📝 회의록 정리
+                                </button>
+                                <button class="prompt-chip" onclick="sendQuickPrompt('해야 할 액션 아이템과 할 일을 목록으로 추출해줘')">
+                                    🎯 액션 아이템 만들기
+                                </button>
+                            </div>
+
+                            <div class="chat-messages" id="chat-messages">
+                                <div class="chat-bubble assistant welcome">
+                                    <div class="chat-avatar"><i class="fa-solid fa-robot"></i></div>
+                                    <div class="chat-text">
+                                        안녕하세요! 이 녹음의 모든 내용을 학습했습니다.<br>
+                                        궁금한 점이 있거나 요약이 필요하시면 무엇이든 물어보세요!
+                                    </div>
+                                </div>
+                            </div>
+
+                            <div class="chat-input-container">
+                                <textarea id="chat-input" placeholder="궁금한 내용을 질문해 보세요 (Enter로 전송)" rows="1" onkeydown="handleChatKeyDown(event)"></textarea>
+                                <button id="send-chat-btn" onclick="sendChatMessage()">
+                                    <i class="fa-solid fa-arrow-up"></i>
+                                </button>
+                            </div>
+                        </div>
+
+                        <!-- 탭 2: 기본 요약 -->
+                        <div id="ai-tab-summary" class="ai-tab-content">
+                            <div class="summary-actions">
+                                <button class="primary-btn-sm" onclick="requestSummary('BASIC')">
+                                    <i class="fa-solid fa-wand-magic-sparkles"></i> AI 요약 생성/갱신
+                                </button>
+                            </div>
+                            <div id="summary-content" class="markdown-body">
+                                <p class="placeholder-text">상단의 [AI 요약 생성] 버튼을 누르면 본문 전체를 3단 구조로 분석하여 요약합니다.</p>
+                            </div>
+                        </div>
+
+                        <!-- 탭 3: 템플릿 요약 -->
+                        <div id="ai-tab-template" class="ai-tab-content">
+                            <div class="template-buttons">
+                                <button class="template-card" onclick="requestSummary('MEETING')">
+                                    <i class="fa-solid fa-handshake"></i>
+                                    <div>
+                                        <strong>회의록 템플릿</strong>
+                                        <p>의제, 논의 내용, 결정사항 정리</p>
+                                    </div>
+                                </button>
+                                <button class="template-card" onclick="requestSummary('ACTION_ITEM')">
+                                    <i class="fa-solid fa-square-check"></i>
+                                    <div>
+                                        <strong>액션 아이템 템플릿</strong>
+                                        <p>실행 과제 및 To-Do 목록 정리</p>
+                                    </div>
+                                </button>
+                                <button class="template-card" onclick="requestSummary('QUIZ')">
+                                    <i class="fa-solid fa-circle-question"></i>
+                                    <div>
+                                        <strong>복습 퀴즈 템플릿</strong>
+                                        <p>핵심 개념 퀴즈 3문제와 정답</p>
+                                    </div>
+                                </button>
+                                <button class="template-card" onclick="requestSummary('SLIDE')">
+                                    <i class="fa-solid fa-file-powerpoint"></i>
+                                    <div>
+                                        <strong>슬라이드 발표 템플릿</strong>
+                                        <p>발표 자료 구성 및 페이지별 개요</p>
+                                    </div>
+                                </button>
+                            </div>
+                            <div id="template-summary-content" class="markdown-body"></div>
+                        </div>
+
+                        <!-- 탭 4: 북마크 -->
+                        <div id="ai-tab-bookmarks" class="ai-tab-content">
+                            <div class="bookmark-add-row">
+                                <input type="text" id="new-bookmark-note" placeholder="현재 재생 위치에 메모 작성...">
+                                <button class="primary-btn-sm" onclick="addCurrentBookmark()"><i class="fa-solid fa-plus"></i> 추가</button>
+                            </div>
+                            <div id="bookmark-list" class="bookmark-list"></div>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- 하단 고정 오디오 플레이어 바 -->
+                <footer class="bottom-audio-bar">
+                    <div class="player-controls">
+                        <button class="player-btn" onclick="seekRelative(-5)" title="5초 이전 (F1)">
+                            <i class="fa-solid fa-rotate-left"></i> <span class="btn-sub">5s</span>
+                        </button>
+                        <button class="player-btn play-main" id="main-play-btn" onclick="togglePlay()" title="재생/일시정지 (F2)">
+                            <i class="fa-solid fa-play" id="play-icon"></i>
+                        </button>
+                        <button class="player-btn" onclick="seekRelative(5)" title="5초 이후 (F3)">
+                            <i class="fa-solid fa-rotate-right"></i> <span class="btn-sub">5s</span>
+                        </button>
+                    </div>
+
+                    <div class="player-progress-area">
+                        <span class="time-display" id="curr-time">00:00</span>
+                        <input type="range" id="seek-bar" min="0" max="100" value="0" step="0.1" oninput="onSeekInput(this.value)" onchange="onSeekChange(this.value)">
+                        <span class="time-display" id="total-time">00:00</span>
+                    </div>
+
+                    <div class="player-extra">
+                        <select id="playback-speed" onchange="changeSpeed(this.value)">
+                            <option value="0.75">0.75x</option>
+                            <option value="1" selected>1.0x</option>
+                            <option value="1.25">1.25x</option>
+                            <option value="1.5">1.5x</option>
+                            <option value="2">2.0x</option>
+                        </select>
+                        <button class="icon-btn-small" onclick="addCurrentBookmark()" title="북마크 추가 (Ctrl+B)">
+                            <i class="fa-solid fa-bookmark"></i>
+                        </button>
+                        <span class="shortcut-tip">F1(-5s) F2(재생) F3(+5s) Ctrl+S(저장)</span>
+                    </div>
+
+                    <audio id="global-audio-element" preload="metadata"></audio>
+                </footer>
+            </section>
+        </main>
+    </div>
+
+    <!-- 모달: 폴더 추가 -->
+    <div id="folder-modal" class="modal-backdrop" style="display: none;">
+        <div class="modal-card">
+            <h3>새 폴더 만들기</h3>
+            <input type="text" id="new-folder-input" placeholder="폴더 이름을 입력하세요" onkeydown="if(event.key==='Enter') submitCreateFolder()">
+            <div class="modal-actions">
+                <button class="btn-secondary" onclick="closeFolderModal()">취소</button>
+                <button class="primary-btn" onclick="submitCreateFolder()">만들기</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- 모달: 음성 파일 업로드 -->
+    <div id="upload-modal" class="modal-backdrop" style="display: none;">
+        <div class="modal-card">
+            <h3>새 오디오 받아쓰기</h3>
+            <p class="modal-desc">녹음 파일(.m4a, .mp3, .wav, .mp4)을 업로드하면 Gemini가 자동으로 STT 변환합니다.</p>
+            <div class="form-group">
+                <label>저장할 폴더</label>
+                <select id="upload-folder-select"></select>
+            </div>
+            <div class="file-drop-area" onclick="document.getElementById('audio-file-input').click()">
+                <i class="fa-solid fa-cloud-arrow-up"></i>
+                <p id="file-chosen-text">클릭하여 파일을 선택하세요</p>
+                <input type="file" id="audio-file-input" accept=".mp3,.m4a,.wav,.mp4" style="display: none;" onchange="onFileSelected(this)">
+            </div>
+            <div class="modal-actions">
+                <button class="btn-secondary" onclick="closeUploadModal()">취소</button>
+                <button class="primary-btn" id="start-upload-btn" onclick="submitAudioUpload()">업로드 및 변환 시작</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- 모달: 화자 이름 일괄 변경 -->
+    <div id="speaker-modal" class="modal-backdrop" style="display: none;">
+        <div class="modal-card">
+            <h3>화자 이름 일괄 변경</h3>
+            <p class="modal-desc">스크립트 전체에서 특정 화자의 이름을 일괄 변경합니다.</p>
+            <div class="form-group">
+                <label>변경할 화자</label>
+                <input type="text" id="speaker-old-input" value="화자 1">
+            </div>
+            <div class="form-group">
+                <label>새 화자 이름</label>
+                <input type="text" id="speaker-new-input" placeholder="예: 김교수님, 발표자">
+            </div>
+            <div class="modal-actions">
+                <button class="btn-secondary" onclick="closeSpeakerModal()">취소</button>
+                <button class="primary-btn" onclick="submitRenameSpeaker()">변경하기</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- 모달: 내보내기 -->
+    <div id="export-modal" class="modal-backdrop" style="display: none;">
+        <div class="modal-card">
+            <h3>스크립트 내보내기</h3>
+            <p class="modal-desc">원하는 파일 형식과 옵션을 선택하여 다운로드하세요.</p>
+            <div class="export-options">
+                <button class="export-btn-card" onclick="exportFile('txt')">
+                    <i class="fa-regular fa-file-lines"></i>
+                    <div><strong>텍스트 문서 (.txt)</strong><p>타임스탬프 및 텍스트</p></div>
+                </button>
+                <button class="export-btn-card" onclick="exportFile('srt')">
+                    <i class="fa-regular fa-closed-captioning"></i>
+                    <div><strong>자막 파일 (.srt)</strong><p>동영상 자막 싱크용</p></div>
+                </button>
+                <button class="export-btn-card" onclick="exportFile('md')">
+                    <i class="fa-brands fa-markdown"></i>
+                    <div><strong>마크다운 노트 (.md)</strong><p>Notion / Obsidian 연동용</p></div>
+                </button>
+            </div>
+            <div class="modal-actions" style="margin-top: 18px;">
+                <button class="btn-secondary" onclick="closeExportModal()">닫기</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- 알림 토스트 -->
+    <div id="toast" class="toast">저장되었습니다</div>
+
+    <script src="/static/app.js"></script>
+</body>
+</html>
