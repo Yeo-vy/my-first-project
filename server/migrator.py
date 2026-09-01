@@ -47,42 +47,71 @@ def extract_simple_keywords(text: str, limit: int = 8) -> list:
     sorted_words = sorted(freq.items(), key=lambda x: x[1], reverse=True)
     return [w for w, count in sorted_words[:limit]]
 
+def get_folder_name(root_dir: str, base_dir: str) -> str:
+    rel_dir = os.path.relpath(root_dir, base_dir)
+    if rel_dir == "." or rel_dir == "":
+        return "기본 폴더"
+    # 중첩된 폴더일 경우 가장 하위 폴더명만 사용 (예: Default/Dreampath -> Dreampath)
+    return os.path.basename(os.path.normpath(root_dir))
+
+def get_or_create_folder(db: Session, name: str) -> Folder:
+    folder = db.query(Folder).filter_by(name=name).first()
+    if not folder:
+        folder = Folder(name=name)
+        db.add(folder)
+        db.commit()
+        db.refresh(folder)
+    return folder
+
 def sync_filesystem_to_db(db: Session):
     """로컬 폴더와 기존 txt/audio 파일들을 SQLite DB로 동기화한다."""
     os.makedirs(AUDIO_DIR, exist_ok=True)
     os.makedirs(RESULT_DIR, exist_ok=True)
 
-    # 1. '기본 폴더' 보장
-    default_folder = db.query(Folder).filter_by(name="기본 폴더").first()
-    if not default_folder:
-        default_folder = Folder(name="기본 폴더")
-        db.add(default_folder)
-        db.commit()
-        db.refresh(default_folder)
-
-    folder_map = {"": default_folder, "Default": default_folder}
-
-    # 2. 결과 폴더 및 오디오 폴더 내의 서브 디렉터리들을 Folder로 생성
-    all_subdirs = set()
-    for root_dir in [RESULT_DIR, AUDIO_DIR]:
-        if os.path.exists(root_dir):
-            for entry in os.scandir(root_dir):
-                if entry.is_dir() and not entry.name.startswith('.'):
-                    all_subdirs.add(entry.name)
-
-    for subdir_name in all_subdirs:
-        folder = db.query(Folder).filter_by(name=subdir_name).first()
-        if not folder:
-            folder = Folder(name=subdir_name)
-            db.add(folder)
+    # 0. 기존 DB에 잘못 생성된 중첩 폴더명(Default\Dreampath 등) 정리 및 보드 병합
+    all_folders = db.query(Folder).all()
+    for f in all_folders:
+        if '\\' in f.name or '/' in f.name:
+            leaf_name = os.path.basename(f.name.replace('\\', '/'))
+            
+            leaf_folder = get_or_create_folder(db, leaf_name)
+            
+            boards = db.query(Board).filter_by(folder_id=f.id).all()
+            for b in boards:
+                existing = db.query(Board).filter_by(folder_id=leaf_folder.id, title=b.title).first()
+                if existing and existing.id != b.id:
+                    if existing.status == "COMPLETED" and b.status != "COMPLETED":
+                        db.delete(b)
+                    elif b.status == "COMPLETED" and existing.status != "COMPLETED":
+                        db.delete(existing)
+                        b.folder_id = leaf_folder.id
+                    else:
+                        db.delete(b)
+                else:
+                    b.folder_id = leaf_folder.id
             db.commit()
-            db.refresh(folder)
-        folder_map[subdir_name] = folder
+            try:
+                db.delete(f)
+                db.commit()
+            except Exception:
+                pass
+
+    # 1. '기본 폴더' 보장
+    default_folder = get_or_create_folder(db, "기본 폴더")
+
+    # 2. 오디오 파일 전체 스캔하여 title -> full_path 매핑 구축 (폴더 구조가 달라도 매칭되도록)
+    audio_map = {}
+    for root_dir, _, files in os.walk(AUDIO_DIR):
+        for f in files:
+            ext = os.path.splitext(f)[1].lower()
+            if ext in ['.m4a', '.mp3', '.wav', '.mp4']:
+                base = os.path.splitext(f)[0]
+                audio_map[base] = os.path.join(root_dir, f)
 
     # 3. '강의 녹음 변환' 폴더의 txt 파일들을 Board로 등록
     for root_dir, _, files in os.walk(RESULT_DIR):
-        rel_dir = os.path.relpath(root_dir, RESULT_DIR)
-        current_folder = default_folder if rel_dir == "." else folder_map.get(rel_dir, default_folder)
+        folder_name = get_folder_name(root_dir, RESULT_DIR)
+        current_folder = get_or_create_folder(db, folder_name)
 
         for f in files:
             if f.endswith('.txt') and not f.endswith('_수정본.txt') and not '_chunk_' in f:
@@ -94,19 +123,9 @@ def sync_filesystem_to_db(db: Session):
                 if existing_board and len(existing_board.segments) > 0:
                     continue
 
-                # 오디오 파일 찾기
-                audio_exts = ['.m4a', '.mp3', '.wav', '.mp4']
-                audio_file_path = None
-                audio_file_name = None
-                target_audio_dir = os.path.join(AUDIO_DIR, rel_dir if rel_dir != "." else "")
-
-                if os.path.exists(target_audio_dir):
-                    for ext in audio_exts:
-                        candidate = os.path.join(target_audio_dir, base_name + ext)
-                        if os.path.exists(candidate):
-                            audio_file_path = candidate
-                            audio_file_name = base_name + ext
-                            break
+                # 오디오 맵에서 오디오 파일 찾기
+                audio_file_path = audio_map.get(base_name)
+                audio_file_name = os.path.basename(audio_file_path) if audio_file_path else None
 
                 # 텍스트 읽고 세그먼트 파싱
                 try:
@@ -155,8 +174,6 @@ def sync_filesystem_to_db(db: Session):
 
                 # 오디오 길이가 없으면 마지막 세그먼트 시간 + 15초로 추정
                 duration_sec = (max_time_ms // 1000) + 15.0
-
-                # 키워드 추출
                 keywords = extract_simple_keywords(full_content, limit=8)
 
                 if existing_board:
@@ -202,8 +219,9 @@ def sync_filesystem_to_db(db: Session):
 
     # 4. 오디오 파일 중 아직 변환되지 않은 파일도 PROCESSING / PENDING 상태로 등록
     for root_dir, _, files in os.walk(AUDIO_DIR):
-        rel_dir = os.path.relpath(root_dir, AUDIO_DIR)
-        current_folder = default_folder if rel_dir == "." else folder_map.get(rel_dir, default_folder)
+        folder_name = get_folder_name(root_dir, AUDIO_DIR)
+        current_folder = get_or_create_folder(db, folder_name)
+        
         for f in files:
             ext = os.path.splitext(f)[1].lower()
             if ext in ['.m4a', '.mp3', '.wav', '.mp4']:

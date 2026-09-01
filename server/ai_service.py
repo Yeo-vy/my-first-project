@@ -237,6 +237,18 @@ def process_audio_file_to_board(board_id: int, audio_path: str, db_session_facto
             seq += 1
 
         # 텍스트 파일 저장
+        if not board.txt_path:
+            import os
+            RESULT_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "강의 녹음 변환")
+            folder_name = db.query(Folder).filter_by(id=board.folder_id).first().name
+            if folder_name == "기본 폴더":
+                target_dir = RESULT_DIR
+            else:
+                target_dir = os.path.join(RESULT_DIR, folder_name)
+            os.makedirs(target_dir, exist_ok=True)
+            board.txt_path = os.path.join(target_dir, f"{board.title}.txt")
+            db.commit()
+
         if board.txt_path:
             with open(board.txt_path, "w", encoding="utf-8") as tf:
                 tf.write("\n\n".join(txt_lines))

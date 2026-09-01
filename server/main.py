@@ -48,7 +48,10 @@ def background_audio_watcher():
             db = SessionLocal()
             for root_dir, _, files in os.walk(AUDIO_DIR):
                 rel_dir = os.path.relpath(root_dir, AUDIO_DIR)
-                folder_name = "기본 폴더" if rel_dir == "." else rel_dir
+                if rel_dir == "." or rel_dir == "":
+                    folder_name = "기본 폴더"
+                else:
+                    folder_name = os.path.basename(os.path.normpath(root_dir))
                 
                 # 폴더 확인
                 folder = db.query(Folder).filter_by(name=folder_name).first()
@@ -164,6 +167,11 @@ def format_seconds(seconds: float) -> str:
 # -----------------
 # 1. Folder Endpoints
 # -----------------
+@app.get("/api/debug/dbpath")
+def get_dbpath():
+    from server.database import DB_PATH
+    return {"db_path": DB_PATH, "cwd": os.getcwd()}
+
 @app.get("/api/folders")
 def get_folders(db: Session = Depends(get_db)):
     folders = db.query(Folder).order_by(Folder.id).all()
