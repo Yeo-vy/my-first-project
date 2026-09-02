@@ -173,8 +173,11 @@ function renderBoardsTable() {
         let statusBadge = "";
         if (b.status === "PROCESSING") {
             statusBadge = `<span class="status-tag processing"><i class="fa-solid fa-spinner fa-spin"></i> 변환 중 (${b.progress_percent || 0}%)</span>`;
+        } else if (b.status === "PENDING") {
+            statusBadge = `<span class="status-tag pending"><i class="fa-regular fa-hourglass-half"></i> 변환 대기 중</span>`;
         } else if (b.status === "FAILED") {
-            statusBadge = `<span class="status-tag failed"><i class="fa-solid fa-circle-exclamation"></i> 실패</span>`;
+            const reason = b.error_message ? escapeHtml(b.error_message) : "알 수 없는 오류";
+            statusBadge = `<span class="status-tag failed" title="${reason}"><i class="fa-solid fa-circle-exclamation"></i> 실패</span>`;
         }
 
         let actionButtons = "";
@@ -184,7 +187,11 @@ function renderBoardsTable() {
                 <button class="icon-btn-small" onclick="deleteBoardPermanent(${b.id})" title="완전 삭제"><i class="fa-solid fa-xmark"></i></button>
             `;
         } else {
+            const retryBtn = (b.status === "FAILED" && b.has_audio)
+                ? `<button class="icon-btn-small" onclick="reprocessBoard(event, ${b.id})" title="변환 다시 시도"><i class="fa-solid fa-rotate-right"></i></button>`
+                : "";
             actionButtons = `
+                ${retryBtn}
                 <button class="icon-btn-small" onclick="deleteBoard(${b.id})" title="삭제"><i class="fa-regular fa-trash-can"></i></button>
             `;
         }
@@ -268,6 +275,22 @@ async function deleteBoard(boardId) {
     loadFolders();
 }
 
+async function reprocessBoard(event, boardId) {
+    if (event) event.stopPropagation();
+    try {
+        const res = await fetch(`/api/boards/${boardId}/reprocess`, { method: "POST" });
+        const data = await res.json();
+        if (!res.ok) {
+            alert(data.detail || "다시 변환할 수 없습니다.");
+            return;
+        }
+        showToast("변환 대기열에 다시 넣었습니다.");
+        loadBoards();
+    } catch (e) {
+        alert("재시도 요청에 실패했습니다.");
+    }
+}
+
 async function restoreBoard(boardId) {
     await fetch(`/api/boards/${boardId}/restore`, { method: "POST" });
     showToast("보드가 복원되었습니다.");
@@ -337,6 +360,7 @@ async function openBoardDetail(boardId) {
             starBtn.innerHTML = `<i class="fa-regular fa-star"></i>`;
         }
 
+        renderDetailStatus(currentBoard);
         renderKeywords(currentBoard.keywords || []);
         renderTranscript(currentBoard.segments || []);
 
@@ -977,14 +1001,69 @@ async function submitAudioUpload() {
 // -----------------------------------------
 // 9. 변환 중 보드 자동 폴링
 // -----------------------------------------
+const IN_FLIGHT_STATUSES = ["PROCESSING", "PENDING"];
+
 function startProcessingPoller() {
-    setInterval(() => {
-        // 대시보드 뷰이거나 변환 중인 보드가 있으면 주기적으로 상태 새로고침
-        const hasProcessing = boards.some(b => b.status === "PROCESSING");
-        if (hasProcessing && document.getElementById("dashboard-view").style.display !== "none") {
-            loadBoards();
+    setInterval(async () => {
+        const onDashboard = document.getElementById("dashboard-view").style.display !== "none";
+
+        if (onDashboard) {
+            // 변환 중/대기 중인 보드가 있으면 목록 상태를 주기적으로 새로 고친다
+            if (boards.some(b => IN_FLIGHT_STATUSES.includes(b.status))) {
+                loadBoards(document.getElementById("board-search-input").value || "");
+            }
+            return;
+        }
+
+        // 상세 화면에서 변환이 끝나면 스크립트/요약이 채워지므로 완료 시점에 한 번 다시 읽는다
+        if (!currentBoard || !IN_FLIGHT_STATUSES.includes(currentBoard.status)) return;
+        if (isUserEditing) return;
+        try {
+            const res = await fetch(`/api/boards/${currentBoard.id}`);
+            const fresh = await res.json();
+            const finished = !IN_FLIGHT_STATUSES.includes(fresh.status);
+            currentBoard = fresh;
+            renderDetailStatus(fresh);
+            if (finished) {
+                renderKeywords(fresh.keywords || []);
+                renderTranscript(fresh.segments || []);
+                loadSummariesTab();
+                showToast(fresh.status === "COMPLETED" ? "변환이 완료되었습니다." : "변환에 실패했습니다.");
+            }
+        } catch (e) {
+            console.error("상태 갱신 실패:", e);
         }
     }, 4000);
+}
+
+function renderDetailStatus(board) {
+    const bar = document.getElementById("detail-status-bar");
+    if (!bar) return;
+
+    if (board.status === "PROCESSING" || board.status === "PENDING") {
+        const pct = board.status === "PENDING" ? 0 : (board.progress_percent || 0);
+        const label = board.status === "PENDING" ? "변환 대기 중" : `AI 변환 중 ${pct}%`;
+        bar.style.display = "flex";
+        bar.className = "detail-status-bar processing";
+        bar.innerHTML = `
+            <i class="fa-solid fa-spinner fa-spin"></i>
+            <span>${label}</span>
+            <div class="mini-progress"><div class="mini-progress-fill" style="width:${pct}%"></div></div>
+        `;
+    } else if (board.status === "FAILED") {
+        bar.style.display = "flex";
+        bar.className = "detail-status-bar failed";
+        bar.innerHTML = `
+            <i class="fa-solid fa-circle-exclamation"></i>
+            <span>변환 실패: ${escapeHtml(board.error_message || "알 수 없는 오류")}</span>
+            <button class="btn-sm" onclick="reprocessBoard(null, ${board.id})">
+                <i class="fa-solid fa-rotate-right"></i> 다시 시도
+            </button>
+        `;
+    } else {
+        bar.style.display = "none";
+        bar.innerHTML = "";
+    }
 }
 
 function escapeHtml(str) {

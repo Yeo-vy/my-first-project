@@ -5,19 +5,35 @@ import json
 import time
 import mimetypes
 import datetime
+import queue
 import threading
+import unicodedata
 from typing import Optional, List
-from fastapi import FastAPI, Depends, HTTPException, Query, Request, Response, UploadFile, File, Form, BackgroundTasks
+from fastapi import FastAPI, Depends, HTTPException, Query, Request, Response, UploadFile, File, Form
 from fastapi.responses import StreamingResponse, FileResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.middleware.cors import CORSMiddleware
+from sqlalchemy import select
 from sqlalchemy.orm import Session
 from pydantic import BaseModel
 
 from server.database import init_db, get_db, SessionLocal
 from server.models import Folder, Board, TranscriptSegment, BoardSummary, BoardChat, Bookmark
-from server.migrator import sync_filesystem_to_db, ms_to_timestamp, timestamp_to_ms, extract_simple_keywords
-from server.ai_service import extract_keywords_ai, generate_summary_ai, stream_board_chat, process_audio_file_to_board
+from server.migrator import (
+    sync_filesystem_to_db,
+    ms_to_timestamp,
+    timestamp_to_ms,
+    extract_simple_keywords,
+    get_folder_name,
+    get_or_create_folder,
+)
+from server.ai_service import (
+    extract_keywords_ai,
+    generate_summary_ai,
+    stream_board_chat,
+    process_audio_file_to_board,
+    sanitize_filename,
+)
 
 app = FastAPI(title="다글로 (daglo) AI 풀스택 서버", version="2.5.0")
 
@@ -33,72 +49,151 @@ BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 STATIC_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "static")
 AUDIO_DIR = os.path.join(BASE_DIR, "녹음파일원본")
 RESULT_DIR = os.path.join(BASE_DIR, "강의 녹음 변환")
+TIMESTAMP_RE = re.compile(r'\[(\d{1,2}:\d{2}(?::\d{2})?)\]')
+
+# -----------------
+# STT 작업 큐 + 워커 (동시 실행 수를 제한해 API/메모리 폭주를 막는다)
+# -----------------
+VALID_AUDIO_EXTS = (".mp3", ".m4a", ".wav", ".mp4")
+STT_WORKERS = max(1, int(os.getenv("STT_WORKERS", "2")))
+
+stt_queue: "queue.Queue[int]" = queue.Queue()
+_queued_board_ids = set()
+_queue_lock = threading.Lock()
+
+
+def enqueue_board(board_id: int) -> bool:
+    """이미 큐에 있거나 처리 중인 보드는 중복 투입하지 않는다."""
+    with _queue_lock:
+        if board_id in _queued_board_ids:
+            return False
+        _queued_board_ids.add(board_id)
+    stt_queue.put(board_id)
+    return True
+
+
+def stt_worker():
+    while True:
+        board_id = stt_queue.get()
+        try:
+            db = SessionLocal()
+            audio_path = None
+            try:
+                board = db.query(Board).filter_by(id=board_id).first()
+                if board is None:
+                    continue
+                if board.audio_path and os.path.exists(board.audio_path):
+                    audio_path = board.audio_path
+                    board.status = "PROCESSING"
+                    board.progress_percent = 1
+                    board.error_message = None
+                else:
+                    board.status = "FAILED"
+                    board.progress_percent = 0
+                    board.error_message = "오디오 파일을 찾을 수 없습니다."
+                db.commit()
+            finally:
+                db.close()
+
+            if audio_path:
+                process_audio_file_to_board(board_id, audio_path, SessionLocal)
+        except Exception as e:
+            print(f"[STT-WORKER-ERROR] Board #{board_id}: {e}")
+            db = SessionLocal()
+            try:
+                board = db.query(Board).filter_by(id=board_id).first()
+                if board and board.status == "PROCESSING":
+                    board.status = "FAILED"
+                    board.error_message = str(e)
+                    db.commit()
+            finally:
+                db.close()
+        finally:
+            with _queue_lock:
+                _queued_board_ids.discard(board_id)
+            stt_queue.task_done()
+
 
 # -----------------
 # Background Auto Folder Watcher (SFTP/RaiDrive 자동 감지 엔진)
 # -----------------
 def background_audio_watcher():
-    """SFTP/RaiDrive 등으로 `녹음파일원본` 폴더에 복사된 새 오디오를 주기적으로 감지하여 자동 STT 실행"""
+    """`녹음파일원본`에 복사된 새 오디오를 감지해 PENDING 보드로 등록하고 STT 큐에 넣는다."""
     time.sleep(3)
-    valid_exts = ('.mp3', '.m4a', '.wav', '.mp4')
-    processed_sizes = {}
+    seen_sizes = {}
 
     while True:
+        db = None
         try:
             db = SessionLocal()
+            live_paths = set()
+
             for root_dir, _, files in os.walk(AUDIO_DIR):
-                rel_dir = os.path.relpath(root_dir, AUDIO_DIR)
-                if rel_dir == "." or rel_dir == "":
-                    folder_name = "기본 폴더"
-                else:
-                    folder_name = os.path.basename(os.path.normpath(root_dir))
-                
-                # 폴더 확인
-                folder = db.query(Folder).filter_by(name=folder_name).first()
-                if not folder:
-                    folder = Folder(name=folder_name)
-                    db.add(folder)
-                    db.commit()
-                    db.refresh(folder)
+                audio_files = [f for f in files if f.lower().endswith(VALID_AUDIO_EXTS)]
+                # 오디오가 없는 빈 디렉터리로 삭제된 폴더가 되살아나지 않도록 건너뛴다
+                if not audio_files:
+                    continue
 
-                for f in files:
-                    if f.lower().endswith(valid_exts):
-                        full_path = os.path.join(root_dir, f)
-                        base_name = os.path.splitext(f)[0]
+                folder = get_or_create_folder(db, get_folder_name(root_dir, AUDIO_DIR))
+
+                for f in audio_files:
+                    full_path = os.path.join(root_dir, f)
+                    live_paths.add(full_path)
+                    try:
                         current_size = os.path.getsize(full_path)
+                    except OSError:
+                        continue
 
-                        # 파일 복사가 진행 중인지 확인 (5초간 크기 변동이 없는지)
-                        last_size, last_time = processed_sizes.get(full_path, (None, None))
-                        if last_size != current_size:
-                            processed_sizes[full_path] = (current_size, time.time())
-                            continue
+                    # 복사가 끝났는지 확인: 크기가 4초 이상 변하지 않아야 한다
+                    last = seen_sizes.get(full_path)
+                    if last is None or last[0] != current_size:
+                        seen_sizes[full_path] = (current_size, time.time())
+                        continue
+                    if time.time() - last[1] < 4:
+                        continue
 
-                        # 크기 변동 없이 최소 4초 경과 = 복사 완료로 판정
-                        if time.time() - last_time < 4:
-                            continue
+                    base_name = os.path.splitext(f)[0]
+                    board = db.query(Board).filter_by(folder_id=folder.id, title=base_name).first()
+                    if board is None:
+                        board = Board(
+                            folder_id=folder.id,
+                            title=base_name,
+                            audio_path=full_path,
+                            audio_filename=f,
+                            status="PENDING",
+                            progress_percent=0,
+                            keywords_json="[]",
+                            recorded_at=datetime.datetime.fromtimestamp(os.path.getmtime(full_path)),
+                        )
+                        db.add(board)
+                        db.commit()
+                        db.refresh(board)
+                        print(f"[AUTO-DETECT] New audio found: {f} (Board #{board.id})")
+                    elif not board.audio_path:
+                        board.audio_path = full_path
+                        board.audio_filename = f
+                        db.commit()
 
-                        board = db.query(Board).filter_by(folder_id=folder.id, title=base_name, is_deleted=False).first()
-                        if not board:
-                            board = Board(
-                                folder_id=folder.id,
-                                title=base_name,
-                                audio_path=full_path,
-                                audio_filename=f,
-                                status="PROCESSING",
-                                progress_percent=0,
-                                keywords_json="[]",
-                                recorded_at=datetime.datetime.fromtimestamp(os.path.getmtime(full_path))
-                            )
-                            db.add(board)
-                            db.commit()
-                            db.refresh(board)
-                            print(f"[AUTO-DETECT] New audio found: {f} (Board #{board.id})")
-                            threading.Thread(target=process_audio_file_to_board, args=(board.id, full_path, SessionLocal), daemon=True).start()
+                    if board.status == "PENDING" and not board.is_deleted:
+                        if enqueue_board(board.id):
+                            print(f"[QUEUE] Board #{board.id} ({board.title}) queued for STT.")
 
-            db.close()
+            # 사라진 파일의 추적 정보를 정리해 메모리가 무한히 늘지 않게 한다
+            for gone in set(seen_sizes) - live_paths:
+                seen_sizes.pop(gone, None)
+
+            # 파일 감시와 별개로 남아 있는 PENDING 보드를 회수한다 (업로드/재시도 경로)
+            pending = db.query(Board).filter(Board.status == "PENDING", Board.is_deleted == False).all()
+            for b in pending:
+                if b.audio_path and os.path.exists(b.audio_path):
+                    enqueue_board(b.id)
         except Exception as e:
-            pass
+            print(f"[WATCHER-ERROR] {e}")
+        finally:
+            if db is not None:
+                db.close()
         time.sleep(5)
+
 
 @app.on_event("startup")
 def startup_event():
@@ -106,9 +201,21 @@ def startup_event():
     db = SessionLocal()
     try:
         sync_filesystem_to_db(db)
+        # 이전 실행이 종료되며 중단된 변환 작업을 회수한다 (워커 스레드는 프로세스와 함께 죽는다)
+        stuck = db.query(Board).filter(Board.status == "PROCESSING").all()
+        for b in stuck:
+            b.status = "PENDING"
+            b.progress_percent = 0
+        if stuck:
+            db.commit()
+            print(f"[INFO] Requeued {len(stuck)} interrupted board(s).")
         print("[INFO] DB initialized and filesystem synced.")
     finally:
         db.close()
+
+    for i in range(STT_WORKERS):
+        threading.Thread(target=stt_worker, name=f"stt-worker-{i+1}", daemon=True).start()
+    print(f"[INFO] {STT_WORKERS} STT worker(s) started.")
 
     # 백그라운드 폴더 감시 스레드 가동
     watcher_thread = threading.Thread(target=background_audio_watcher, daemon=True)
@@ -155,6 +262,42 @@ class SummaryRequest(BaseModel):
 class ChatMessageRequest(BaseModel):
     message: str
 
+def srt_timestamp(ms: int) -> str:
+    """SRT 규격 타임코드(HH:MM:SS,mmm)를 만든다."""
+    ms = max(0, int(ms))
+    hours, rem = divmod(ms, 3_600_000)
+    minutes, rem = divmod(rem, 60_000)
+    seconds, millis = divmod(rem, 1000)
+    return f"{hours:02d}:{minutes:02d}:{seconds:02d},{millis:03d}"
+
+
+def parse_transcript_text(text: str) -> List[dict]:
+    """`[MM:SS] 본문` 형식의 평문을 세그먼트 딕셔너리 목록으로 변환한다."""
+    segments = []
+    last_ms = 0
+    for line in (text or "").splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        match = TIMESTAMP_RE.search(line)
+        if match:
+            ts_str = match.group(1)
+            last_ms = timestamp_to_ms(ts_str)
+            content = line.replace(f"[{ts_str}]", "", 1).strip()
+            stamp = f"[{ts_str}]"
+        else:
+            content = line
+            stamp = f"[{ms_to_timestamp(last_ms)}]"
+        segments.append({
+            "start_time_ms": last_ms,
+            "end_time_ms": last_ms + 10000,
+            "timestamp_str": stamp,
+            "speaker": "화자 1",
+            "content": content,
+        })
+    return segments
+
+
 def format_seconds(seconds: float) -> str:
     s = int(seconds)
     h = s // 3600
@@ -167,6 +310,18 @@ def format_seconds(seconds: float) -> str:
 # -----------------
 # 1. Folder Endpoints
 # -----------------
+@app.get("/api/health")
+def health_check(db: Session = Depends(get_db)):
+    return {
+        "status": "ok",
+        "boards": db.query(Board).filter_by(is_deleted=False).count(),
+        "processing": db.query(Board).filter(Board.status.in_(["PROCESSING", "PENDING"])).count(),
+        "queue_depth": stt_queue.qsize(),
+        "workers": STT_WORKERS,
+        "ai_ready": bool(os.getenv("GEMINI_API_KEY") or os.getenv("GEMINI_API_KEY_PAID")),
+    }
+
+
 @app.get("/api/debug/dbpath")
 def get_dbpath():
     from server.database import DB_PATH
@@ -222,8 +377,19 @@ def delete_folder(folder_id: int, db: Session = Depends(get_db)):
     if default_folder:
         db.query(Board).filter_by(folder_id=folder.id).update({Board.folder_id: default_folder.id})
 
+    folder_name = folder.name
     db.delete(folder)
     db.commit()
+
+    # 빈 디렉터리를 남겨 두면 감시 스레드가 폴더를 되살리므로 함께 정리한다
+    for base in (AUDIO_DIR, RESULT_DIR):
+        target = os.path.join(base, folder_name)
+        try:
+            if os.path.isdir(target) and not os.listdir(target):
+                os.rmdir(target)
+        except OSError:
+            pass
+
     return {"ok": True}
 
 # -----------------
@@ -252,7 +418,7 @@ def get_boards(
     if search:
         search_kw = f"%{search.strip()}%"
         # 제목 검색뿐만 아니라 자막 본문 내용도 검색
-        matched_segment_boards = db.query(TranscriptSegment.board_id).filter(TranscriptSegment.content.ilike(search_kw)).subquery()
+        matched_segment_boards = select(TranscriptSegment.board_id).where(TranscriptSegment.content.ilike(search_kw))
         query = query.filter((Board.title.ilike(search_kw)) | (Board.id.in_(matched_segment_boards)))
 
     boards = query.order_by(Board.created_at.desc()).all()
@@ -271,6 +437,7 @@ def get_boards(
             "duration_str": format_seconds(b.duration_seconds),
             "status": b.status,
             "progress_percent": b.progress_percent,
+            "error_message": b.error_message,
             "is_starred": b.is_starred,
             "is_deleted": b.is_deleted,
             "keywords": keywords,
@@ -331,6 +498,7 @@ def get_board_detail(board_id: int, db: Session = Depends(get_db)):
         "duration_str": format_seconds(b.duration_seconds),
         "status": b.status,
         "progress_percent": b.progress_percent,
+        "error_message": b.error_message,
         "is_starred": b.is_starred,
         "is_deleted": b.is_deleted,
         "keywords": keywords,
@@ -386,6 +554,25 @@ def restore_board(board_id: int, db: Session = Depends(get_db)):
     db.commit()
     return {"ok": True}
 
+@app.post("/api/boards/{board_id}/reprocess")
+def reprocess_board(board_id: int, db: Session = Depends(get_db)):
+    """실패했거나 중단된 보드의 STT 변환을 다시 큐에 넣는다."""
+    b = db.query(Board).filter_by(id=board_id).first()
+    if not b:
+        raise HTTPException(status_code=404, detail="보드를 찾을 수 없습니다.")
+    if not b.audio_path or not os.path.exists(b.audio_path):
+        raise HTTPException(status_code=400, detail="원본 오디오 파일이 없어 다시 변환할 수 없습니다.")
+
+    b.status = "PENDING"
+    b.progress_percent = 0
+    b.error_message = None
+    b.is_deleted = False
+    db.commit()
+
+    enqueue_board(b.id)
+    return {"ok": True, "board_id": b.id, "status": "PENDING", "queue_depth": stt_queue.qsize()}
+
+
 @app.post("/api/boards/batch-delete")
 def batch_delete_boards(req: BatchDeleteRequest, db: Session = Depends(get_db)):
     if req.permanent:
@@ -412,33 +599,43 @@ def update_transcript(board_id: int, req: TranscriptUpdateRequest, db: Session =
     if not b:
         raise HTTPException(status_code=404, detail="보드를 찾을 수 없습니다.")
 
-    if req.segments:
-        # 세그먼트 배열 직접 수정
-        db.query(TranscriptSegment).filter_by(board_id=board_id).delete()
-        txt_lines = []
-        for idx, s in enumerate(req.segments):
-            seg = TranscriptSegment(
-                board_id=board_id,
-                start_time_ms=s.get("start_time_ms", 0),
-                end_time_ms=s.get("end_time_ms", 0),
-                timestamp_str=s.get("timestamp_str", "[00:00]"),
-                speaker=s.get("speaker", "화자 1"),
-                content=s.get("content", ""),
-                sequence=idx
-            )
-            db.add(seg)
-            txt_lines.append(f"{seg.timestamp_str} {seg.content}")
-        b.updated_at = datetime.datetime.utcnow()
-        db.commit()
+    if req.segments is not None:
+        new_segments = list(req.segments)
+    elif req.full_text is not None:
+        new_segments = parse_transcript_text(req.full_text)
+    else:
+        raise HTTPException(status_code=400, detail="segments 또는 full_text 중 하나는 필요합니다.")
 
-        if b.txt_path and os.path.exists(os.path.dirname(b.txt_path)):
-            try:
-                with open(b.txt_path, "w", encoding="utf-8") as f:
-                    f.write("\n\n".join(txt_lines))
-            except Exception:
-                pass
+    # 편집 화면의 일시적 오류로 기존 스크립트가 통째로 지워지는 사고를 막는다
+    if not new_segments and db.query(TranscriptSegment).filter_by(board_id=board_id).count() > 0:
+        raise HTTPException(status_code=400, detail="빈 스크립트로는 덮어쓸 수 없습니다.")
 
-    return {"ok": True}
+    db.query(TranscriptSegment).filter_by(board_id=board_id).delete()
+    txt_lines = []
+    for idx, s in enumerate(new_segments):
+        start_ms = int(s.get("start_time_ms", 0) or 0)
+        seg = TranscriptSegment(
+            board_id=board_id,
+            start_time_ms=start_ms,
+            end_time_ms=int(s.get("end_time_ms", 0) or 0) or (start_ms + 10000),
+            timestamp_str=s.get("timestamp_str") or f"[{ms_to_timestamp(start_ms)}]",
+            speaker=s.get("speaker") or "화자 1",
+            content=s.get("content", ""),
+            sequence=idx
+        )
+        db.add(seg)
+        txt_lines.append(f"{seg.timestamp_str} {seg.content}")
+    b.updated_at = datetime.datetime.utcnow()
+    db.commit()
+
+    if b.txt_path and os.path.isdir(os.path.dirname(b.txt_path)):
+        try:
+            with open(b.txt_path, "w", encoding="utf-8") as f:
+                f.write("\n\n".join(txt_lines))
+        except OSError as e:
+            print(f"[TRANSCRIPT-WARN] Board #{board_id} txt save failed: {e}")
+
+    return {"ok": True, "segment_count": len(new_segments)}
 
 @app.post("/api/boards/{board_id}/speakers/rename")
 def rename_speaker_in_board(board_id: int, req: SpeakerRenameRequest, db: Session = Depends(get_db)):
@@ -639,13 +836,16 @@ def export_board(
     if format == "srt":
         srt_lines = []
         for i, s in enumerate(b.segments, start=1):
-            start_t = datetime.timedelta(milliseconds=s.start_time_ms)
-            end_t = datetime.timedelta(milliseconds=s.end_time_ms)
+            start_ms = s.start_time_ms or 0
+            # 종료 시각이 비었거나 역전된 경우 최소 1초는 보장한다
+            end_ms = s.end_time_ms if (s.end_time_ms or 0) > start_ms else start_ms + 1000
             speaker_prefix = f"[{s.speaker}] " if (include_speakers and s.speaker) else ""
-            srt_lines.append(f"{i}\n{str(start_t)[:11]},000 --> {str(end_t)[:11]},000\n{speaker_prefix}{s.content}\n")
+            srt_lines.append(
+                f"{i}\n{srt_timestamp(start_ms)} --> {srt_timestamp(end_ms)}\n{speaker_prefix}{s.content}\n"
+            )
         content = "\n".join(srt_lines)
         media_type = "text/plain; charset=utf-8"
-        filename = f"{b.title}.srt"
+        filename = f"{sanitize_filename(b.title)}.srt"
     elif format == "md":
         lines = [f"# {b.title}\n\n**녹음 일시**: {b.created_at}\n\n---\n"]
         for s in b.segments:
@@ -655,7 +855,7 @@ def export_board(
             lines.append(f"{prefix}{s.content}\n")
         content = "\n".join(lines)
         media_type = "text/markdown; charset=utf-8"
-        filename = f"{b.title}.md"
+        filename = f"{sanitize_filename(b.title)}.md"
     else:
         lines = []
         for s in b.segments:
@@ -665,7 +865,7 @@ def export_board(
             lines.append(f"{prefix}{s.content}")
         content = "\n\n".join(lines)
         media_type = "text/plain; charset=utf-8"
-        filename = f"{b.title}.txt"
+        filename = f"{sanitize_filename(b.title)}.txt"
 
     import urllib.parse
     encoded_filename = urllib.parse.quote(filename)
@@ -678,50 +878,84 @@ def export_board(
 # -----------------
 # 7. Upload & Mobile Endpoint
 # -----------------
+MAX_UPLOAD_BYTES = int(os.getenv("MAX_UPLOAD_MB", "500")) * 1024 * 1024
+
+
 @app.post("/api/boards/upload")
 async def upload_audio_file(
     file: UploadFile = File(...),
     folder_id: int = Form(...),
-    background_tasks: BackgroundTasks = BackgroundTasks(),
     db: Session = Depends(get_db)
 ):
+    # 업로드 파일명은 신뢰할 수 없다: 경로 구분자·상위 경로 참조를 제거한다
+    raw_name = unicodedata.normalize("NFC", os.path.basename(file.filename or ""))
+    stem, ext = os.path.splitext(raw_name)
+    ext = ext.lower()
+    if ext not in VALID_AUDIO_EXTS:
+        raise HTTPException(
+            status_code=400,
+            detail=f"지원하지 않는 형식입니다. ({', '.join(VALID_AUDIO_EXTS)}만 업로드할 수 있습니다.)"
+        )
+
+    base_name = sanitize_filename(stem, fallback=f"recording_{int(time.time())}")
+    filename = base_name + ext
+
     folder = db.query(Folder).filter_by(id=folder_id).first()
     if not folder:
-        folder = db.query(Folder).filter_by(name="기본 폴더").first()
+        folder = get_or_create_folder(db, "기본 폴더")
 
-    folder_name = folder.name if folder else "기본 폴더"
-    target_dir = os.path.join(AUDIO_DIR, folder_name)
+    target_dir = os.path.join(AUDIO_DIR, sanitize_filename(folder.name))
     os.makedirs(target_dir, exist_ok=True)
-
-    filename = file.filename
     dest_path = os.path.join(target_dir, filename)
 
-    with open(dest_path, "wb") as f:
-        content = await file.read()
-        f.write(content)
+    # 같은 이름이 이미 있으면 덮어쓰지 않고 새 이름을 부여한다
+    if os.path.exists(dest_path):
+        base_name = f"{base_name}_{datetime.datetime.now().strftime('%Y%m%d_%H%M%S')}"
+        filename = base_name + ext
+        dest_path = os.path.join(target_dir, filename)
 
-    base_name = os.path.splitext(filename)[0]
-    board = db.query(Board).filter_by(folder_id=folder.id, title=base_name).first()
-    if not board:
-        board = Board(
-            folder_id=folder.id,
-            title=base_name,
-            audio_path=dest_path,
-            audio_filename=filename,
-            duration_seconds=0.0,
-            status="PROCESSING",
-            progress_percent=5,
-            keywords_json="[]",
-            recorded_at=datetime.datetime.utcnow()
-        )
-        db.add(board)
-        db.commit()
-        db.refresh(board)
+    written = 0
+    try:
+        with open(dest_path, "wb") as f:
+            while True:
+                chunk = await file.read(1024 * 1024)
+                if not chunk:
+                    break
+                written += len(chunk)
+                if written > MAX_UPLOAD_BYTES:
+                    raise HTTPException(
+                        status_code=413,
+                        detail=f"파일이 너무 큽니다. (최대 {MAX_UPLOAD_BYTES // (1024 * 1024)}MB)"
+                    )
+                f.write(chunk)
+    except Exception:
+        if os.path.exists(dest_path):
+            os.remove(dest_path)
+        raise
 
-    # 백그라운드 STT 및 AI 요약 실행
-    background_tasks.add_task(process_audio_file_to_board, board.id, dest_path, SessionLocal)
+    board = Board(
+        folder_id=folder.id,
+        title=base_name,
+        audio_path=dest_path,
+        audio_filename=filename,
+        duration_seconds=0.0,
+        status="PENDING",
+        progress_percent=0,
+        keywords_json="[]",
+        recorded_at=datetime.datetime.utcnow()
+    )
+    db.add(board)
+    db.commit()
+    db.refresh(board)
 
-    return {"ok": True, "board_id": board.id, "title": board.title, "status": "PROCESSING"}
+    enqueue_board(board.id)
+    return {
+        "ok": True,
+        "board_id": board.id,
+        "title": board.title,
+        "status": "PENDING",
+        "queue_depth": stt_queue.qsize(),
+    }
 
 # -----------------
 # 8. Static Files & Root

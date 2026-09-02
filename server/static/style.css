@@ -1285,3 +1285,52 @@ body {
     opacity: 1;
     bottom: 95px;
 }
+
+
+/* 변환 대기 상태 뱃지 및 상세 화면 상태 바 */
+.status-tag.pending {
+    background: rgba(148, 163, 184, 0.16);
+    color: #64748b;
+}
+
+.detail-status-bar {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    margin: 0 24px 12px;
+    padding: 10px 14px;
+    border-radius: 8px;
+    font-size: 13px;
+    font-weight: 500;
+}
+
+.detail-status-bar.processing {
+    background: rgba(59, 130, 246, 0.1);
+    color: #2563eb;
+    border: 1px solid rgba(59, 130, 246, 0.25);
+}
+
+.detail-status-bar.failed {
+    background: rgba(239, 68, 68, 0.1);
+    color: #dc2626;
+    border: 1px solid rgba(239, 68, 68, 0.25);
+}
+
+.detail-status-bar .mini-progress {
+    flex: 1;
+    height: 6px;
+    border-radius: 3px;
+    background: rgba(59, 130, 246, 0.18);
+    overflow: hidden;
+}
+
+.detail-status-bar .mini-progress-fill {
+    height: 100%;
+    background: #3b82f6;
+    border-radius: 3px;
+    transition: width 0.4s ease;
+}
+
+.detail-status-bar button {
+    margin-left: auto;
+}

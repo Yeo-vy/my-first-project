@@ -24,6 +24,15 @@ OVERLAP_MS = 30 * 1000             # 30초 오버랩
 CHUNK_STEP_MS = CHUNK_LENGTH_MS - OVERLAP_MS
 TIMESTAMP_PATTERN = re.compile(r'\[(\d{2}:\d{2}(?::\d{2})?)\]')
 
+_ILLEGAL_FILENAME_CHARS = re.compile(r'[<>:"/\\|?*\x00-\x1f]')
+
+
+def sanitize_filename(name: str, fallback: str = "untitled") -> str:
+    """윈도우/리눅스 공통으로 안전한 파일명으로 정리한다 (경로 구분자·예약문자 제거)."""
+    cleaned = _ILLEGAL_FILENAME_CHARS.sub("_", (name or "").strip())
+    cleaned = cleaned.strip(" .")
+    return cleaned[:180] or fallback
+
 def get_client() -> Optional[genai.Client]:
     global active_key_index
     if not api_keys:
@@ -134,7 +143,7 @@ def transcribe_chunk_with_fallback(temp_chunk_path: str, display_name: str, prom
 
 def process_audio_file_to_board(board_id: int, audio_path: str, db_session_factory, progress_callback: Optional[Callable[[int], None]] = None):
     """오디오 파일을 청크 단위로 나누고 Gemini STT를 실행하여 Board에 저장하는 완전 자동화 파이프라인"""
-    from server.models import Board, TranscriptSegment, BoardSummary
+    from server.models import Board, TranscriptSegment, BoardSummary, Folder
 
     if AudioSegment is None:
         raise RuntimeError("pydub 라이브러리가 필요합니다.")
@@ -238,38 +247,52 @@ def process_audio_file_to_board(board_id: int, audio_path: str, db_session_facto
 
         # 텍스트 파일 저장
         if not board.txt_path:
-            import os
             RESULT_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "강의 녹음 변환")
-            folder_name = db.query(Folder).filter_by(id=board.folder_id).first().name
+            folder = db.query(Folder).filter_by(id=board.folder_id).first()
+            folder_name = folder.name if folder else "기본 폴더"
             if folder_name == "기본 폴더":
                 target_dir = RESULT_DIR
             else:
-                target_dir = os.path.join(RESULT_DIR, folder_name)
+                target_dir = os.path.join(RESULT_DIR, sanitize_filename(folder_name))
             os.makedirs(target_dir, exist_ok=True)
-            board.txt_path = os.path.join(target_dir, f"{board.title}.txt")
+            board.txt_path = os.path.join(target_dir, f"{sanitize_filename(board.title)}.txt")
             db.commit()
 
-        if board.txt_path:
+        try:
             with open(board.txt_path, "w", encoding="utf-8") as tf:
                 tf.write("\n\n".join(txt_lines))
+        except OSError as werr:
+            # 세그먼트는 이미 DB 에 확정됐으므로 txt 저장 실패로 변환 전체를 실패 처리하지 않는다
+            print(f"[AI-WARN] Board #{board.id} txt save failed: {werr}")
 
-        # 후처리 1: AI 키워드 자동 추출
+        # 후처리 1: AI 키워드 자동 추출 (실패해도 변환 결과는 유지)
         board.progress_percent = 90
         db.commit()
-        keywords = extract_keywords_ai(full_transcript)
-        board.keywords_json = json.dumps(keywords, ensure_ascii=False)
+        try:
+            keywords = extract_keywords_ai(full_transcript)
+            if keywords:
+                board.keywords_json = json.dumps(keywords, ensure_ascii=False)
+        except Exception as kerr:
+            print(f"[AI-WARN] Board #{board.id} keyword extraction failed: {kerr}")
 
-        # 후처리 2: 기본 3단 요약 자동 생성
+        # 후처리 2: 기본 3단 요약 자동 생성 (실패해도 변환 결과는 유지)
         board.progress_percent = 95
         db.commit()
-        basic_summary = generate_summary_ai(full_transcript, "BASIC")
-        summary_obj = BoardSummary(
-            board_id=board.id,
-            summary_type="BASIC",
-            title="기본 요약",
-            content=basic_summary
-        )
-        db.add(summary_obj)
+        try:
+            basic_summary = generate_summary_ai(full_transcript, "BASIC")
+            existing_basic = db.query(BoardSummary).filter_by(board_id=board.id, summary_type="BASIC").first()
+            if existing_basic:
+                existing_basic.content = basic_summary
+                existing_basic.created_at = datetime.datetime.utcnow()
+            else:
+                db.add(BoardSummary(
+                    board_id=board.id,
+                    summary_type="BASIC",
+                    title="기본 요약",
+                    content=basic_summary
+                ))
+        except Exception as serr:
+            print(f"[AI-WARN] Board #{board.id} summary generation failed: {serr}")
 
         board.status = "COMPLETED"
         board.progress_percent = 100

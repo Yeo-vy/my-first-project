@@ -110,135 +110,148 @@ def sync_filesystem_to_db(db: Session):
 
     # 3. '강의 녹음 변환' 폴더의 txt 파일들을 Board로 등록
     for root_dir, _, files in os.walk(RESULT_DIR):
+        txt_files = [
+            f for f in files
+            if f.endswith('.txt') and not f.endswith('_수정본.txt') and '_chunk_' not in f
+        ]
+        if not txt_files:
+            continue
+
         folder_name = get_folder_name(root_dir, RESULT_DIR)
         current_folder = get_or_create_folder(db, folder_name)
 
-        for f in files:
-            if f.endswith('.txt') and not f.endswith('_수정본.txt') and not '_chunk_' in f:
-                base_name = os.path.splitext(f)[0]
-                txt_full_path = os.path.join(root_dir, f)
+        for f in txt_files:
+            base_name = os.path.splitext(f)[0]
+            txt_full_path = os.path.join(root_dir, f)
 
-                # DB에 이미 있는지 확인 (title과 folder_id로 확인)
-                existing_board = db.query(Board).filter_by(folder_id=current_folder.id, title=base_name).first()
-                if existing_board and len(existing_board.segments) > 0:
+            # DB에 이미 있는지 확인 (title과 folder_id로 확인)
+            existing_board = db.query(Board).filter_by(folder_id=current_folder.id, title=base_name).first()
+            if existing_board and len(existing_board.segments) > 0:
+                continue
+
+            # 오디오 맵에서 오디오 파일 찾기
+            audio_file_path = audio_map.get(base_name)
+            audio_file_name = os.path.basename(audio_file_path) if audio_file_path else None
+
+            # 텍스트 읽고 세그먼트 파싱
+            try:
+                with open(txt_full_path, "r", encoding="utf-8") as tf:
+                    full_content = tf.read().strip()
+            except Exception:
+                continue
+
+            if not full_content:
+                continue
+
+            lines = full_content.split('\n')
+            segments = []
+            max_time_ms = 0
+            seq = 0
+
+            for line in lines:
+                line = line.strip()
+                if not line:
                     continue
-
-                # 오디오 맵에서 오디오 파일 찾기
-                audio_file_path = audio_map.get(base_name)
-                audio_file_name = os.path.basename(audio_file_path) if audio_file_path else None
-
-                # 텍스트 읽고 세그먼트 파싱
-                try:
-                    with open(txt_full_path, "r", encoding="utf-8") as tf:
-                        full_content = tf.read().strip()
-                except Exception:
-                    continue
-
-                if not full_content:
-                    continue
-
-                lines = full_content.split('\n')
-                segments = []
-                max_time_ms = 0
-                seq = 0
-
-                for line in lines:
-                    line = line.strip()
-                    if not line:
-                        continue
-                    match = TIMESTAMP_PATTERN.search(line)
-                    if match:
-                        ts_str = match.group(1)
-                        t_ms = timestamp_to_ms(ts_str)
-                        if t_ms > max_time_ms:
-                            max_time_ms = t_ms
-                        clean_text = line.replace(f"[{ts_str}]", "").strip()
-                        segments.append({
-                            "start_time_ms": t_ms,
-                            "end_time_ms": t_ms + 10000,
-                            "timestamp_str": f"[{ts_str}]",
-                            "speaker": "화자 1",
-                            "content": clean_text,
-                            "sequence": seq
-                        })
-                    else:
-                        segments.append({
-                            "start_time_ms": max_time_ms,
-                            "end_time_ms": max_time_ms + 5000,
-                            "timestamp_str": f"[{ms_to_timestamp(max_time_ms)}]",
-                            "speaker": "화자 1",
-                            "content": line,
-                            "sequence": seq
-                        })
-                    seq += 1
-
-                # 오디오 길이가 없으면 마지막 세그먼트 시간 + 15초로 추정
-                duration_sec = (max_time_ms // 1000) + 15.0
-                keywords = extract_simple_keywords(full_content, limit=8)
-
-                if existing_board:
-                    board = existing_board
-                    board.audio_path = audio_file_path
-                    board.audio_filename = audio_file_name
-                    board.txt_path = txt_full_path
-                    board.duration_seconds = duration_sec
-                    board.keywords_json = json.dumps(keywords, ensure_ascii=False)
-                    board.status = "COMPLETED"
+                match = TIMESTAMP_PATTERN.search(line)
+                if match:
+                    ts_str = match.group(1)
+                    t_ms = timestamp_to_ms(ts_str)
+                    if t_ms > max_time_ms:
+                        max_time_ms = t_ms
+                    clean_text = line.replace(f"[{ts_str}]", "").strip()
+                    segments.append({
+                        "start_time_ms": t_ms,
+                        "end_time_ms": t_ms + 10000,
+                        "timestamp_str": f"[{ts_str}]",
+                        "speaker": "화자 1",
+                        "content": clean_text,
+                        "sequence": seq
+                    })
                 else:
-                    board = Board(
-                        folder_id=current_folder.id,
-                        title=base_name,
-                        audio_path=audio_file_path,
-                        audio_filename=audio_file_name,
-                        txt_path=txt_full_path,
-                        duration_seconds=duration_sec,
-                        status="COMPLETED",
-                        progress_percent=100,
-                        keywords_json=json.dumps(keywords, ensure_ascii=False),
-                        recorded_at=datetime.datetime.fromtimestamp(os.path.getmtime(txt_full_path))
-                    )
-                    db.add(board)
-                    db.commit()
-                    db.refresh(board)
+                    segments.append({
+                        "start_time_ms": max_time_ms,
+                        "end_time_ms": max_time_ms + 5000,
+                        "timestamp_str": f"[{ms_to_timestamp(max_time_ms)}]",
+                        "speaker": "화자 1",
+                        "content": line,
+                        "sequence": seq
+                    })
+                seq += 1
 
-                # 기존 세그먼트 삭제 후 재등록
-                db.query(TranscriptSegment).filter_by(board_id=board.id).delete()
-                for seg_data in segments:
-                    seg = TranscriptSegment(
-                        board_id=board.id,
-                        start_time_ms=seg_data["start_time_ms"],
-                        end_time_ms=seg_data["end_time_ms"],
-                        timestamp_str=seg_data["timestamp_str"],
-                        speaker=seg_data["speaker"],
-                        content=seg_data["content"],
-                        sequence=seg_data["sequence"]
-                    )
-                    db.add(seg)
+            # 오디오 길이가 없으면 마지막 세그먼트 시간 + 15초로 추정
+            duration_sec = (max_time_ms // 1000) + 15.0
+            keywords = extract_simple_keywords(full_content, limit=8)
 
+            if existing_board:
+                board = existing_board
+                board.audio_path = audio_file_path
+                board.audio_filename = audio_file_name
+                board.txt_path = txt_full_path
+                board.duration_seconds = duration_sec
+                board.keywords_json = json.dumps(keywords, ensure_ascii=False)
+                board.status = "COMPLETED"
+            else:
+                board = Board(
+                    folder_id=current_folder.id,
+                    title=base_name,
+                    audio_path=audio_file_path,
+                    audio_filename=audio_file_name,
+                    txt_path=txt_full_path,
+                    duration_seconds=duration_sec,
+                    status="COMPLETED",
+                    progress_percent=100,
+                    keywords_json=json.dumps(keywords, ensure_ascii=False),
+                    recorded_at=datetime.datetime.fromtimestamp(os.path.getmtime(txt_full_path))
+                )
+                db.add(board)
                 db.commit()
+                db.refresh(board)
+
+            # 기존 세그먼트 삭제 후 재등록
+            db.query(TranscriptSegment).filter_by(board_id=board.id).delete()
+            for seg_data in segments:
+                seg = TranscriptSegment(
+                    board_id=board.id,
+                    start_time_ms=seg_data["start_time_ms"],
+                    end_time_ms=seg_data["end_time_ms"],
+                    timestamp_str=seg_data["timestamp_str"],
+                    speaker=seg_data["speaker"],
+                    content=seg_data["content"],
+                    sequence=seg_data["sequence"]
+                )
+                db.add(seg)
+
+            db.commit()
 
     # 4. 오디오 파일 중 아직 변환되지 않은 파일도 PROCESSING / PENDING 상태로 등록
     for root_dir, _, files in os.walk(AUDIO_DIR):
+        audio_files = [f for f in files if os.path.splitext(f)[1].lower() in ['.m4a', '.mp3', '.wav', '.mp4']]
+        if not audio_files:
+            continue
+
         folder_name = get_folder_name(root_dir, AUDIO_DIR)
         current_folder = get_or_create_folder(db, folder_name)
-        
-        for f in files:
-            ext = os.path.splitext(f)[1].lower()
-            if ext in ['.m4a', '.mp3', '.wav', '.mp4']:
-                base_name = os.path.splitext(f)[0]
-                full_audio_path = os.path.join(root_dir, f)
-                existing = db.query(Board).filter_by(folder_id=current_folder.id, title=base_name).first()
-                if not existing:
-                    board = Board(
-                        folder_id=current_folder.id,
-                        title=base_name,
-                        audio_path=full_audio_path,
-                        audio_filename=f,
-                        duration_seconds=0.0,
-                        status="PROCESSING",
-                        progress_percent=0,
-                        keywords_json="[]",
-                        recorded_at=datetime.datetime.fromtimestamp(os.path.getmtime(full_audio_path))
-                    )
-                    db.add(board)
-                    db.commit()
+
+        for f in audio_files:
+            base_name = os.path.splitext(f)[0]
+            full_audio_path = os.path.join(root_dir, f)
+            existing = db.query(Board).filter_by(folder_id=current_folder.id, title=base_name).first()
+            if not existing:
+                # PENDING 으로 등록해야 STT 워커가 집어간다 (PROCESSING 으로 두면 영구 정체된다)
+                board = Board(
+                    folder_id=current_folder.id,
+                    title=base_name,
+                    audio_path=full_audio_path,
+                    audio_filename=f,
+                    duration_seconds=0.0,
+                    status="PENDING",
+                    progress_percent=0,
+                    keywords_json="[]",
+                    recorded_at=datetime.datetime.fromtimestamp(os.path.getmtime(full_audio_path))
+                )
+                db.add(board)
+                db.commit()
+            elif not existing.audio_path:
+                existing.audio_path = full_audio_path
+                existing.audio_filename = f
+                db.commit()
