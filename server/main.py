@@ -3,6 +3,7 @@ import io
 import re
 import json
 import time
+import shutil
 import mimetypes
 import datetime
 import queue
@@ -30,6 +31,7 @@ from server.migrator import (
 )
 from server.ai_service import (
     GEMINI_TIMEOUT_MS,
+    terminate_active_media_processes,
     extract_keywords_ai,
     generate_summary_ai,
     stream_board_chat,
@@ -95,6 +97,8 @@ BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 STATIC_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "static")
 AUDIO_DIR = os.path.join(BASE_DIR, "녹음파일원본")
 RESULT_DIR = os.path.join(BASE_DIR, "강의 녹음 변환")
+# 웹에서 지운 파일을 옮겨 두는 곳. 감시 폴더 밖이라 탐색기 목록에서 사라진다.
+TRASH_DIR = os.path.join(BASE_DIR, "휴지통")
 TIMESTAMP_RE = re.compile(r'\[(\d{1,2}:\d{2}(?::\d{2})?)\]')
 
 # -----------------
@@ -355,18 +359,224 @@ MISSING_SCANS_BEFORE_DELETE = max(1, int(os.getenv("MISSING_SCANS_BEFORE_DELETE"
 MAX_AUTO_DELETE_PER_SCAN = max(1, int(os.getenv("MAX_AUTO_DELETE_PER_SCAN", "50")))
 
 
-def is_watched_path(path: str) -> bool:
-    """감시 폴더(`녹음파일원본`) 안쪽 경로인지 판별한다."""
+def is_inside(path: str, base: str) -> bool:
+    """path 가 base 폴더 안쪽인지 판별한다."""
     if not path:
         return False
     try:
         return os.path.commonpath([
             os.path.normcase(os.path.abspath(path)),
-            os.path.normcase(os.path.abspath(AUDIO_DIR)),
-        ]) == os.path.normcase(os.path.abspath(AUDIO_DIR))
+            os.path.normcase(os.path.abspath(base)),
+        ]) == os.path.normcase(os.path.abspath(base))
     except ValueError:
-        # 드라이브 문자가 다르면 commonpath 가 예외를 낸다 = 감시 대상 밖
+        # 드라이브 문자가 다르면 commonpath 가 예외를 낸다 = 바깥
         return False
+
+
+def is_watched_path(path: str) -> bool:
+    """감시 폴더(`녹음파일원본`) 안쪽 경로인지 판별한다."""
+    return is_inside(path, AUDIO_DIR)
+
+
+def is_managed_file(path: str) -> bool:
+    """서버가 관리하는 폴더 안의 파일인지 확인한다.
+
+    파일을 옮기거나 지우기 전에 반드시 통과시킨다. 이 밖에 있는 경로는
+    사용자가 직접 가리킨 남의 파일일 수 있으므로 절대 건드리지 않는다.
+    """
+    return any(is_inside(path, base) for base in (AUDIO_DIR, RESULT_DIR, TRASH_DIR))
+
+
+# -----------------
+# 웹에서 삭제 → 탐색기에서도 사라지게 (파일 삭제 동기화, 위 동기화의 반대 방향)
+# -----------------
+# 웹에서 보드를 지웠을 때 원본 오디오/변환 텍스트를 어떻게 할지 정한다.
+#   trash     : `휴지통` 폴더로 옮긴다 (기본값 — 탐색기에서는 사라지고, 복원하면 제자리로 돌아온다)
+#   permanent : 휴지통으로 보내는 삭제에서도 파일을 즉시 지운다 (되돌릴 수 없다)
+#   off       : 파일을 건드리지 않는다 (예전 동작. 감시 스레드가 보드를 되살릴 수 있다)
+WEB_DELETE_SYNC = os.getenv("WEB_DELETE_SYNC", "trash").lower()
+
+
+def board_trash_dir(board_id: int) -> str:
+    return os.path.join(TRASH_DIR, f"board_{board_id}")
+
+
+def unique_path(path: str) -> str:
+    """같은 이름이 이미 있으면 뒤에 _1, _2 를 붙여 겹치지 않는 경로를 만든다."""
+    if not os.path.exists(path):
+        return path
+    stem, ext = os.path.splitext(path)
+    for n in range(1, 1000):
+        candidate = f"{stem}_{n}{ext}"
+        if not os.path.exists(candidate):
+            return candidate
+    return f"{stem}_{int(time.time())}{ext}"
+
+
+def read_trash_meta(board_id: int) -> dict:
+    """휴지통에 넣을 때 남긴 원래 경로 기록을 읽는다."""
+    try:
+        with open(os.path.join(board_trash_dir(board_id), "meta.json"), "r", encoding="utf-8") as f:
+            meta = json.load(f)
+        return meta if isinstance(meta, dict) else {}
+    except (OSError, ValueError):
+        return {}
+
+
+def write_trash_meta(board_id: int, meta: dict) -> None:
+    target = board_trash_dir(board_id)
+    os.makedirs(target, exist_ok=True)
+    with open(os.path.join(target, "meta.json"), "w", encoding="utf-8") as f:
+        json.dump(meta, f, ensure_ascii=False, indent=2)
+
+
+# 변환 텍스트 옆에 같이 만들어지는 동반 파일들 (받아쓰기py.py / 자막저장서버.py 산출물).
+# 보드를 지웠는데 이것만 탐색기에 남아 있으면 '지운 것 같지 않으므로' 함께 정리한다.
+TRANSCRIPT_COMPANION_SUFFIXES = ("_강의스크립트.html", "_수정본.txt")
+
+
+def board_file_targets(board: Board) -> list:
+    """보드에 딸린 파일들을 (meta 키, 경로) 목록으로 모은다.
+
+    키가 'audio_path'/'txt_path' 인 항목은 DB 컬럼이 함께 따라다녀야 하는 파일이고,
+    'extra:N' 은 동반 파일이라 경로를 DB에 들고 있지 않다.
+    """
+    targets = []
+    for attr in ("audio_path", "txt_path"):
+        path = getattr(board, attr, None)
+        if path:
+            targets.append((attr, path))
+
+    txt_path = getattr(board, "txt_path", None)
+    if txt_path:
+        stem = os.path.splitext(txt_path)[0]
+        for i, suffix in enumerate(TRANSCRIPT_COMPANION_SUFFIXES):
+            companion = stem + suffix
+            if os.path.isfile(companion):
+                targets.append((f"extra:{i}", companion))
+    return targets
+
+
+def move_board_files_to_trash(board: Board) -> bool:
+    """보드의 원본 오디오와 변환 텍스트를 `휴지통` 폴더로 옮긴다.
+
+    감시 폴더 밖으로 빼기 때문에 탐색기에서 파일이 사라지고, 감시 스레드가
+    '원본이 다시 나타났다'며 휴지통의 보드를 되살리는 일도 없어진다.
+    복원하면 기록해 둔 원래 경로로 되돌아간다.
+    """
+    if WEB_DELETE_SYNC == "off":
+        return False
+    if WEB_DELETE_SYNC == "permanent":
+        return purge_board_files(board)
+
+    meta = read_trash_meta(board.id) or {"board_id": board.id, "files": {}}
+    meta.setdefault("files", {})
+    meta["title"] = board.title
+    meta["deleted_at"] = datetime.datetime.now().isoformat(timespec="seconds")
+
+    moved = []
+    for key, src in board_file_targets(board):
+        if not os.path.isfile(src):
+            continue
+        if is_inside(src, TRASH_DIR):      # 이미 휴지통 안이다
+            continue
+        if not is_managed_file(src):       # 서버가 관리하는 폴더 밖은 손대지 않는다
+            continue
+        try:
+            os.makedirs(board_trash_dir(board.id), exist_ok=True)
+            dest = unique_path(os.path.join(board_trash_dir(board.id), os.path.basename(src)))
+            shutil.move(src, dest)
+        except OSError as e:
+            print(f"[WEB-DELETE-WARN] #{board.id} {key} 휴지통 이동 실패 ({src}): {e}", flush=True)
+            continue
+        meta["files"][key] = {"original": src, "trash": dest}
+        if key in ("audio_path", "txt_path"):
+            setattr(board, key, dest)
+        moved.append(os.path.basename(dest))
+
+    if moved:
+        write_trash_meta(board.id, meta)
+        print(
+            f"[WEB-DELETE] #{board.id} {board.title}: 파일 {len(moved)}개를 휴지통으로 옮겼습니다 "
+            f"({', '.join(moved)})",
+            flush=True,
+        )
+    return bool(moved)
+
+
+def restore_board_files_from_trash(board: Board) -> bool:
+    """휴지통으로 옮겼던 파일을 원래 자리로 되돌린다."""
+    meta = read_trash_meta(board.id)
+    files = meta.get("files") or {}
+    if not files:
+        return False
+
+    leftover = {}
+    restored = []
+    # 오디오·텍스트를 먼저 되돌려야 동반 파일 경로 계산이 어긋나지 않는다
+    for key in sorted(files, key=lambda k: (k.startswith("extra:"), k)):
+        info = files.get(key) or {}
+        src, original = info.get("trash"), info.get("original")
+        if not src or not original or not os.path.isfile(src):
+            continue
+        if not is_managed_file(original) or is_inside(original, TRASH_DIR):
+            leftover[key] = info
+            continue
+        try:
+            os.makedirs(os.path.dirname(original), exist_ok=True)
+            dest = unique_path(original)
+            shutil.move(src, dest)
+        except OSError as e:
+            print(f"[WEB-RESTORE-WARN] #{board.id} {key} 복원 실패 ({src}): {e}", flush=True)
+            leftover[key] = info
+            continue
+        if key in ("audio_path", "txt_path"):
+            setattr(board, key, dest)
+            if key == "audio_path":
+                board.audio_filename = os.path.basename(dest)
+        restored.append(os.path.basename(dest))
+
+    if leftover:
+        meta["files"] = leftover
+        write_trash_meta(board.id, meta)
+    else:
+        shutil.rmtree(board_trash_dir(board.id), ignore_errors=True)
+
+    if restored:
+        print(
+            f"[WEB-RESTORE] #{board.id} {board.title}: 파일 {len(restored)}개를 원래 자리로 되돌렸습니다 "
+            f"({', '.join(restored)})",
+            flush=True,
+        )
+    return bool(restored)
+
+
+def purge_board_files(board: Board) -> bool:
+    """보드의 파일을 실제로 지운다 (완전 삭제). 휴지통에 남은 사본까지 함께 정리한다."""
+    if WEB_DELETE_SYNC == "off":
+        return False
+
+    removed = []
+    for key, path in board_file_targets(board):
+        if not os.path.isfile(path) or not is_managed_file(path):
+            continue
+        try:
+            os.remove(path)
+            removed.append(os.path.basename(path))
+        except OSError as e:
+            print(f"[WEB-DELETE-WARN] #{board.id} {key} 삭제 실패 ({path}): {e}", flush=True)
+
+    target = board_trash_dir(board.id)
+    if os.path.isdir(target) and is_inside(target, TRASH_DIR):
+        shutil.rmtree(target, ignore_errors=True)
+
+    if removed:
+        print(
+            f"[WEB-DELETE] #{board.id} {board.title}: 파일 {len(removed)}개를 완전히 삭제했습니다 "
+            f"({', '.join(removed)})",
+            flush=True,
+        )
+    return bool(removed)
 
 
 def repair_stale_media_paths(db: Session) -> None:
@@ -547,6 +757,8 @@ def background_audio_watcher():
                         board.audio_path = full_path
                         board.audio_filename = f
                         db.commit()
+                        # 사용자가 직접 되돌려 놓은 것이므로 휴지통에 남은 사본은 정리한다
+                        shutil.rmtree(board_trash_dir(board.id), ignore_errors=True)
                         print(f"[FILE-SYNC] 원본이 다시 나타나 보드를 복원했습니다: #{board.id} {board.title}", flush=True)
 
                     if board.status == "PENDING" and not board.is_deleted:
@@ -621,6 +833,15 @@ def startup_event():
     # 백그라운드 폴더 감시 스레드 가동
     watcher_thread = threading.Thread(target=background_audio_watcher, daemon=True)
     watcher_thread.start()
+
+
+@app.on_event("shutdown")
+def shutdown_event():
+    # 워커 스레드는 데몬이라 프로세스와 함께 사라지지만, 그 아래 ffmpeg 자식은 남는다.
+    # 남겨 두면 systemd 가 유닛을 내리지 못하고 stop 타임아웃까지 매달린다.
+    killed = terminate_active_media_processes()
+    if killed:
+        print(f"[SHUTDOWN] 실행 중이던 ffmpeg 프로세스 {killed}개를 정리했습니다.", flush=True)
 
 # -----------------
 # Pydantic Schemas
@@ -1111,8 +1332,12 @@ def delete_board(board_id: int, permanent: bool = False, db: Session = Depends(g
     if not b:
         raise HTTPException(status_code=404, detail="보드를 찾을 수 없습니다.")
     if permanent or b.is_deleted:
+        # 완전 삭제: 원본 오디오와 변환 텍스트도 디스크에서 지운다
+        purge_board_files(b)
         db.delete(b)
     else:
+        # 휴지통으로 이동: 파일을 `휴지통` 폴더로 옮겨 탐색기에서도 사라지게 한다
+        move_board_files_to_trash(b)
         b.is_deleted = True
     db.commit()
     return {"ok": True}
@@ -1122,6 +1347,8 @@ def restore_board(board_id: int, db: Session = Depends(get_db)):
     b = db.query(Board).filter_by(id=board_id).first()
     if not b:
         raise HTTPException(status_code=404, detail="보드를 찾을 수 없습니다.")
+    # 휴지통으로 옮겨 뒀던 파일을 원래 폴더로 되돌린다
+    restore_board_files_from_trash(b)
     b.is_deleted = False
     db.commit()
     return {"ok": True}
@@ -1132,6 +1359,9 @@ def reprocess_board(board_id: int, db: Session = Depends(get_db)):
     b = db.query(Board).filter_by(id=board_id).first()
     if not b:
         raise HTTPException(status_code=404, detail="보드를 찾을 수 없습니다.")
+    # 휴지통에 있던 보드를 다시 변환하려는 경우이니 파일부터 제자리로 돌려놓는다
+    if b.is_deleted:
+        restore_board_files_from_trash(b)
     if not b.audio_path or not os.path.exists(b.audio_path):
         raise HTTPException(status_code=400, detail="원본 오디오 파일이 없어 다시 변환할 수 없습니다.")
 
@@ -1147,12 +1377,17 @@ def reprocess_board(board_id: int, db: Session = Depends(get_db)):
 
 @app.post("/api/boards/batch-delete")
 def batch_delete_boards(req: BatchDeleteRequest, db: Session = Depends(get_db)):
-    if req.permanent:
-        db.query(Board).filter(Board.id.in_(req.board_ids)).delete(synchronize_session=False)
-    else:
-        db.query(Board).filter(Board.id.in_(req.board_ids)).update({Board.is_deleted: True}, synchronize_session=False)
+    # 파일도 함께 정리해야 하므로 보드를 실제로 읽어서 하나씩 처리한다
+    boards = db.query(Board).filter(Board.id.in_(req.board_ids)).all()
+    for b in boards:
+        if req.permanent or b.is_deleted:
+            purge_board_files(b)
+            db.delete(b)
+        else:
+            move_board_files_to_trash(b)
+            b.is_deleted = True
     db.commit()
-    return {"ok": True, "count": len(req.board_ids)}
+    return {"ok": True, "count": len(boards)}
 
 @app.post("/api/boards/batch-move")
 def batch_move_boards(req: BatchMoveRequest, db: Session = Depends(get_db)):

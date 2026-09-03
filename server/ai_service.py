@@ -1,7 +1,9 @@
 import os
 import re
 import json
+import subprocess
 import tempfile
+import threading
 import time
 import uuid
 import datetime
@@ -27,6 +29,9 @@ GEMINI_TIMEOUT_MS = max(60_000, int(os.getenv("GEMINI_TIMEOUT_MS", "900000")))
 # 일시적 오류(5xx/타임아웃/연결 끊김)일 때 같은 키로 다시 시도할 최대 횟수
 GEMINI_MAX_ATTEMPTS = max(1, int(os.getenv("GEMINI_MAX_ATTEMPTS", "3")))
 
+# ffmpeg 한 번 호출이 이 시간을 넘기면 강제 종료한다 (멈춘 ffmpeg 이 워커를 묶는 것을 막는다)
+FFMPEG_TIMEOUT_SEC = max(60, int(os.getenv("FFMPEG_TIMEOUT_SEC", "900")))
+
 CHUNK_LENGTH_MS = 20 * 60 * 1000   # 20분 청크
 OVERLAP_MS = 30 * 1000             # 30초 오버랩
 CHUNK_STEP_MS = CHUNK_LENGTH_MS - OVERLAP_MS
@@ -40,6 +45,101 @@ def sanitize_filename(name: str, fallback: str = "untitled") -> str:
     cleaned = _ILLEGAL_FILENAME_CHARS.sub("_", (name or "").strip())
     cleaned = cleaned.strip(" .")
     return cleaned[:180] or fallback
+
+
+# -----------------
+# ffmpeg 스트리밍 유틸
+# -----------------
+# 예전에는 pydub 으로 파일 전체를 PCM 으로 디코딩해 메모리에 올린 뒤 잘랐다.
+# 1시간짜리 44.1kHz 스테레오 녹음이면 원본만 600MB 를 넘고, 청크 목록까지 한꺼번에
+# 만들면 그 두 배가 든다. 워커 2개가 동시에 이러면 작은 서버는 OOM 으로 죽는다.
+# 그래서 필요한 구간만 ffmpeg 으로 잘라 쓰고, 메모리 사용량을 파일 길이와 무관하게 만든다.
+_active_procs = set()
+_procs_lock = threading.Lock()
+
+
+def ffmpeg_bin() -> str:
+    return getattr(AudioSegment, "converter", None) or "ffmpeg"
+
+
+def ffprobe_bin() -> str:
+    try:
+        from pydub.utils import get_prober_name
+        return get_prober_name() or "ffprobe"
+    except Exception:
+        return "ffprobe"
+
+
+def run_tool(cmd: list, timeout: int):
+    """외부 도구를 돌린다. 시간이 넘으면 죽여서 워커가 묶이지 않게 한다."""
+    try:
+        proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    except FileNotFoundError:
+        raise RuntimeError(
+            f"{os.path.basename(cmd[0])} 를 찾을 수 없습니다. ffmpeg 이 설치되어 있는지 확인하세요."
+        )
+    with _procs_lock:
+        _active_procs.add(proc)
+    try:
+        out, err = proc.communicate(timeout=timeout)
+    except subprocess.TimeoutExpired:
+        proc.kill()
+        proc.communicate()
+        raise RuntimeError(f"{os.path.basename(cmd[0])} 가 {timeout}초를 넘겨 중단했습니다.")
+    finally:
+        with _procs_lock:
+            _active_procs.discard(proc)
+    return proc.returncode, out, (err or b"").decode("utf-8", "replace").strip()
+
+
+def terminate_active_media_processes() -> int:
+    """서버가 내려갈 때 남아 있는 ffmpeg 자식 프로세스를 정리한다."""
+    with _procs_lock:
+        procs = list(_active_procs)
+    for proc in procs:
+        try:
+            proc.kill()
+        except Exception:
+            pass
+    return len(procs)
+
+
+def probe_duration_seconds(audio_path: str) -> float:
+    """파일을 디코딩하지 않고 길이만 알아낸다."""
+    code, out, err = run_tool(
+        [
+            ffprobe_bin(), "-v", "error",
+            "-show_entries", "format=duration",
+            "-of", "default=noprint_wrappers=1:nokey=1",
+            audio_path,
+        ],
+        timeout=120,
+    )
+    if code == 0:
+        try:
+            duration = float(out.decode("utf-8", "replace").strip())
+            if duration > 0:
+                return duration
+        except ValueError:
+            pass
+    raise RuntimeError(f"오디오 길이를 읽지 못했습니다: {err or '알 수 없는 오류'}")
+
+
+def extract_chunk_to_mp3(audio_path: str, dest_path: str, start_ms: int, length_ms: int) -> None:
+    """원본에서 [start, start+length) 구간만 잘라 STT 용 mp3(16kHz 모노 32k)로 만든다."""
+    cmd = [
+        ffmpeg_bin(), "-v", "error", "-y", "-nostdin",
+        "-ss", f"{start_ms / 1000.0:.3f}",
+        "-t", f"{length_ms / 1000.0:.3f}",
+        "-i", audio_path,
+        "-vn", "-ac", "1", "-ar", "16000",
+        "-c:a", "libmp3lame", "-b:a", "32k",
+        dest_path,
+    ]
+    code, _out, err = run_tool(cmd, timeout=FFMPEG_TIMEOUT_SEC)
+    if code != 0 or not os.path.exists(dest_path) or os.path.getsize(dest_path) == 0:
+        start_label = f"{start_ms // 60000}분 지점"
+        raise RuntimeError(f"오디오 구간 추출 실패 ({start_label}): {err or f'ffmpeg 종료코드 {code}'}")
 
 def make_client(api_key: str) -> genai.Client:
     """타임아웃과 자동 재시도를 건 Gemini 클라이언트를 만든다."""
@@ -201,9 +301,6 @@ def process_audio_file_to_board(board_id: int, audio_path: str, db_session_facto
     """오디오 파일을 청크 단위로 나누고 Gemini STT를 실행하여 Board에 저장하는 완전 자동화 파이프라인"""
     from server.models import Board, TranscriptSegment, BoardSummary, Folder
 
-    if AudioSegment is None:
-        raise RuntimeError("pydub 라이브러리가 필요합니다.")
-
     prompt = """
 이 오디오 파일을 처음부터 끝까지 빠짐없이 텍스트로 받아쓰기(Transcription) 해줘.
 작성할 때 아래 규칙을 엄격하게 지켜:
@@ -222,30 +319,32 @@ def process_audio_file_to_board(board_id: int, audio_path: str, db_session_facto
         board.progress_percent = 5
         db.commit()
 
-        audio = AudioSegment.from_file(audio_path)
-        total_duration_sec = len(audio) / 1000.0
+        # 파일을 통째로 디코딩하면 긴 녹음에서 수백 MB~GB 를 먹고 서버가 OOM 으로 죽는다.
+        # 길이만 먼저 재고, 실제 오디오는 청크 단위로 그때그때 잘라 쓴다.
+        total_duration_sec = probe_duration_seconds(audio_path)
         board.duration_seconds = total_duration_sec
         db.commit()
 
-        chunk_starts = list(range(0, max(len(audio) - OVERLAP_MS, 1), CHUNK_STEP_MS))
-        chunks = [audio[start:start + CHUNK_LENGTH_MS] for start in chunk_starts]
-        total_chunks = len(chunks)
+        total_ms = int(total_duration_sec * 1000)
+        chunk_starts = list(range(0, max(total_ms - OVERLAP_MS, 1), CHUNK_STEP_MS))
+        total_chunks = len(chunk_starts)
 
         full_transcript = ""
-        for i, chunk in enumerate(chunks):
+        for i, start_ms in enumerate(chunk_starts):
             # 청크 하나가 오래 걸려도 '정체'로 오인되지 않도록 시작 시점에 살아있음을 알린다
             if progress_callback:
                 progress_callback(board.progress_percent or 0)
             temp_chunk_path = os.path.join(tempfile.gettempdir(), f"chunk_{uuid.uuid4().hex}.mp3")
-            # STT 최적화 (16kHz 모노 32k)
-            chunk.set_frame_rate(16000).set_channels(1).export(temp_chunk_path, format="mp3", bitrate="32k")
 
             try:
+                # 필요한 구간만 STT 용 mp3(16kHz 모노 32k)로 뽑는다 — 메모리는 파일 길이와 무관하다
+                extract_chunk_to_mp3(audio_path, temp_chunk_path, start_ms, CHUNK_LENGTH_MS)
+
                 transcript_text = transcribe_chunk_with_fallback(
                     temp_chunk_path, f"board_{board_id}_chunk_{i+1}", prompt
                 )
 
-                chunk_start_seconds = chunk_starts[i] // 1000
+                chunk_start_seconds = start_ms // 1000
                 adjusted = offset_timestamps(transcript_text, chunk_start_seconds)
                 if i > 0:
                     adjusted = strip_overlap(adjusted, chunk_start_seconds)

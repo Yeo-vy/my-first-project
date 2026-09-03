@@ -360,9 +360,9 @@ async function toggleStarRow(event, boardId) {
 }
 
 async function deleteBoard(boardId) {
-    if (!confirm("이 보드를 휴지통으로 이동하시겠습니까?")) return;
+    if (!confirm("이 보드를 휴지통으로 이동하시겠습니까? 원본 녹음 파일도 휴지통 폴더로 함께 옮겨져 탐색기에서 사라집니다. (복원하면 원래 자리로 되돌아옵니다)")) return;
     await fetch(`/api/boards/${boardId}`, { method: "DELETE" });
-    showToast("휴지통으로 이동되었습니다.");
+    showToast("휴지통으로 이동되었습니다. (원본 파일도 함께 이동)");
     loadBoards();
     loadFolders();
 }
@@ -384,6 +384,7 @@ async function reprocessBoard(event, boardId) {
 }
 
 async function restoreBoard(boardId) {
+    // 서버가 휴지통 폴더의 원본 파일도 원래 자리로 되돌린다
     await fetch(`/api/boards/${boardId}/restore`, { method: "POST" });
     showToast("보드가 복원되었습니다.");
     loadBoards();
@@ -391,15 +392,17 @@ async function restoreBoard(boardId) {
 }
 
 async function deleteBoardPermanent(boardId) {
-    if (!confirm("이 보드를 영구적으로 삭제하시겠습니까? 되돌릴 수 없습니다.")) return;
+    if (!confirm("이 보드를 영구적으로 삭제하시겠습니까? 원본 녹음 파일과 변환 텍스트가 디스크에서 완전히 지워집니다. 되돌릴 수 없습니다.")) return;
     await fetch(`/api/boards/${boardId}?permanent=true`, { method: "DELETE" });
-    showToast("영구 삭제되었습니다.");
+    showToast("원본 파일까지 영구 삭제되었습니다.");
     loadBoards();
 }
 
 async function batchDeleteBoards() {
     const isTrash = currentFilter === "trash";
-    const msg = isTrash ? `선택한 ${selectedBoardIds.size}개의 보드를 영구 삭제하시겠습니까?` : `선택한 ${selectedBoardIds.size}개의 보드를 휴지통으로 이동하시겠습니까?`;
+    const msg = isTrash
+        ? `선택한 ${selectedBoardIds.size}개의 보드를 영구 삭제하시겠습니까? 원본 녹음 파일과 변환 텍스트가 디스크에서 완전히 지워집니다. 되돌릴 수 없습니다.`
+        : `선택한 ${selectedBoardIds.size}개의 보드를 휴지통으로 이동하시겠습니까? 원본 녹음 파일도 휴지통 폴더로 함께 옮겨져 탐색기에서 사라집니다.`;
     if (!confirm(msg)) return;
 
     await fetch("/api/boards/batch-delete", {
@@ -408,7 +411,7 @@ async function batchDeleteBoards() {
         body: JSON.stringify({ board_ids: Array.from(selectedBoardIds), permanent: isTrash })
     });
     selectedBoardIds.clear();
-    showToast(isTrash ? "영구 삭제되었습니다." : "휴지통으로 이동되었습니다.");
+    showToast(isTrash ? "원본 파일까지 영구 삭제되었습니다." : "휴지통으로 이동되었습니다. (원본 파일도 함께 이동)");
     loadBoards();
     loadFolders();
 }
@@ -640,10 +643,10 @@ async function regenerateKeywords() {
 
 async function deleteCurrentBoard() {
     if (!currentBoard) return;
-    if (!confirm("이 보드를 휴지통으로 이동하시겠습니까?")) return;
+    if (!confirm("이 보드를 휴지통으로 이동하시겠습니까? 원본 녹음 파일도 휴지통 폴더로 함께 옮겨져 탐색기에서 사라집니다. (복원하면 원래 자리로 되돌아옵니다)")) return;
     await fetch(`/api/boards/${currentBoard.id}`, { method: "DELETE" });
     showDashboard();
-    showToast("삭제되었습니다.");
+    showToast("휴지통으로 이동되었습니다. (원본 파일도 함께 이동)");
 }
 
 // -----------------------------------------

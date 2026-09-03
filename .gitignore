@@ -38,3 +38,6 @@ local.properties
 # IDE 설정 제외
 .idea/
 .vscode/
+
+# 웹에서 삭제한 녹음이 옮겨지는 곳
+휴지통/
