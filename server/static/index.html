@@ -13,9 +13,21 @@
         <!-- 좌측 사이드바 -->
         <aside id="sidebar">
             <div class="sidebar-header">
-                <div class="user-badge">
-                    <div class="avatar">백승</div>
-                    <span class="brand-name">daglo AI</span>
+                <div class="user-badge" id="user-badge" onclick="toggleUserMenu(event)" title="계정 메뉴">
+                    <div class="avatar" id="user-avatar">··</div>
+                    <div class="user-badge-text">
+                        <span class="brand-name">daglo AI</span>
+                        <span class="user-name" id="user-name">불러오는 중</span>
+                    </div>
+                    <i class="fa-solid fa-chevron-down user-badge-caret"></i>
+                </div>
+                <div class="user-menu" id="user-menu">
+                    <button class="user-menu-item" onclick="openPasswordModal()">
+                        <i class="fa-solid fa-key"></i> 비밀번호 변경
+                    </button>
+                    <button class="user-menu-item danger" onclick="logout()">
+                        <i class="fa-solid fa-right-from-bracket"></i> 로그아웃
+                    </button>
                 </div>
             </div>
 
@@ -378,6 +390,22 @@
             </div>
             <div class="modal-actions" style="margin-top: 18px;">
                 <button class="btn-secondary" onclick="closeExportModal()">닫기</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- 모달: 비밀번호 변경 -->
+    <div id="password-modal" class="modal-backdrop" style="display: none;">
+        <div class="modal-card">
+            <h3>비밀번호 변경</h3>
+            <p class="modal-desc">변경하면 지금 이 브라우저를 뺀 다른 모든 기기의 로그인이 해제됩니다.</p>
+            <input type="password" id="current-password-input" placeholder="현재 비밀번호" autocomplete="current-password">
+            <input type="password" id="new-password-input" placeholder="새 비밀번호 (8자 이상)" autocomplete="new-password" style="margin-top: 10px;">
+            <input type="password" id="new-password-confirm-input" placeholder="새 비밀번호 확인" autocomplete="new-password" style="margin-top: 10px;"
+                   onkeydown="if(event.key==='Enter') submitPasswordChange()">
+            <div class="modal-actions">
+                <button class="btn-secondary" onclick="closePasswordModal()">취소</button>
+                <button class="primary-btn" onclick="submitPasswordChange()">변경하기</button>
             </div>
         </div>
     </div>

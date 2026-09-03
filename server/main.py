@@ -10,7 +10,7 @@ import threading
 import unicodedata
 from typing import Optional, List
 from fastapi import FastAPI, Depends, HTTPException, Query, Request, Response, UploadFile, File, Form
-from fastapi.responses import StreamingResponse, FileResponse
+from fastapi.responses import StreamingResponse, FileResponse, JSONResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy import select
@@ -18,7 +18,8 @@ from sqlalchemy.orm import Session
 from pydantic import BaseModel
 
 from server.database import init_db, get_db, SessionLocal
-from server.models import Folder, Board, TranscriptSegment, BoardSummary, BoardChat, Bookmark
+from server.models import Folder, Board, TranscriptSegment, BoardSummary, BoardChat, Bookmark, User
+from server import auth
 from server.migrator import (
     sync_filesystem_to_db,
     ms_to_timestamp,
@@ -35,15 +36,59 @@ from server.ai_service import (
     sanitize_filename,
 )
 
-app = FastAPI(title="다글로 (daglo) AI 풀스택 서버", version="2.5.0")
+app = FastAPI(title="다글로 (daglo) AI 풀스택 서버", version="3.0.0")
 
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
+# 쿠키 인증을 쓰므로 와일드카드 오리진은 허용하지 않는다.
+# 외부 프론트엔드에서 접근해야 한다면 .env 에 ALLOWED_ORIGINS 를 쉼표로 나열한다.
+ALLOWED_ORIGINS = [o.strip() for o in os.getenv("ALLOWED_ORIGINS", "").split(",") if o.strip()]
+if ALLOWED_ORIGINS:
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=ALLOWED_ORIGINS,
+        allow_credentials=True,
+        allow_methods=["*"],
+        allow_headers=["*"],
+    )
+
+
+# -----------------
+# 인증 게이트 미들웨어
+# 아래 목록을 뺀 모든 경로(정적 파일·오디오 스트림 포함)는 로그인해야 열린다.
+# -----------------
+PUBLIC_PATHS = {
+    "/login",
+    "/api/ping",
+    "/api/auth/status",
+    "/api/auth/login",
+    "/api/auth/setup",
+    "/favicon.ico",
+}
+
+
+@app.middleware("http")
+async def auth_gate(request: Request, call_next):
+    path = request.url.path
+
+    if path in PUBLIC_PATHS or request.method == "OPTIONS":
+        return await call_next(request)
+
+    # 자동화 스크립트/외부 클라이언트는 DAGLO_API_TOKEN 헤더로 통과할 수 있다.
+    if auth.api_token_ok(request):
+        return await call_next(request)
+
+    db = SessionLocal()
+    try:
+        user = auth.resolve_session_user(db, request.cookies.get(auth.SESSION_COOKIE))
+    finally:
+        db.close()
+
+    if user is None:
+        if path.startswith("/api/"):
+            return JSONResponse(status_code=401, content={"detail": "로그인이 필요합니다."})
+        return RedirectResponse(url="/login", status_code=302)
+
+    return await call_next(request)
+
 
 BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 STATIC_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "static")
@@ -115,12 +160,153 @@ def stt_worker():
 
 
 # -----------------
+# 원본 파일 삭제 → 보드 삭제 동기화
+# -----------------
+# 탐색기에서 원본 녹음을 지우면 보드도 따라 사라지게 한다.
+#   trash     : 휴지통으로 보낸다 (기본값 — 실수로 지웠어도 복구할 수 있다)
+#   permanent : 보드와 스크립트를 즉시 완전 삭제한다
+#   off       : 동기화하지 않는다
+FILE_DELETE_SYNC = os.getenv("FILE_DELETE_SYNC", "trash").lower()
+
+# 네트워크 드라이브(RaiDrive/SFTP)가 잠깐 끊긴 것을 삭제로 오인하지 않도록 연속 감지를 요구한다
+MISSING_SCANS_BEFORE_DELETE = max(1, int(os.getenv("MISSING_SCANS_BEFORE_DELETE", "3")))
+# 한 번의 스캔에서 이보다 많은 보드가 사라졌다면 마운트 장애로 보고 손대지 않는다
+MAX_AUTO_DELETE_PER_SCAN = max(1, int(os.getenv("MAX_AUTO_DELETE_PER_SCAN", "50")))
+
+
+def is_watched_path(path: str) -> bool:
+    """감시 폴더(`녹음파일원본`) 안쪽 경로인지 판별한다."""
+    if not path:
+        return False
+    try:
+        return os.path.commonpath([
+            os.path.normcase(os.path.abspath(path)),
+            os.path.normcase(os.path.abspath(AUDIO_DIR)),
+        ]) == os.path.normcase(os.path.abspath(AUDIO_DIR))
+    except ValueError:
+        # 드라이브 문자가 다르면 commonpath 가 예외를 낸다 = 감시 대상 밖
+        return False
+
+
+def repair_stale_media_paths(db: Session) -> None:
+    """프로젝트 폴더를 옮겨 경로가 어긋난 보드를 현재 위치로 다시 연결한다.
+
+    DB에는 절대 경로가 저장되므로 폴더를 옮기면 오디오 재생이 끊기고,
+    삭제 동기화가 '파일이 사라졌다'고 오해할 수도 있다. 파일 이름이 같은 파일을
+    현재 폴더에서 찾아 경로만 갱신한다.
+    """
+    def build_index(root: str, exts: tuple) -> dict:
+        index = {}
+        if not os.path.isdir(root):
+            return index
+        for root_dir, _, files in os.walk(root):
+            for f in files:
+                if f.lower().endswith(exts):
+                    index.setdefault(unicodedata.normalize("NFC", f), os.path.join(root_dir, f))
+        return index
+
+    audio_index = build_index(AUDIO_DIR, VALID_AUDIO_EXTS)
+    txt_index = build_index(RESULT_DIR, (".txt",))
+    repaired = 0
+
+    for board in db.query(Board).all():
+        for attr, index in (("audio_path", audio_index), ("txt_path", txt_index)):
+            path = getattr(board, attr)
+            if not path or os.path.exists(path):
+                continue
+            found = index.get(unicodedata.normalize("NFC", os.path.basename(path)))
+            if found:
+                setattr(board, attr, found)
+                if attr == "audio_path":
+                    board.audio_filename = os.path.basename(found)
+                repaired += 1
+
+    if repaired:
+        db.commit()
+        print(f"[PATH-REPAIR] 위치가 바뀐 파일 경로 {repaired}건을 현재 폴더 기준으로 고쳤습니다.", flush=True)
+
+
+def sync_deleted_audio_to_boards(db: Session, missing_streaks: dict) -> None:
+    """원본 오디오가 사라진 보드를 정리한다. 스캔마다 한 번씩 호출된다."""
+    if FILE_DELETE_SYNC == "off":
+        return
+
+    # 감시 폴더 자체가 안 보이면 드라이브가 분리된 것이다. 전량 삭제를 막기 위해 판단을 보류한다.
+    if not os.path.isdir(AUDIO_DIR):
+        missing_streaks.clear()
+        return
+
+    boards = (
+        db.query(Board)
+        .filter(
+            Board.is_deleted == False,  # noqa: E712
+            Board.audio_path.isnot(None),
+            Board.audio_path != "",
+            # 변환 중인 보드는 워커가 끝낼 때까지 건드리지 않는다
+            Board.status != "PROCESSING",
+        )
+        .all()
+    )
+
+    doomed = []
+    live_ids = set()
+    for board in boards:
+        # 감시 폴더 밖을 가리키는 보드는 '탐색기에서 지웠다'고 볼 수 없다 (옛 경로 등) → 건너뛴다
+        if not is_watched_path(board.audio_path):
+            missing_streaks.pop(board.id, None)
+            continue
+        live_ids.add(board.id)
+        if os.path.exists(board.audio_path):
+            missing_streaks.pop(board.id, None)
+            continue
+        streak = missing_streaks.get(board.id, 0) + 1
+        missing_streaks[board.id] = streak
+        if streak >= MISSING_SCANS_BEFORE_DELETE:
+            doomed.append(board)
+
+    # 이미 처리된 보드의 추적 정보를 정리한다
+    for gone_id in set(missing_streaks) - live_ids:
+        missing_streaks.pop(gone_id, None)
+
+    if not doomed:
+        return
+
+    if len(doomed) > MAX_AUTO_DELETE_PER_SCAN:
+        print(
+            f"[FILE-SYNC-SKIP] 원본이 사라진 보드가 {len(doomed)}개로 한도"
+            f"({MAX_AUTO_DELETE_PER_SCAN})를 넘었습니다. 저장소 연결 문제일 수 있어 삭제하지 않습니다. "
+            f"의도한 삭제라면 MAX_AUTO_DELETE_PER_SCAN 값을 올리세요.",
+            flush=True,
+        )
+        return
+
+    for board in doomed:
+        missing_streaks.pop(board.id, None)
+        label = f"#{board.id} {board.title}"
+        if FILE_DELETE_SYNC == "permanent":
+            # 보드를 지우면 스크립트/요약/북마크도 cascade 로 함께 사라진다
+            if board.txt_path and os.path.exists(board.txt_path):
+                try:
+                    os.remove(board.txt_path)
+                except OSError as e:
+                    print(f"[FILE-SYNC-WARN] 변환 텍스트 삭제 실패 ({board.txt_path}): {e}", flush=True)
+            db.delete(board)
+            print(f"[FILE-SYNC] 원본이 삭제되어 보드를 완전히 지웠습니다: {label}", flush=True)
+        else:
+            board.is_deleted = True
+            print(f"[FILE-SYNC] 원본이 삭제되어 보드를 휴지통으로 옮겼습니다: {label}", flush=True)
+
+    db.commit()
+
+
+# -----------------
 # Background Auto Folder Watcher (SFTP/RaiDrive 자동 감지 엔진)
 # -----------------
 def background_audio_watcher():
     """`녹음파일원본`에 복사된 새 오디오를 감지해 PENDING 보드로 등록하고 STT 큐에 넣는다."""
     time.sleep(3)
     seen_sizes = {}
+    missing_streaks = {}
 
     while True:
         db = None
@@ -174,6 +360,14 @@ def background_audio_watcher():
                         board.audio_filename = f
                         db.commit()
 
+                    # 지웠던 원본을 다시 넣으면 휴지통에서 되살린다 (삭제 동기화의 역동작)
+                    if board.is_deleted and FILE_DELETE_SYNC != "off":
+                        board.is_deleted = False
+                        board.audio_path = full_path
+                        board.audio_filename = f
+                        db.commit()
+                        print(f"[FILE-SYNC] 원본이 다시 나타나 보드를 복원했습니다: #{board.id} {board.title}", flush=True)
+
                     if board.status == "PENDING" and not board.is_deleted:
                         if enqueue_board(board.id):
                             print(f"[QUEUE] Board #{board.id} ({board.title}) queued for STT.")
@@ -181,6 +375,9 @@ def background_audio_watcher():
             # 사라진 파일의 추적 정보를 정리해 메모리가 무한히 늘지 않게 한다
             for gone in set(seen_sizes) - live_paths:
                 seen_sizes.pop(gone, None)
+
+            # 탐색기에서 원본을 지웠다면 보드도 따라 정리한다
+            sync_deleted_audio_to_boards(db, missing_streaks)
 
             # 파일 감시와 별개로 남아 있는 PENDING 보드를 회수한다 (업로드/재시도 경로)
             pending = db.query(Board).filter(Board.status == "PENDING", Board.is_deleted == False).all()
@@ -200,6 +397,12 @@ def startup_event():
     init_db()
     db = SessionLocal()
     try:
+        auth.bootstrap_admin_from_env(db)
+        if not auth.has_any_user(db):
+            print("[AUTH] 등록된 계정이 없습니다. http://localhost:8000/login 에서 첫 관리자 계정을 만드세요.")
+        auth.purge_expired_sessions(db)
+        # 프로젝트 폴더 이동으로 끊긴 경로를 먼저 복구해야 삭제 동기화가 오작동하지 않는다
+        repair_stale_media_paths(db)
         sync_filesystem_to_db(db)
         # 이전 실행이 종료되며 중단된 변환 작업을 회수한다 (워커 스레드는 프로세스와 함께 죽는다)
         stuck = db.query(Board).filter(Board.status == "PROCESSING").all()
@@ -306,6 +509,143 @@ def format_seconds(seconds: float) -> str:
     if h > 0:
         return f"{h}:{m:02d}:{sec:02d}"
     return f"{m:02d}:{sec:02d}"
+
+# -----------------
+# 0. Auth Endpoints
+# -----------------
+class LoginRequest(BaseModel):
+    username: str
+    password: str
+
+
+class SetupRequest(BaseModel):
+    username: str
+    password: str
+    display_name: Optional[str] = ""
+
+
+class PasswordChangeRequest(BaseModel):
+    current_password: str
+    new_password: str
+
+
+class UserCreateRequest(BaseModel):
+    username: str
+    password: str
+    display_name: Optional[str] = ""
+    is_admin: bool = False
+
+
+@app.get("/api/ping")
+def ping():
+    """로그인 없이 열린 유일한 상태 확인용 엔드포인트(헬스체크/모니터링)."""
+    return {"status": "ok"}
+
+
+@app.get("/api/auth/status")
+def auth_status(request: Request, db: Session = Depends(get_db)):
+    """로그인 페이지가 '최초 설정'을 보여줄지 판단하는 데 쓴다."""
+    user = auth.resolve_session_user(db, request.cookies.get(auth.SESSION_COOKIE))
+    return {
+        "setup_required": not auth.has_any_user(db),
+        "authenticated": user is not None,
+        "user": auth.user_to_dict(user) if user else None,
+    }
+
+
+@app.post("/api/auth/setup")
+def auth_setup(req: SetupRequest, request: Request, response: Response, db: Session = Depends(get_db)):
+    """계정이 하나도 없을 때만 첫 관리자 계정을 만든다."""
+    if auth.has_any_user(db):
+        raise HTTPException(status_code=409, detail="이미 계정이 있습니다. 로그인해 주세요.")
+    user = auth.create_user(db, req.username, req.password, req.display_name or "", is_admin=True)
+    token = auth.create_session(db, user, request)
+    auth.set_session_cookie(response, token)
+    return {"success": True, "user": auth.user_to_dict(user)}
+
+
+@app.post("/api/auth/login")
+def auth_login(req: LoginRequest, request: Request, response: Response, db: Session = Depends(get_db)):
+    ip = auth.client_ip(request)
+    remaining = auth.lockout_remaining(ip)
+    if remaining:
+        raise HTTPException(
+            status_code=429,
+            detail=f"로그인 시도가 너무 많습니다. {remaining // 60 + 1}분 후에 다시 시도해 주세요.",
+        )
+
+    username = (req.username or "").strip().lower()
+    user = db.query(User).filter(User.username == username).one_or_none()
+    # 아이디가 없어도 같은 비용의 해시 검증을 돌려 계정 존재 여부가 응답 시간으로 새지 않게 한다.
+    stored = user.password_hash if user else auth.hash_password("dummy-password-placeholder")
+    if not auth.verify_password(req.password or "", stored) or user is None or not user.is_active:
+        auth.record_failure(ip)
+        raise HTTPException(status_code=401, detail="아이디 또는 비밀번호가 올바르지 않습니다.")
+
+    auth.clear_failures(ip)
+    token = auth.create_session(db, user, request)
+    auth.set_session_cookie(response, token)
+    return {"success": True, "user": auth.user_to_dict(user)}
+
+
+@app.post("/api/auth/logout")
+def auth_logout(request: Request, response: Response, db: Session = Depends(get_db)):
+    auth.destroy_session(db, request.cookies.get(auth.SESSION_COOKIE))
+    auth.clear_session_cookie(response)
+    return {"success": True}
+
+
+@app.get("/api/auth/me")
+def auth_me(user: User = Depends(auth.get_current_user)):
+    return auth.user_to_dict(user)
+
+
+@app.post("/api/auth/password")
+def auth_change_password(
+    req: PasswordChangeRequest,
+    request: Request,
+    db: Session = Depends(get_db),
+    user: User = Depends(auth.get_current_user),
+):
+    if not auth.verify_password(req.current_password or "", user.password_hash):
+        raise HTTPException(status_code=401, detail="현재 비밀번호가 올바르지 않습니다.")
+    auth.validate_password(req.new_password)
+    user.password_hash = auth.hash_password(req.new_password)
+    db.commit()
+    # 비밀번호를 바꾸면 지금 쓰는 브라우저만 남기고 다른 세션을 모두 끊는다.
+    auth.destroy_all_sessions_for_user(
+        db, user.id, keep_token=request.cookies.get(auth.SESSION_COOKIE)
+    )
+    return {"success": True}
+
+
+@app.get("/api/auth/users")
+def list_users(db: Session = Depends(get_db), admin: User = Depends(auth.get_current_admin)):
+    users = db.query(User).order_by(User.id).all()
+    return [auth.user_to_dict(u) for u in users]
+
+
+@app.post("/api/auth/users")
+def add_user(req: UserCreateRequest, db: Session = Depends(get_db),
+             admin: User = Depends(auth.get_current_admin)):
+    user = auth.create_user(db, req.username, req.password, req.display_name or "", req.is_admin)
+    return auth.user_to_dict(user)
+
+
+@app.delete("/api/auth/users/{user_id}")
+def remove_user(user_id: int, db: Session = Depends(get_db),
+                admin: User = Depends(auth.get_current_admin)):
+    if user_id == admin.id:
+        raise HTTPException(status_code=400, detail="자기 계정은 삭제할 수 없습니다.")
+    user = db.query(User).filter(User.id == user_id).one_or_none()
+    if user is None:
+        raise HTTPException(status_code=404, detail="사용자를 찾을 수 없습니다.")
+    if user.is_admin and db.query(User).filter(User.is_admin == True).count() <= 1:  # noqa: E712
+        raise HTTPException(status_code=400, detail="마지막 관리자 계정은 삭제할 수 없습니다.")
+    db.delete(user)
+    db.commit()
+    return {"success": True}
+
 
 # -----------------
 # 1. Folder Endpoints
@@ -969,3 +1309,14 @@ def serve_index():
     if os.path.exists(index_path):
         return FileResponse(index_path)
     return {"message": "다글로 서버가 준비 중입니다."}
+
+
+@app.get("/login")
+def serve_login(request: Request, db: Session = Depends(get_db)):
+    """이미 로그인한 상태면 곧바로 메인으로 보낸다."""
+    if auth.resolve_session_user(db, request.cookies.get(auth.SESSION_COOKIE)):
+        return RedirectResponse(url="/", status_code=302)
+    login_path = os.path.join(STATIC_DIR, "login.html")
+    if os.path.exists(login_path):
+        return FileResponse(login_path)
+    return {"message": "로그인 페이지를 찾을 수 없습니다."}

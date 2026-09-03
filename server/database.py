@@ -4,7 +4,8 @@ from sqlalchemy.orm import sessionmaker
 from server.models import Base
 
 BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-DB_PATH = os.path.join(BASE_DIR, "daglo.db")
+# 테스트나 별도 인스턴스에서 다른 DB를 쓰고 싶으면 DAGLO_DB_PATH 로 지정한다
+DB_PATH = os.getenv("DAGLO_DB_PATH") or os.path.join(BASE_DIR, "daglo.db")
 DATABASE_URL = f"sqlite:///{DB_PATH}"
 
 engine = create_engine(

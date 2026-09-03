@@ -1,0 +1,301 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>로그인 · daglo AI</title>
+    <style>
+        :root {
+            --primary-color: #2563eb;
+            --primary-hover: #1d4ed8;
+            --text-main: #1e293b;
+            --text-muted: #64748b;
+            --bg-card: #ffffff;
+            --border-color: #e2e8f0;
+            --danger-color: #ef4444;
+        }
+
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+            font-family: -apple-system, BlinkMacSystemFont, "Pretendard", "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+        }
+
+        body {
+            min-height: 100vh;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            padding: 24px;
+            color: var(--text-main);
+            background: linear-gradient(135deg, #eef2ff 0%, #f8fafc 45%, #ecfdf5 100%);
+        }
+
+        .login-card {
+            width: 100%;
+            max-width: 400px;
+            background: var(--bg-card);
+            border: 1px solid var(--border-color);
+            border-radius: 18px;
+            padding: 36px 32px 30px;
+            box-shadow: 0 18px 45px rgba(15, 23, 42, 0.09);
+        }
+
+        .brand {
+            display: flex;
+            align-items: center;
+            gap: 11px;
+            margin-bottom: 26px;
+        }
+
+        .brand .logo {
+            width: 42px;
+            height: 42px;
+            border-radius: 12px;
+            background: linear-gradient(135deg, #10b981, #059669);
+            color: #fff;
+            font-size: 15px;
+            font-weight: 700;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+        }
+
+        .brand .name {
+            font-size: 19px;
+            font-weight: 700;
+            letter-spacing: -0.5px;
+            color: #0f172a;
+        }
+
+        h1 {
+            font-size: 21px;
+            font-weight: 700;
+            letter-spacing: -0.4px;
+            margin-bottom: 6px;
+        }
+
+        .subtitle {
+            font-size: 13.5px;
+            color: var(--text-muted);
+            line-height: 1.55;
+            margin-bottom: 22px;
+        }
+
+        .field {
+            margin-bottom: 14px;
+        }
+
+        label {
+            display: block;
+            font-size: 12.5px;
+            font-weight: 600;
+            color: var(--text-muted);
+            margin-bottom: 6px;
+        }
+
+        input {
+            width: 100%;
+            padding: 11px 13px;
+            font-size: 14.5px;
+            color: var(--text-main);
+            background: #fff;
+            border: 1px solid var(--border-color);
+            border-radius: 10px;
+            outline: none;
+            transition: border-color .15s, box-shadow .15s;
+        }
+
+        input:focus {
+            border-color: var(--primary-color);
+            box-shadow: 0 0 0 3px rgba(37, 99, 235, 0.13);
+        }
+
+        button {
+            width: 100%;
+            margin-top: 8px;
+            padding: 12px;
+            font-size: 15px;
+            font-weight: 600;
+            color: #fff;
+            background: var(--primary-color);
+            border: none;
+            border-radius: 10px;
+            cursor: pointer;
+            transition: background .15s;
+        }
+
+        button:hover:not(:disabled) { background: var(--primary-hover); }
+        button:disabled { opacity: .6; cursor: not-allowed; }
+
+        .message {
+            display: none;
+            margin-top: 14px;
+            padding: 10px 12px;
+            font-size: 13px;
+            line-height: 1.5;
+            border-radius: 9px;
+        }
+
+        .message.error {
+            display: block;
+            color: #b91c1c;
+            background: #fef2f2;
+            border: 1px solid #fecaca;
+        }
+
+        .message.info {
+            display: block;
+            color: #1e40af;
+            background: #eff6ff;
+            border: 1px solid #bfdbfe;
+        }
+
+        .hint {
+            margin-top: 20px;
+            padding-top: 16px;
+            border-top: 1px solid var(--border-color);
+            font-size: 12px;
+            color: #94a3b8;
+            line-height: 1.6;
+        }
+    </style>
+</head>
+<body>
+    <main class="login-card">
+        <div class="brand">
+            <div class="logo">daglo</div>
+            <div class="name">daglo AI</div>
+        </div>
+
+        <h1 id="page-title">로그인</h1>
+        <p class="subtitle" id="page-subtitle">계정 정보를 입력하면 보드에 접근할 수 있습니다.</p>
+
+        <form id="auth-form" autocomplete="on">
+            <div class="field">
+                <label for="username">아이디</label>
+                <input type="text" id="username" name="username" autocomplete="username"
+                       autocapitalize="none" spellcheck="false" required>
+            </div>
+
+            <div class="field" id="display-name-field" style="display:none;">
+                <label for="display-name">표시 이름 (선택)</label>
+                <input type="text" id="display-name" name="display-name" autocomplete="nickname">
+            </div>
+
+            <div class="field">
+                <label for="password">비밀번호</label>
+                <input type="password" id="password" name="password"
+                       autocomplete="current-password" required>
+            </div>
+
+            <div class="field" id="password-confirm-field" style="display:none;">
+                <label for="password-confirm">비밀번호 확인</label>
+                <input type="password" id="password-confirm" name="password-confirm"
+                       autocomplete="new-password">
+            </div>
+
+            <button type="submit" id="submit-btn">로그인</button>
+        </form>
+
+        <div class="message" id="message"></div>
+
+        <p class="hint" id="hint"></p>
+    </main>
+
+    <script>
+        let setupMode = false;
+        const form = document.getElementById("auth-form");
+        const submitBtn = document.getElementById("submit-btn");
+        const messageBox = document.getElementById("message");
+
+        function showMessage(text, kind) {
+            messageBox.textContent = text;
+            messageBox.className = "message " + (kind || "error");
+        }
+
+        function clearMessage() {
+            messageBox.className = "message";
+            messageBox.textContent = "";
+        }
+
+        function enterSetupMode() {
+            setupMode = true;
+            document.getElementById("page-title").textContent = "첫 관리자 계정 만들기";
+            document.getElementById("page-subtitle").textContent =
+                "등록된 계정이 없습니다. 이 서버를 사용할 관리자 계정을 먼저 만들어 주세요.";
+            document.getElementById("display-name-field").style.display = "";
+            document.getElementById("password-confirm-field").style.display = "";
+            document.getElementById("password").setAttribute("autocomplete", "new-password");
+            document.getElementById("hint").textContent = "비밀번호는 8자 이상이어야 합니다.";
+            submitBtn.textContent = "계정 만들고 시작하기";
+        }
+
+        async function checkStatus() {
+            try {
+                const res = await fetch("/api/auth/status");
+                const data = await res.json();
+                if (data.authenticated) {
+                    window.location.replace("/");
+                    return;
+                }
+                if (data.setup_required) enterSetupMode();
+            } catch (e) {
+                showMessage("서버에 연결할 수 없습니다. 서버가 실행 중인지 확인해 주세요.", "error");
+            }
+        }
+
+        form.addEventListener("submit", async (event) => {
+            event.preventDefault();
+            clearMessage();
+
+            const username = document.getElementById("username").value.trim();
+            const password = document.getElementById("password").value;
+
+            if (setupMode) {
+                const confirmPassword = document.getElementById("password-confirm").value;
+                if (password !== confirmPassword) {
+                    showMessage("비밀번호가 서로 일치하지 않습니다.", "error");
+                    return;
+                }
+                if (password.length < 8) {
+                    showMessage("비밀번호는 8자 이상이어야 합니다.", "error");
+                    return;
+                }
+            }
+
+            const endpoint = setupMode ? "/api/auth/setup" : "/api/auth/login";
+            const payload = setupMode
+                ? { username, password, display_name: document.getElementById("display-name").value.trim() }
+                : { username, password };
+
+            submitBtn.disabled = true;
+            submitBtn.textContent = setupMode ? "만드는 중..." : "확인 중...";
+
+            try {
+                const res = await fetch(endpoint, {
+                    method: "POST",
+                    headers: { "Content-Type": "application/json" },
+                    body: JSON.stringify(payload),
+                });
+
+                if (res.ok) {
+                    window.location.replace("/");
+                    return;
+                }
+
+                const data = await res.json().catch(() => ({}));
+                showMessage(data.detail || "로그인에 실패했습니다.", "error");
+            } catch (e) {
+                showMessage("서버와 통신하지 못했습니다.", "error");
+            } finally {
+                submitBtn.disabled = false;
+                submitBtn.textContent = setupMode ? "계정 만들고 시작하기" : "로그인";
+            }
+        });
+
+        checkStatus();
+    </script>
+</body>
+</html>

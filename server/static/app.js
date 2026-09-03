@@ -14,16 +14,108 @@ let currentActiveBlock = null;
 let autoPollTimer = null;
 
 const audioPlayer = document.getElementById("global-audio-element");
+let currentUser = null;
+
+// -----------------------------------------
+// 0. 인증
+// 세션이 만료되면 어느 요청이든 401을 받는다. 호출부마다 처리하는 대신
+// fetch 를 한 번 감싸서 곧바로 로그인 페이지로 보낸다.
+// -----------------------------------------
+const rawFetch = window.fetch.bind(window);
+let redirectingToLogin = false;
+
+window.fetch = async function (...args) {
+    const response = await rawFetch(...args);
+    if (response.status === 401 && !redirectingToLogin) {
+        redirectingToLogin = true;
+        window.location.replace("/login");
+    }
+    return response;
+};
+
+async function loadCurrentUser() {
+    try {
+        const res = await fetch("/api/auth/me");
+        if (!res.ok) return;
+        currentUser = await res.json();
+        const name = currentUser.display_name || currentUser.username;
+        document.getElementById("user-name").textContent = name;
+        document.getElementById("user-avatar").textContent = name.slice(0, 2);
+        document.getElementById("user-badge").title = `${name} (${currentUser.username})`;
+    } catch (e) {
+        /* 인터셉터가 401을 처리하므로 여기서는 조용히 넘어간다 */
+    }
+}
+
+function toggleUserMenu(event) {
+    event.stopPropagation();
+    document.getElementById("user-menu").classList.toggle("open");
+}
+
+function closeUserMenu() {
+    document.getElementById("user-menu").classList.remove("open");
+}
+
+async function logout() {
+    closeUserMenu();
+    if (!confirm("로그아웃할까요?")) return;
+    await fetch("/api/auth/logout", { method: "POST" });
+    window.location.replace("/login");
+}
+
+function openPasswordModal() {
+    closeUserMenu();
+    document.getElementById("current-password-input").value = "";
+    document.getElementById("new-password-input").value = "";
+    document.getElementById("new-password-confirm-input").value = "";
+    document.getElementById("password-modal").style.display = "flex";
+    document.getElementById("current-password-input").focus();
+}
+
+function closePasswordModal() {
+    document.getElementById("password-modal").style.display = "none";
+}
+
+async function submitPasswordChange() {
+    const currentPassword = document.getElementById("current-password-input").value;
+    const newPassword = document.getElementById("new-password-input").value;
+    const confirmPassword = document.getElementById("new-password-confirm-input").value;
+
+    if (newPassword !== confirmPassword) {
+        showToast("새 비밀번호가 서로 일치하지 않습니다.");
+        return;
+    }
+    if (newPassword.length < 8) {
+        showToast("비밀번호는 8자 이상이어야 합니다.");
+        return;
+    }
+
+    const res = await fetch("/api/auth/password", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ current_password: currentPassword, new_password: newPassword }),
+    });
+
+    if (res.ok) {
+        closePasswordModal();
+        showToast("비밀번호를 변경했습니다.");
+    } else {
+        const data = await res.json().catch(() => ({}));
+        showToast(data.detail || "비밀번호 변경에 실패했습니다.");
+    }
+}
 
 // -----------------------------------------
 // 초기화
 // -----------------------------------------
 document.addEventListener("DOMContentLoaded", () => {
+    loadCurrentUser();
     loadFolders();
     loadBoards();
     setupAudioListeners();
     setupKeyboardShortcuts();
     startProcessingPoller();
+    document.addEventListener("click", closeUserMenu);
 });
 
 function showToast(msg) {

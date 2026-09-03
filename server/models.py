@@ -94,3 +94,33 @@ class Bookmark(Base):
     created_at = Column(DateTime, default=datetime.datetime.utcnow)
 
     board = relationship("Board", back_populates="bookmarks")
+
+
+class User(Base):
+    __tablename__ = "users"
+
+    id = Column(Integer, primary_key=True, index=True)
+    username = Column(String(64), nullable=False, unique=True, index=True)
+    display_name = Column(String(100), nullable=False, default="")
+    password_hash = Column(String(255), nullable=False)
+    is_admin = Column(Boolean, default=False)
+    is_active = Column(Boolean, default=True, index=True)
+    created_at = Column(DateTime, default=datetime.datetime.utcnow)
+    last_login_at = Column(DateTime, nullable=True)
+
+    sessions = relationship("UserSession", back_populates="user", cascade="all, delete-orphan")
+
+
+class UserSession(Base):
+    __tablename__ = "user_sessions"
+
+    id = Column(Integer, primary_key=True, index=True)
+    user_id = Column(Integer, ForeignKey("users.id"), nullable=False, index=True)
+    # 원본 토큰은 저장하지 않는다. DB가 유출돼도 세션을 위조할 수 없도록 SHA-256 해시만 보관.
+    token_hash = Column(String(64), nullable=False, unique=True, index=True)
+    user_agent = Column(String(300), default="")
+    ip_address = Column(String(64), default="")
+    created_at = Column(DateTime, default=datetime.datetime.utcnow)
+    expires_at = Column(DateTime, nullable=False, index=True)
+
+    user = relationship("User", back_populates="sessions")
