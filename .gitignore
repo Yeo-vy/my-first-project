@@ -1,12 +1,27 @@
 # 환경 변수 파일 제외
 .env
 
+# Python 가상환경 제외 (수천 개 파일이 커밋 목록을 뒤덮음)
+.venv/
+venv/
+env/
+
 # Python 관련 캐시 및 임시 파일 제외
 __pycache__/
 *.py[cod]
 
+# 로컬 DB 제외 (server/database.py 의 init_db() 가 자동 생성)
+*.db
+*.db-journal
+*.sqlite
+*.sqlite3
+
+# 로그 제외
+*.log
+
 # Mac 사용자일 경우 불필요한 시스템 파일 제외
 .DS_Store
+Thumbs.db
 
 # 프로그램이 생성하는 결과물 폴더 제외 (선택 사항)
 강의 녹음 변환/
@@ -19,3 +34,7 @@ build/
 local.properties
 *.apk
 *.aab
+
+# IDE 설정 제외
+.idea/
+.vscode/
