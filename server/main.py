@@ -29,6 +29,7 @@ from server.migrator import (
     get_or_create_folder,
 )
 from server.ai_service import (
+    GEMINI_TIMEOUT_MS,
     extract_keywords_ai,
     generate_summary_ai,
     stream_board_chat,
@@ -101,9 +102,17 @@ TIMESTAMP_RE = re.compile(r'\[(\d{1,2}:\d{2}(?::\d{2})?)\]')
 # -----------------
 VALID_AUDIO_EXTS = (".mp3", ".m4a", ".wav", ".mp4")
 STT_WORKERS = max(1, int(os.getenv("STT_WORKERS", "2")))
+# 워커가 이 시간(초) 동안 진행 신호를 못 주면 멈춘 것으로 보고 경고를 남긴다
+STT_STALL_WARN_SEC = max(60, int(os.getenv("STT_STALL_WARN_SEC", "1800")))
+# 큐에 넣은 직후의 짧은 순간을 '유실된 작업'으로 오인하지 않기 위한 유예 시간(초)
+STT_GHOST_GRACE_SEC = max(10, int(os.getenv("STT_GHOST_GRACE_SEC", "30")))
 
 stt_queue: "queue.Queue[int]" = queue.Queue()
-_queued_board_ids = set()
+_queued_board_ids = set()          # 큐에 들어 있거나 워커가 잡고 있는 보드
+_queued_at: dict = {}              # board_id -> 큐에 넣은 시각
+_inflight: dict = {}               # board_id -> {"worker", "started", "beat"}
+_worker_threads: list = []
+_ghost_streaks: dict = {}          # board_id -> 유실 의심 연속 관측 횟수
 _queue_lock = threading.Lock()
 
 
@@ -113,50 +122,222 @@ def enqueue_board(board_id: int) -> bool:
         if board_id in _queued_board_ids:
             return False
         _queued_board_ids.add(board_id)
+        _queued_at[board_id] = time.time()
     stt_queue.put(board_id)
     return True
 
 
-def stt_worker():
-    while True:
-        board_id = stt_queue.get()
-        try:
-            db = SessionLocal()
-            audio_path = None
-            try:
-                board = db.query(Board).filter_by(id=board_id).first()
-                if board is None:
-                    continue
-                if board.audio_path and os.path.exists(board.audio_path):
-                    audio_path = board.audio_path
-                    board.status = "PROCESSING"
-                    board.progress_percent = 1
-                    board.error_message = None
-                else:
-                    board.status = "FAILED"
-                    board.progress_percent = 0
-                    board.error_message = "오디오 파일을 찾을 수 없습니다."
-                db.commit()
-            finally:
-                db.close()
+def _release_board(board_id: int) -> None:
+    with _queue_lock:
+        _inflight.pop(board_id, None)
+        _queued_board_ids.discard(board_id)
+        _queued_at.pop(board_id, None)
 
-            if audio_path:
-                process_audio_file_to_board(board_id, audio_path, SessionLocal)
-        except Exception as e:
-            print(f"[STT-WORKER-ERROR] Board #{board_id}: {e}")
-            db = SessionLocal()
+
+def _heartbeat(board_id: int) -> None:
+    """워커가 살아서 진행 중임을 알린다. 이 신호가 끊기면 정체로 판단한다."""
+    with _queue_lock:
+        info = _inflight.get(board_id)
+        if info is not None:
+            info["beat"] = time.time()
+
+
+def _mark_board_failed(board_id: int, message) -> None:
+    """보드를 실패로 기록한다. 여기서 나는 예외는 워커를 죽이지 않도록 삼킨다."""
+    db = SessionLocal()
+    try:
+        board = db.query(Board).filter_by(id=board_id).first()
+        if board and board.status in ("PENDING", "PROCESSING"):
+            board.status = "FAILED"
+            board.progress_percent = 0
+            board.error_message = str(message)[:500]
+            db.commit()
+    except Exception as e:
+        print(f"[STT-WORKER-WARN] Board #{board_id} 실패 상태 기록 실패: {e}", flush=True)
+        try:
+            db.rollback()
+        except Exception:
+            pass
+    finally:
+        db.close()
+
+
+def _run_one_board(board_id: int) -> None:
+    db = SessionLocal()
+    audio_path = None
+    try:
+        board = db.query(Board).filter_by(id=board_id).first()
+        if board is None:
+            return
+        if board.audio_path and os.path.exists(board.audio_path):
+            audio_path = board.audio_path
+            board.status = "PROCESSING"
+            board.progress_percent = 1
+            board.error_message = None
+        else:
+            board.status = "FAILED"
+            board.progress_percent = 0
+            board.error_message = "오디오 파일을 찾을 수 없습니다."
+        db.commit()
+    finally:
+        db.close()
+
+    if audio_path:
+        process_audio_file_to_board(
+            board_id,
+            audio_path,
+            SessionLocal,
+            progress_callback=lambda _pct, _bid=board_id: _heartbeat(_bid),
+        )
+
+
+def stt_worker():
+    """큐에서 보드를 하나씩 꺼내 변환한다.
+
+    이 루프는 어떤 예외에도 절대 빠져나가면 안 된다. 워커 스레드가 조용히 죽으면
+    큐를 읽는 사람이 없어져 모든 보드가 '변환 대기 중'에서 영구히 멈춘다.
+    """
+    name = threading.current_thread().name
+    while True:
+        try:
+            board_id = stt_queue.get()
+        except Exception as get_err:
+            print(f"[STT-WORKER-FATAL] {name} 큐 읽기 실패: {get_err}", flush=True)
+            time.sleep(1)
+            continue
+
+        with _queue_lock:
+            # 회수 로직과 겹쳐 같은 보드가 두 번 들어왔다면 먼저 잡은 워커에게 맡긴다
+            duplicate = board_id in _inflight
+            if not duplicate:
+                now = time.time()
+                _inflight[board_id] = {"worker": name, "started": now, "beat": now}
+        if duplicate:
             try:
-                board = db.query(Board).filter_by(id=board_id).first()
-                if board and board.status == "PROCESSING":
-                    board.status = "FAILED"
-                    board.error_message = str(e)
-                    db.commit()
-            finally:
-                db.close()
+                stt_queue.task_done()
+            except Exception:
+                pass
+            continue
+
+        try:
+            _run_one_board(board_id)
+        except Exception as e:
+            print(f"[STT-WORKER-ERROR] Board #{board_id}: {e}", flush=True)
+            _mark_board_failed(board_id, e)
         finally:
-            with _queue_lock:
-                _queued_board_ids.discard(board_id)
-            stt_queue.task_done()
+            _release_board(board_id)
+            try:
+                stt_queue.task_done()
+            except Exception:
+                pass
+
+
+def ensure_workers_alive() -> int:
+    """죽은 워커 스레드를 채워 넣는다. 새로 띄운 개수를 돌려준다."""
+    to_start = []
+    with _queue_lock:
+        alive = [t for t in _worker_threads if t.is_alive()]
+        _worker_threads[:] = alive
+        for i in range(STT_WORKERS - len(alive)):
+            t = threading.Thread(
+                target=stt_worker,
+                name=f"stt-worker-{len(_worker_threads) + i + 1}",
+                daemon=True,
+            )
+            _worker_threads.append(t)
+            to_start.append(t)
+    for t in to_start:
+        t.start()
+    return len(to_start)
+
+
+def requeue_pending_boards(db: Session) -> None:
+    """원본이 살아 있는 PENDING 보드를 큐에 넣는다 (업로드/재시도/감시 누락 회수)."""
+    pending = (
+        db.query(Board)
+        .filter(Board.status == "PENDING", Board.is_deleted == False)  # noqa: E712
+        .all()
+    )
+    for b in pending:
+        if b.audio_path and os.path.exists(b.audio_path):
+            enqueue_board(b.id)
+
+
+def recover_stalled_boards(db: Session) -> None:
+    """큐·워커에서 사라졌는데 DB에는 대기/변환 중으로 남은 보드를 되살린다.
+
+    - PROCESSING 인데 잡고 있는 워커가 없다 → 워커가 죽은 것이므로 PENDING 으로 되돌린다.
+    - PENDING 인데 '큐에 넣었다'는 표시만 남고 큐도 비어 있고 워커도 안 잡고 있다
+      → 작업이 유실된 것이므로 표시를 지우고 다시 넣는다.
+    이 두 가지가 '서버에서 변환 대기 중'에서 영원히 안 넘어가던 원인이다.
+    """
+    now = time.time()
+    with _queue_lock:
+        queued_ids = set(_queued_board_ids)
+        queued_at = dict(_queued_at)
+        inflight = {bid: dict(info) for bid, info in _inflight.items()}
+    queue_empty = stt_queue.empty()
+
+    # 1) 담당 워커가 사라진 PROCESSING 보드 회수
+    orphans = [
+        b for b in db.query(Board).filter(Board.status == "PROCESSING").all()
+        if b.id not in inflight
+    ]
+    if orphans:
+        for b in orphans:
+            b.status = "PENDING"
+            b.progress_percent = 0
+            b.error_message = None
+        db.commit()
+        for b in orphans:
+            _release_board(b.id)
+            print(
+                f"[STT-RECOVER] 담당 워커가 사라진 보드 #{b.id} ({b.title}) 를 대기열로 되돌렸습니다.",
+                flush=True,
+            )
+
+    # 2) 큐 표시만 남고 실제 작업이 사라진 PENDING 보드 회수
+    if queue_empty and queued_ids:
+        ghosts = (
+            db.query(Board)
+            .filter(Board.status == "PENDING", Board.is_deleted == False)  # noqa: E712
+            .filter(Board.id.in_(queued_ids))
+            .all()
+        )
+        ghost_ids = set()
+        for b in ghosts:
+            if b.id in inflight:
+                continue
+            if now - queued_at.get(b.id, now) < STT_GHOST_GRACE_SEC:
+                continue
+            if not (b.audio_path and os.path.exists(b.audio_path)):
+                continue
+            ghost_ids.add(b.id)
+            # 워커가 큐에서 막 꺼낸 찰나를 유실로 오인하지 않도록 연속 2회 관측을 요구한다
+            if _ghost_streaks.get(b.id, 0) + 1 < 2:
+                _ghost_streaks[b.id] = _ghost_streaks.get(b.id, 0) + 1
+                continue
+            _ghost_streaks.pop(b.id, None)
+            _release_board(b.id)
+            if enqueue_board(b.id):
+                print(
+                    f"[STT-RECOVER] 큐에서 유실된 보드 #{b.id} ({b.title}) 를 다시 넣었습니다.",
+                    flush=True,
+                )
+        for gone in set(_ghost_streaks) - ghost_ids:
+            _ghost_streaks.pop(gone, None)
+    else:
+        _ghost_streaks.clear()
+
+    # 3) 오래도록 진행 신호가 없는 작업은 경고를 남긴다 (API 응답 지연/네트워크 정체)
+    for bid, info in inflight.items():
+        silent = now - info.get("beat", info.get("started", now))
+        if silent > STT_STALL_WARN_SEC:
+            print(
+                f"[STT-STALL] 보드 #{bid} 가 {int(silent // 60)}분째 진행 신호가 없습니다 "
+                f"(워커 {info.get('worker')}). GEMINI_TIMEOUT_MS 설정을 확인하세요.",
+                flush=True,
+            )
 
 
 # -----------------
@@ -379,16 +560,34 @@ def background_audio_watcher():
             # 탐색기에서 원본을 지웠다면 보드도 따라 정리한다
             sync_deleted_audio_to_boards(db, missing_streaks)
 
-            # 파일 감시와 별개로 남아 있는 PENDING 보드를 회수한다 (업로드/재시도 경로)
-            pending = db.query(Board).filter(Board.status == "PENDING", Board.is_deleted == False).all()
-            for b in pending:
-                if b.audio_path and os.path.exists(b.audio_path):
-                    enqueue_board(b.id)
         except Exception as e:
-            print(f"[WATCHER-ERROR] {e}")
+            print(f"[WATCHER-ERROR] {e}", flush=True)
         finally:
             if db is not None:
                 db.close()
+
+        # 파일 스캔이 실패해도 대기열 회수는 반드시 돌아야 한다.
+        # (예전에는 같은 try 안에 있어서, 스캔에서 예외가 한 번 나면
+        #  PENDING 보드가 영영 큐에 안 들어가고 '변환 대기 중'에서 멈췄다)
+        db = None
+        try:
+            db = SessionLocal()
+            recover_stalled_boards(db)
+            requeue_pending_boards(db)
+        except Exception as e:
+            print(f"[QUEUE-RECOVER-ERROR] {e}", flush=True)
+        finally:
+            if db is not None:
+                db.close()
+
+        # 워커가 죽었으면 다시 띄운다 (워커가 0개가 되면 큐를 읽는 사람이 없어진다)
+        try:
+            restarted = ensure_workers_alive()
+            if restarted:
+                print(f"[STT-WORKER] 죽어 있던 워커 {restarted}개를 다시 시작했습니다.", flush=True)
+        except Exception as e:
+            print(f"[WORKER-SUPERVISOR-ERROR] {e}", flush=True)
+
         time.sleep(5)
 
 
@@ -416,9 +615,8 @@ def startup_event():
     finally:
         db.close()
 
-    for i in range(STT_WORKERS):
-        threading.Thread(target=stt_worker, name=f"stt-worker-{i+1}", daemon=True).start()
-    print(f"[INFO] {STT_WORKERS} STT worker(s) started.")
+    started = ensure_workers_alive()
+    print(f"[INFO] {started} STT worker(s) started.")
 
     # 백그라운드 폴더 감시 스레드 가동
     watcher_thread = threading.Thread(target=background_audio_watcher, daemon=True)
@@ -652,12 +850,46 @@ def remove_user(user_id: int, db: Session = Depends(get_db),
 # -----------------
 @app.get("/api/health")
 def health_check(db: Session = Depends(get_db)):
+    with _queue_lock:
+        workers_alive = sum(1 for t in _worker_threads if t.is_alive())
     return {
         "status": "ok",
         "boards": db.query(Board).filter_by(is_deleted=False).count(),
         "processing": db.query(Board).filter(Board.status.in_(["PROCESSING", "PENDING"])).count(),
         "queue_depth": stt_queue.qsize(),
         "workers": STT_WORKERS,
+        "workers_alive": workers_alive,
+        "ai_ready": bool(os.getenv("GEMINI_API_KEY") or os.getenv("GEMINI_API_KEY_PAID")),
+    }
+
+
+@app.get("/api/queue/status")
+def queue_status(db: Session = Depends(get_db)):
+    """'변환 대기 중'에서 안 넘어갈 때 어디가 막혔는지 보는 진단용 엔드포인트."""
+    now = time.time()
+    with _queue_lock:
+        workers_alive = sum(1 for t in _worker_threads if t.is_alive())
+        queued_ids = sorted(_queued_board_ids)
+        inflight = [
+            {
+                "board_id": bid,
+                "worker": info.get("worker"),
+                "running_seconds": int(now - info.get("started", now)),
+                "seconds_since_progress": int(now - info.get("beat", now)),
+            }
+            for bid, info in sorted(_inflight.items())
+        ]
+    return {
+        "queue_depth": stt_queue.qsize(),
+        "workers_configured": STT_WORKERS,
+        "workers_alive": workers_alive,
+        "queued_board_ids": queued_ids,
+        "inflight": inflight,
+        "pending_boards": db.query(Board).filter(
+            Board.status == "PENDING", Board.is_deleted == False  # noqa: E712
+        ).count(),
+        "processing_boards": db.query(Board).filter(Board.status == "PROCESSING").count(),
+        "gemini_timeout_ms": GEMINI_TIMEOUT_MS,
         "ai_ready": bool(os.getenv("GEMINI_API_KEY") or os.getenv("GEMINI_API_KEY_PAID")),
     }
 

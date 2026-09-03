@@ -2,6 +2,7 @@ import os
 import re
 import json
 import tempfile
+import time
 import uuid
 import datetime
 from typing import AsyncGenerator, List, Dict, Optional, Callable
@@ -19,6 +20,13 @@ load_dotenv()
 api_keys = [k for k in [os.getenv("GEMINI_API_KEY"), os.getenv("GEMINI_API_KEY_PAID")] if k]
 active_key_index = 0
 
+# google-genai SDK 는 httpx 클라이언트에 timeout=None 을 넣는다. 즉 기본값이 '무한 대기'다.
+# 응답이 끊기면 워커 스레드가 영원히 묶여 큐가 멈추고, 나머지 보드는 계속 '변환 대기 중'이 된다.
+# 그래서 반드시 명시적으로 타임아웃을 건다. (밀리초, 기본 15분)
+GEMINI_TIMEOUT_MS = max(60_000, int(os.getenv("GEMINI_TIMEOUT_MS", "900000")))
+# 일시적 오류(5xx/타임아웃/연결 끊김)일 때 같은 키로 다시 시도할 최대 횟수
+GEMINI_MAX_ATTEMPTS = max(1, int(os.getenv("GEMINI_MAX_ATTEMPTS", "3")))
+
 CHUNK_LENGTH_MS = 20 * 60 * 1000   # 20분 청크
 OVERLAP_MS = 30 * 1000             # 30초 오버랩
 CHUNK_STEP_MS = CHUNK_LENGTH_MS - OVERLAP_MS
@@ -33,15 +41,42 @@ def sanitize_filename(name: str, fallback: str = "untitled") -> str:
     cleaned = cleaned.strip(" .")
     return cleaned[:180] or fallback
 
+def make_client(api_key: str) -> genai.Client:
+    """타임아웃과 자동 재시도를 건 Gemini 클라이언트를 만든다."""
+    try:
+        return genai.Client(
+            api_key=api_key,
+            http_options={
+                "timeout": GEMINI_TIMEOUT_MS,
+                "retry_options": {"attempts": 3, "initial_delay": 2.0, "max_delay": 30.0},
+            },
+        )
+    except Exception:
+        # retry_options 를 모르는 구버전 SDK → 타임아웃만이라도 건다
+        try:
+            return genai.Client(api_key=api_key, http_options={"timeout": GEMINI_TIMEOUT_MS})
+        except Exception:
+            return genai.Client(api_key=api_key)
+
 def get_client() -> Optional[genai.Client]:
-    global active_key_index
     if not api_keys:
         return None
-    return genai.Client(api_key=api_keys[active_key_index])
+    return make_client(api_keys[active_key_index])
 
 def is_quota_error(err: Exception) -> bool:
     msg = str(err).upper()
     return "429" in msg or "RESOURCE_EXHAUSTED" in msg or "QUOTA" in msg
+
+_TRANSIENT_MARKERS = (
+    "500", "502", "503", "504", "UNAVAILABLE", "INTERNAL", "DEADLINE",
+    "TIMEOUT", "TIMED OUT", "CONNECTION", "CONNECTERROR", "READERROR",
+    "REMOTEPROTOCOLERROR", "TEMPORARILY", "SSLERROR",
+)
+
+def is_transient_error(err: Exception) -> bool:
+    """다시 시도하면 될 법한 일시적 오류인지 판별한다."""
+    msg = f"{type(err).__name__} {err}".upper()
+    return any(m in msg for m in _TRANSIENT_MARKERS)
 
 def timestamp_to_seconds(ts_str: str) -> int:
     parts = list(map(int, ts_str.split(':')))
@@ -92,18 +127,26 @@ def strip_overlap(text: str, boundary_seconds: int) -> str:
     return "\n".join(kept_lines)
 
 def transcribe_chunk_with_fallback(temp_chunk_path: str, display_name: str, prompt_text: str) -> str:
+    """청크 하나를 STT 한다.
+
+    - 429/할당량 오류 → 다음 API 키로 넘어간다
+    - 5xx·타임아웃·연결 끊김 같은 일시적 오류 → 같은 키로 백오프 재시도한다
+      (한 번 삐끗했다고 보드 전체를 실패시키지 않는다)
+    """
     global active_key_index
-    client = get_client()
-    if not client:
+    if not api_keys:
         raise RuntimeError("GEMINI_API_KEY가 설정되지 않았습니다.")
 
     last_error = None
-    for key_idx in range(active_key_index, len(api_keys)):
+    key_idx = active_key_index
+    attempt = 0
+
+    while key_idx < len(api_keys):
         if key_idx != active_key_index:
             active_key_index = key_idx
-            client = genai.Client(api_key=api_keys[key_idx])
-            print(f"[AI-KEY] Switching to API key ({key_idx + 1}/{len(api_keys)})...")
+            print(f"[AI-KEY] Switching to API key ({key_idx + 1}/{len(api_keys)})...", flush=True)
 
+        client = make_client(api_keys[key_idx])
         uploaded_file = None
         try:
             uploaded_file = client.files.upload(
@@ -130,8 +173,21 @@ def transcribe_chunk_with_fallback(temp_chunk_path: str, display_name: str, prom
             return transcript_text
         except Exception as err:
             last_error = err
-            if not is_quota_error(err):
-                raise
+            if is_quota_error(err):
+                key_idx += 1
+                attempt = 0
+                continue
+            attempt += 1
+            if attempt < GEMINI_MAX_ATTEMPTS and is_transient_error(err):
+                delay = min(30, 2 ** attempt)
+                print(
+                    f"[AI-RETRY] {display_name} 일시적 오류로 {delay}초 뒤 재시도 "
+                    f"({attempt}/{GEMINI_MAX_ATTEMPTS - 1}): {err}",
+                    flush=True,
+                )
+                time.sleep(delay)
+                continue
+            raise
         finally:
             if uploaded_file is not None:
                 try:
@@ -177,6 +233,9 @@ def process_audio_file_to_board(board_id: int, audio_path: str, db_session_facto
 
         full_transcript = ""
         for i, chunk in enumerate(chunks):
+            # 청크 하나가 오래 걸려도 '정체'로 오인되지 않도록 시작 시점에 살아있음을 알린다
+            if progress_callback:
+                progress_callback(board.progress_percent or 0)
             temp_chunk_path = os.path.join(tempfile.gettempdir(), f"chunk_{uuid.uuid4().hex}.mp3")
             # STT 최적화 (16kHz 모노 32k)
             chunk.set_frame_rate(16000).set_channels(1).export(temp_chunk_path, format="mp3", bitrate="32k")
@@ -302,10 +361,16 @@ def process_audio_file_to_board(board_id: int, audio_path: str, db_session_facto
         print(f"[AI-COMPLETE] Board #{board.id} ({board.title}) STT & Analysis done.")
 
     except Exception as e:
-        print(f"[AI-ERROR] Board #{board.id} STT failed: {e}")
-        board.status = "FAILED"
-        board.error_message = str(e)
-        db.commit()
+        print(f"[AI-ERROR] Board #{board_id} STT failed: {e}", flush=True)
+        # 실패한 트랜잭션을 먼저 되돌려야 상태 기록 커밋이 또 터지지 않는다.
+        # 여기서 예외가 새어 나가면 워커가 보드를 FAILED 로 마무리해 준다.
+        db.rollback()
+        board = db.query(Board).filter_by(id=board_id).first()
+        if board:
+            board.status = "FAILED"
+            board.progress_percent = 0
+            board.error_message = str(e)[:500]
+            db.commit()
     finally:
         db.close()
 
