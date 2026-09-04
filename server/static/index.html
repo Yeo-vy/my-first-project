@@ -136,6 +136,9 @@
                         <h3 class="detail-title" id="detail-title" contenteditable="true" onblur="saveBoardTitle(this.innerText)">보드 제목</h3>
                     </div>
                     <div class="detail-right-header">
+                        <button class="btn-secondary" onclick="openGlossaryModal()" title="이 폴더의 고유명사·전문용어를 등록하면 다시 받아쓸 때 표기가 고정됩니다">
+                            <i class="fa-solid fa-book"></i> 용어집
+                        </button>
                         <button class="btn-secondary" id="detail-retranscribe-btn" onclick="retranscribeCurrentBoard()" title="원본 녹음으로 스크립트를 처음부터 다시 만듭니다">
                             <i class="fa-solid fa-rotate-right"></i> 다시 받아쓰기
                         </button>
@@ -317,6 +320,32 @@
                 </footer>
             </section>
         </main>
+    </div>
+
+    <!-- 모달: 용어집(단어장) -->
+    <div id="glossary-modal" class="modal-backdrop" style="display: none;">
+        <div class="modal-card glossary-card">
+            <h3>용어집</h3>
+            <p class="modal-desc">
+                받아쓰기할 때 AI가 이 표기를 그대로 쓰도록 알려 줍니다. 한 줄에 하나씩 적고,
+                설명이 필요하면 <code>용어 | 메모</code> 처럼 세로줄 뒤에 덧붙이세요.
+                등록 후 <b>다시 받아쓰기</b>를 해야 스크립트에 반영됩니다.
+            </p>
+            <div class="form-group">
+                <label id="glossary-folder-label">이 폴더 전용</label>
+                <textarea id="glossary-folder-terms" rows="7" spellcheck="false" placeholder="퍼지 로직 | fuzzy logic&#10;대예인&#10;IB | 투자은행"></textarea>
+            </div>
+            <div class="form-group">
+                <label>모든 폴더 공통</label>
+                <textarea id="glossary-common-terms" rows="4" spellcheck="false" placeholder="모든 녹음에 공통으로 적용할 용어"></textarea>
+            </div>
+            <p class="glossary-hint" id="glossary-count-hint"></p>
+            <div class="modal-actions">
+                <button class="btn-secondary" onclick="closeGlossaryModal()">취소</button>
+                <button class="btn-secondary" onclick="saveGlossary(false)">저장</button>
+                <button class="primary-btn" id="glossary-save-retry-btn" onclick="saveGlossary(true)">저장하고 다시 받아쓰기</button>
+            </div>
+        </div>
     </div>
 
     <!-- 모달: 폴더 추가 -->

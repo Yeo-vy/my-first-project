@@ -96,6 +96,21 @@ class Bookmark(Base):
     board = relationship("Board", back_populates="bookmarks")
 
 
+class GlossaryTerm(Base):
+    """받아쓰기에 힌트로 넣어 주는 용어집(단어장) 항목.
+
+    강의 고유명사·전문용어는 발음만으로는 자주 틀리게 적힌다. 이 목록을 STT 프롬프트에
+    같이 넣어 표기를 고정한다. folder_id 가 비어 있으면 모든 폴더에 적용되는 공통 용어다.
+    """
+    __tablename__ = "glossary_terms"
+
+    id = Column(Integer, primary_key=True, index=True)
+    folder_id = Column(Integer, ForeignKey("folders.id"), nullable=True, index=True)
+    term = Column(String(200), nullable=False)
+    note = Column(String(300), default="")  # 설명 또는 자주 잘못 인식되는 표기
+    created_at = Column(DateTime, default=datetime.datetime.utcnow)
+
+
 class User(Base):
     __tablename__ = "users"
 

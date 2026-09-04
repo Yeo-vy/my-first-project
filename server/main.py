@@ -19,7 +19,7 @@ from sqlalchemy.orm import Session
 from pydantic import BaseModel
 
 from server.database import init_db, get_db, SessionLocal
-from server.models import Folder, Board, TranscriptSegment, BoardSummary, BoardChat, Bookmark, User
+from server.models import Folder, Board, TranscriptSegment, BoardSummary, BoardChat, Bookmark, GlossaryTerm, User
 from server import auth
 from server.migrator import (
     sync_filesystem_to_db,
@@ -31,6 +31,9 @@ from server.migrator import (
 )
 from server.ai_service import (
     GEMINI_TIMEOUT_MS,
+    GLOSSARY_MAX_TERMS,
+    load_glossary_terms,
+    resolve_end_times,
     terminate_active_media_processes,
     extract_keywords_ai,
     generate_summary_ai,
@@ -58,8 +61,16 @@ if ALLOWED_ORIGINS:
 # 인증 게이트 미들웨어
 # 아래 목록을 뺀 모든 경로(정적 파일·오디오 스트림 포함)는 로그인해야 열린다.
 # -----------------
+# 로그인 페이지 주소. `/login` 은 스캐너 봇이 가장 먼저 두드리는 경로라서 바꿀 수 있게 했다.
+# .env 에 LOGIN_PATH=조금-긴-임의문자열 처럼 적으면 그 주소에서만 로그인 화면이 열린다.
+LOGIN_PATH = "/" + (os.getenv("LOGIN_PATH", "login").strip().strip("/") or "login")
+
+# 로그인하지 않은 브라우저가 루트(/)로 들어왔을 때 로그인 페이지로 안내할지 여부.
+# off 로 두면 루트조차 404 가 되어, 주소를 아는 사람만 로그인 화면에 닿을 수 있다.
+LOGIN_REDIRECT = os.getenv("LOGIN_REDIRECT", "on").strip().lower() not in ("0", "off", "false", "no")
+
 PUBLIC_PATHS = {
-    "/login",
+    LOGIN_PATH,
     "/api/ping",
     "/api/auth/status",
     "/api/auth/login",
@@ -88,7 +99,12 @@ async def auth_gate(request: Request, call_next):
     if user is None:
         if path.startswith("/api/"):
             return JSONResponse(status_code=401, content={"detail": "로그인이 필요합니다."})
-        return RedirectResponse(url="/login", status_code=302)
+        # 로그인 안내는 루트로 들어온 사람에게만 한다.
+        # /login·/admin·/wp-login.php 처럼 봇이 찍어 보는 경로는 리다이렉트로 힌트를 주지 않고
+        # 그냥 없는 페이지로 응답한다. (스캐너 입장에서는 빈 서버로 보인다)
+        if LOGIN_REDIRECT and path == "/":
+            return RedirectResponse(url=LOGIN_PATH, status_code=302)
+        return Response(content="Not Found", status_code=404, media_type="text/plain")
 
     return await call_next(request)
 
@@ -810,7 +826,8 @@ def startup_event():
     try:
         auth.bootstrap_admin_from_env(db)
         if not auth.has_any_user(db):
-            print("[AUTH] 등록된 계정이 없습니다. http://localhost:8000/login 에서 첫 관리자 계정을 만드세요.")
+            port = os.getenv("PORT", "8000")
+            print(f"[AUTH] 등록된 계정이 없습니다. http://localhost:{port}{LOGIN_PATH} 에서 첫 관리자 계정을 만드세요.")
         auth.purge_expired_sessions(db)
         # 프로젝트 폴더 이동으로 끊긴 경로를 먼저 복구해야 삭제 동기화가 오작동하지 않는다
         repair_stale_media_paths(db)
@@ -877,6 +894,17 @@ class BookmarkCreateRequest(BaseModel):
     timestamp_ms: int
     timestamp_str: str
     note: Optional[str] = ""
+
+class GlossaryItem(BaseModel):
+    term: str
+    note: Optional[str] = ""
+
+
+class GlossaryReplaceRequest(BaseModel):
+    # folder_id 가 없으면 모든 폴더에 적용되는 공통 용어를 교체한다
+    folder_id: Optional[int] = None
+    terms: List[GlossaryItem] = []
+
 
 class SummaryRequest(BaseModel):
     summary_type: str = "BASIC"  # BASIC, MEETING, ACTION_ITEM, QUIZ, SLIDE
@@ -1399,6 +1427,85 @@ def reprocess_board(board_id: int, db: Session = Depends(get_db)):
     }
 
 
+# -----------------
+# 2-1. 용어집(단어장) — 받아쓰기 프롬프트에 실어 보내는 고유명사/전문용어
+# -----------------
+@app.get("/api/glossary")
+def get_glossary(folder_id: Optional[int] = Query(None), db: Session = Depends(get_db)):
+    """폴더 전용 용어와 공통 용어를 나눠서 돌려준다."""
+    folder = db.query(Folder).filter_by(id=folder_id).first() if folder_id else None
+
+    def dump(rows):
+        return [{"id": r.id, "term": r.term, "note": r.note or ""} for r in rows]
+
+    common = (
+        db.query(GlossaryTerm)
+        .filter(GlossaryTerm.folder_id.is_(None))
+        .order_by(GlossaryTerm.id)
+        .all()
+    )
+    folder_rows = []
+    if folder:
+        folder_rows = (
+            db.query(GlossaryTerm)
+            .filter(GlossaryTerm.folder_id == folder.id)
+            .order_by(GlossaryTerm.id)
+            .all()
+        )
+    return {
+        "folder_id": folder.id if folder else None,
+        "folder_name": folder.name if folder else None,
+        "folder_terms": dump(folder_rows),
+        "common_terms": dump(common),
+        "max_terms": GLOSSARY_MAX_TERMS,
+    }
+
+
+@app.put("/api/glossary")
+def replace_glossary(req: GlossaryReplaceRequest, db: Session = Depends(get_db)):
+    """한 범위(특정 폴더 또는 공통)의 용어 목록을 통째로 교체한다.
+
+    편집 화면이 여러 줄 텍스트를 통째로 보내는 구조라, 항목별 추가/삭제 대신 교체가 단순하다.
+    """
+    if req.folder_id is not None and not db.query(Folder).filter_by(id=req.folder_id).first():
+        raise HTTPException(status_code=404, detail="폴더를 찾을 수 없습니다.")
+
+    cleaned = []
+    seen = set()
+    for item in req.terms:
+        term = (item.term or "").strip()
+        if not term:
+            continue
+        key = term.lower()
+        if key in seen:          # 같은 용어를 두 번 넣어도 프롬프트에는 한 번만 들어가게 한다
+            continue
+        seen.add(key)
+        cleaned.append((term[:200], (item.note or "").strip()[:300]))
+        if len(cleaned) >= GLOSSARY_MAX_TERMS:
+            break
+
+    scope = db.query(GlossaryTerm)
+    if req.folder_id is None:
+        scope = scope.filter(GlossaryTerm.folder_id.is_(None))
+    else:
+        scope = scope.filter(GlossaryTerm.folder_id == req.folder_id)
+    scope.delete(synchronize_session=False)
+
+    for term, note in cleaned:
+        db.add(GlossaryTerm(folder_id=req.folder_id, term=term, note=note))
+    db.commit()
+    return {"ok": True, "count": len(cleaned), "dropped": max(0, len(req.terms) - len(cleaned))}
+
+
+@app.get("/api/boards/{board_id}/glossary-preview")
+def preview_board_glossary(board_id: int, db: Session = Depends(get_db)):
+    """이 보드를 다시 받아쓸 때 실제로 적용될 용어 목록(폴더 + 공통)을 보여 준다."""
+    b = db.query(Board).filter_by(id=board_id).first()
+    if not b:
+        raise HTTPException(status_code=404, detail="보드를 찾을 수 없습니다.")
+    return {"folder_id": b.folder_id, "terms": load_glossary_terms(db, b.folder_id)}
+
+
 @app.post("/api/boards/batch-delete")
 def batch_delete_boards(req: BatchDeleteRequest, db: Session = Depends(get_db)):
     # 파일도 함께 정리해야 하므로 보드를 실제로 읽어서 하나씩 처리한다
@@ -1443,12 +1550,16 @@ def update_transcript(board_id: int, req: TranscriptUpdateRequest, db: Session =
 
     db.query(TranscriptSegment).filter_by(board_id=board_id).delete()
     txt_lines = []
+    # 종료 시각은 클라이언트가 보낸 값을 믿지 않고 이웃 문단으로 다시 계산한다.
+    # (편집 화면은 '시작+10초'를 그대로 보내기 때문에, 그대로 저장하면 SRT 자막이 겹친다)
+    starts = [int(s.get("start_time_ms", 0) or 0) for s in new_segments]
+    ends = resolve_end_times(starts, int((b.duration_seconds or 0) * 1000))
     for idx, s in enumerate(new_segments):
-        start_ms = int(s.get("start_time_ms", 0) or 0)
+        start_ms = starts[idx]
         seg = TranscriptSegment(
             board_id=board_id,
             start_time_ms=start_ms,
-            end_time_ms=int(s.get("end_time_ms", 0) or 0) or (start_ms + 10000),
+            end_time_ms=ends[idx],
             timestamp_str=s.get("timestamp_str") or f"[{ms_to_timestamp(start_ms)}]",
             speaker=s.get("speaker") or "화자 1",
             content=s.get("content", ""),
@@ -1666,10 +1777,17 @@ def export_board(
 
     if format == "srt":
         srt_lines = []
-        for i, s in enumerate(b.segments, start=1):
+        # 이전 버전이 '시작+10초'로 저장해 둔 보드도 겹치지 않게, 내보낼 때 이웃 기준으로 다시 잡는다
+        segs = list(b.segments)
+        recalculated = resolve_end_times(
+            [s.start_time_ms or 0 for s in segs],
+            int((b.duration_seconds or 0) * 1000),
+        )
+        for i, s in enumerate(segs, start=1):
             start_ms = s.start_time_ms or 0
-            # 종료 시각이 비었거나 역전된 경우 최소 1초는 보장한다
-            end_ms = s.end_time_ms if (s.end_time_ms or 0) > start_ms else start_ms + 1000
+            end_ms = recalculated[i - 1]
+            if end_ms <= start_ms:
+                end_ms = start_ms + 1000
             speaker_prefix = f"[{s.speaker}] " if (include_speakers and s.speaker) else ""
             srt_lines.append(
                 f"{i}\n{srt_timestamp(start_ms)} --> {srt_timestamp(end_ms)}\n{speaker_prefix}{s.content}\n"
@@ -1802,7 +1920,7 @@ def serve_index():
     return {"message": "다글로 서버가 준비 중입니다."}
 
 
-@app.get("/login")
+@app.get(LOGIN_PATH)
 def serve_login(request: Request, db: Session = Depends(get_db)):
     """이미 로그인한 상태면 곧바로 메인으로 보낸다."""
     if auth.resolve_session_user(db, request.cookies.get(auth.SESSION_COOKIE)):

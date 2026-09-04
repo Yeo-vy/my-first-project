@@ -28,7 +28,7 @@ window.fetch = async function (...args) {
     const response = await rawFetch(...args);
     if (response.status === 401 && !redirectingToLogin) {
         redirectingToLogin = true;
-        window.location.replace("/login");
+        window.location.replace("/");
     }
     return response;
 };
@@ -60,7 +60,7 @@ async function logout() {
     closeUserMenu();
     if (!confirm("로그아웃할까요?")) return;
     await fetch("/api/auth/logout", { method: "POST" });
-    window.location.replace("/login");
+    window.location.replace("/");
 }
 
 function openPasswordModal() {
@@ -658,7 +658,7 @@ async function saveTranscriptChanges() {
         const content = block.querySelector(".text-content").innerText.trim();
         segments.push({
             start_time_ms: ms,
-            end_time_ms: ms + 10000,
+            // 종료 시각은 서버가 이웃 문단을 보고 다시 계산한다 (자막 겹침 방지)
             timestamp_str: ts,
             speaker: spk,
             content: content,
@@ -1141,6 +1141,108 @@ async function submitAudioUpload() {
         btn.disabled = false;
         btn.innerHTML = "업로드 및 변환 시작";
     }
+}
+
+// -----------------------------------------
+// 8-1. 용어집(단어장)
+// -----------------------------------------
+// 받아쓰기 프롬프트에 실어 보낼 고유명사/전문용어. 저장만으로는 기존 스크립트가 바뀌지 않고,
+// `다시 받아쓰기`를 돌려야 반영된다. 그래서 모달에서 바로 재변환까지 이어갈 수 있게 했다.
+let glossaryFolderId = null;
+let glossaryMaxTerms = 200;
+
+async function openGlossaryModal() {
+    if (!currentBoard) return;
+    glossaryFolderId = currentBoard.folder_id || null;
+
+    try {
+        const url = glossaryFolderId ? `/api/glossary?folder_id=${glossaryFolderId}` : "/api/glossary";
+        const res = await fetch(url);
+        if (!res.ok) throw new Error("load failed");
+        const data = await res.json();
+
+        glossaryMaxTerms = data.max_terms || 200;
+        const folderBox = document.getElementById("glossary-folder-terms");
+        const label = document.getElementById("glossary-folder-label");
+
+        label.textContent = data.folder_name
+            ? `'${data.folder_name}' 폴더 전용`
+            : "폴더 전용 (이 보드는 폴더에 속해 있지 않습니다)";
+        folderBox.value = termsToText(data.folder_terms || []);
+        folderBox.disabled = !glossaryFolderId;
+        document.getElementById("glossary-common-terms").value = termsToText(data.common_terms || []);
+
+        folderBox.oninput = updateGlossaryHint;
+        document.getElementById("glossary-common-terms").oninput = updateGlossaryHint;
+        updateGlossaryHint();
+
+        // 재변환은 원본 녹음이 있어야 가능하다
+        const retryBtn = document.getElementById("glossary-save-retry-btn");
+        retryBtn.style.display = currentBoard.has_audio ? "" : "none";
+
+        document.getElementById("glossary-modal").style.display = "flex";
+    } catch (e) {
+        alert("용어집을 불러오지 못했습니다.");
+    }
+}
+
+function closeGlossaryModal() {
+    document.getElementById("glossary-modal").style.display = "none";
+}
+
+function termsToText(terms) {
+    return terms.map(t => (t.note ? `${t.term} | ${t.note}` : t.term)).join("\n");
+}
+
+// 한 줄에 용어 하나. `용어 | 메모` 형식으로 메모를 덧붙일 수 있다.
+function textToTerms(text) {
+    return (text || "")
+        .split("\n")
+        .map(line => {
+            const parts = line.split("|");
+            return { term: (parts.shift() || "").trim(), note: parts.join("|").trim() };
+        })
+        .filter(t => t.term);
+}
+
+function updateGlossaryHint() {
+    const total =
+        textToTerms(document.getElementById("glossary-folder-terms").value).length +
+        textToTerms(document.getElementById("glossary-common-terms").value).length;
+    document.getElementById("glossary-count-hint").textContent =
+        total > glossaryMaxTerms
+            ? `용어 ${total}개 — 프롬프트에는 앞에서부터 ${glossaryMaxTerms}개까지만 들어갑니다.`
+            : `용어 ${total}개`;
+}
+
+async function saveGlossary(thenRetranscribe) {
+    const buttons = Array.from(document.querySelectorAll("#glossary-modal button"));
+    buttons.forEach(b => { b.disabled = true; });
+    try {
+        if (glossaryFolderId) {
+            await putGlossary(glossaryFolderId, textToTerms(document.getElementById("glossary-folder-terms").value));
+        }
+        await putGlossary(null, textToTerms(document.getElementById("glossary-common-terms").value));
+        closeGlossaryModal();
+        showToast("용어집을 저장했습니다.");
+        if (thenRetranscribe && currentBoard) {
+            retranscribeBoard(null, currentBoard.id);
+        }
+    } catch (e) {
+        alert("용어집 저장에 실패했습니다.");
+    } finally {
+        buttons.forEach(b => { b.disabled = false; });
+    }
+}
+
+async function putGlossary(folderId, terms) {
+    const res = await fetch("/api/glossary", {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ folder_id: folderId, terms })
+    });
+    if (!res.ok) throw new Error("save failed");
+    return res.json();
 }
 
 // -----------------------------------------

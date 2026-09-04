@@ -1283,6 +1283,42 @@ body {
     margin-bottom: 6px;
 }
 
+/* 용어집 모달: 여러 줄 입력이라 기본 모달보다 넓게 쓴다 */
+.glossary-card {
+    width: 520px;
+    max-width: calc(100vw - 40px);
+}
+
+.glossary-card textarea {
+    width: 100%;
+    padding: 10px 12px;
+    border: 1px solid var(--border-color);
+    border-radius: 6px;
+    font-size: 13.5px;
+    line-height: 1.6;
+    font-family: inherit;
+    resize: vertical;
+    outline: none;
+}
+
+.glossary-card textarea:focus {
+    border-color: var(--border-hover);
+}
+
+.glossary-card code {
+    background: #f1f5f9;
+    padding: 1px 5px;
+    border-radius: 4px;
+    font-size: 12px;
+}
+
+.glossary-hint {
+    font-size: 12px;
+    color: var(--text-muted);
+    margin: -4px 0 12px;
+    min-height: 16px;
+}
+
 .form-group select {
     width: 100%;
     padding: 8px 10px;

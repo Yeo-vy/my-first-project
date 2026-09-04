@@ -195,6 +195,33 @@ def ms_to_timestamp_str(ms: int) -> str:
         return f"[{hours:02d}:{minutes:02d}:{seconds:02d}]"
     return f"[{minutes:02d}:{seconds:02d}]"
 
+# 자막 한 줄이 화면에 머무는 최대 시간. 문단 사이가 길게 비어도(쉬는 시간 등)
+# 자막이 몇 분씩 떠 있지 않도록 잘라 준다.
+SUBTITLE_MAX_MS = 30 * 1000
+SUBTITLE_MIN_MS = 1000
+
+
+def resolve_end_times(start_ms_list: List[int], total_ms: int = 0) -> List[int]:
+    """세그먼트 시작 시각들로 서로 겹치지 않는 종료 시각을 계산한다.
+
+    예전에는 종료 시각을 '시작 + 10초'로 고정했다. 문단 간격이 10초보다 짧은 구간에서는
+    앞 자막이 다음 자막을 덮어써 SRT 가 겹쳐 보였다. 종료는 다음 문단이 시작하기 직전까지로
+    잡는 것이 맞고, 마지막 문단만 녹음 길이로 닫는다.
+    """
+    n = len(start_ms_list)
+    ends = []
+    for i, start in enumerate(start_ms_list):
+        start = max(0, int(start or 0))
+        if i + 1 < n:
+            limit = max(int(start_ms_list[i + 1] or 0), start + SUBTITLE_MIN_MS)
+        elif total_ms and total_ms > start:
+            limit = total_ms
+        else:
+            limit = start + SUBTITLE_MAX_MS
+        ends.append(min(limit, start + SUBTITLE_MAX_MS))
+    return ends
+
+
 def offset_timestamps(text: str, offset_seconds: int) -> str:
     if offset_seconds == 0:
         return text
@@ -297,17 +324,59 @@ def transcribe_chunk_with_fallback(temp_chunk_path: str, display_name: str, prom
 
     raise last_error
 
-def process_audio_file_to_board(board_id: int, audio_path: str, db_session_factory, progress_callback: Optional[Callable[[int], None]] = None):
-    """오디오 파일을 청크 단위로 나누고 Gemini STT를 실행하여 Board에 저장하는 완전 자동화 파이프라인"""
-    from server.models import Board, TranscriptSegment, BoardSummary, Folder
+# 프롬프트에 넣는 용어 개수 상한. 너무 많이 넣으면 정작 본문 받아쓰기 품질이 떨어진다.
+GLOSSARY_MAX_TERMS = 200
 
-    prompt = """
+STT_BASE_PROMPT = """
 이 오디오 파일을 처음부터 끝까지 빠짐없이 텍스트로 받아쓰기(Transcription) 해줘.
 작성할 때 아래 규칙을 엄격하게 지켜:
 1. 문단이 바뀔 때마다 맨 앞에 [MM:SS] 타임스탬프를 적어줘.
 2. 동일한 타임스탬프 연속 출력 금지, 시간은 증가해야 해.
 3. 인사말이나 부연 설명 없이 타임스탬프와 본문 텍스트만 출력해.
 """
+
+
+def load_glossary_terms(db, folder_id: Optional[int]) -> List[Dict[str, str]]:
+    """해당 폴더의 용어 + 모든 폴더 공통 용어(folder_id 가 비어 있는 것)를 모은다."""
+    from server.models import GlossaryTerm
+
+    query = db.query(GlossaryTerm)
+    if folder_id:
+        query = query.filter(
+            (GlossaryTerm.folder_id == folder_id) | (GlossaryTerm.folder_id.is_(None))
+        )
+    else:
+        query = query.filter(GlossaryTerm.folder_id.is_(None))
+    return [
+        {"term": t.term, "note": t.note or ""}
+        for t in query.order_by(GlossaryTerm.folder_id.isnot(None), GlossaryTerm.id).all()
+    ]
+
+
+def build_glossary_prompt(terms: List[Dict[str, str]]) -> str:
+    """용어집을 받아쓰기 프롬프트에 덧붙일 문장으로 만든다. 용어가 없으면 빈 문자열."""
+    lines = []
+    for t in terms[:GLOSSARY_MAX_TERMS]:
+        term = (t.get("term") or "").strip()
+        if not term:
+            continue
+        note = (t.get("note") or "").strip()
+        lines.append(f"- {term} ({note})" if note else f"- {term}")
+    if not lines:
+        return ""
+    joined = "\n".join(lines)
+    return (
+        "4. 아래는 이 녹음에 자주 나오는 고유명사·전문용어 목록이야. 비슷하게 들리더라도 "
+        "이 목록에 있는 표기를 그대로 써. 목록에 없는 말을 억지로 끼워 넣지는 마:\n"
+        + joined
+        + "\n"
+    )
+
+
+def process_audio_file_to_board(board_id: int, audio_path: str, db_session_factory, progress_callback: Optional[Callable[[int], None]] = None):
+    """오디오 파일을 청크 단위로 나누고 Gemini STT를 실행하여 Board에 저장하는 완전 자동화 파이프라인"""
+    from server.models import Board, TranscriptSegment, BoardSummary, Folder
+
     db = db_session_factory()
     board = db.query(Board).filter_by(id=board_id).first()
     if not board:
@@ -318,6 +387,12 @@ def process_audio_file_to_board(board_id: int, audio_path: str, db_session_facto
         board.status = "PROCESSING"
         board.progress_percent = 5
         db.commit()
+
+        # 폴더 용어집을 프롬프트에 실어 보낸다 (고유명사·전문용어 표기 고정)
+        glossary = load_glossary_terms(db, board.folder_id)
+        prompt = STT_BASE_PROMPT + build_glossary_prompt(glossary)
+        if glossary:
+            print(f"[AI-GLOSSARY] Board #{board.id} 용어 {len(glossary)}개를 프롬프트에 적용합니다.", flush=True)
 
         # 파일을 통째로 디코딩하면 긴 녹음에서 수백 MB~GB 를 먹고 서버가 OOM 으로 죽는다.
         # 길이만 먼저 재고, 실제 오디오는 청크 단위로 그때그때 잘라 쓴다.
@@ -369,6 +444,7 @@ def process_audio_file_to_board(board_id: int, audio_path: str, db_session_facto
         seq = 0
         last_ms = 0
         txt_lines = []
+        built = []
         for line in lines:
             line = line.strip()
             if not line:
@@ -382,7 +458,7 @@ def process_audio_file_to_board(board_id: int, audio_path: str, db_session_facto
                 seg = TranscriptSegment(
                     board_id=board.id,
                     start_time_ms=t_ms,
-                    end_time_ms=t_ms + 10000,
+                    end_time_ms=t_ms,          # 아래에서 다음 문단 기준으로 다시 채운다
                     timestamp_str=f"[{ts}]",
                     speaker="화자 1",
                     content=clean,
@@ -393,15 +469,20 @@ def process_audio_file_to_board(board_id: int, audio_path: str, db_session_facto
                 seg = TranscriptSegment(
                     board_id=board.id,
                     start_time_ms=last_ms,
-                    end_time_ms=last_ms + 5000,
+                    end_time_ms=last_ms,
                     timestamp_str=ms_to_timestamp_str(last_ms),
                     speaker="화자 1",
                     content=line,
                     sequence=seq
                 )
                 txt_lines.append(line)
-            db.add(seg)
+            built.append(seg)
             seq += 1
+
+        # 종료 시각은 이웃 문단을 봐야 정해지므로 다 만든 뒤에 한 번에 채운다 (SRT 자막 겹침 방지)
+        for seg, end_ms in zip(built, resolve_end_times([s.start_time_ms for s in built], total_ms)):
+            seg.end_time_ms = end_ms
+            db.add(seg)
 
         # 텍스트 파일 저장
         if not board.txt_path:
