@@ -365,7 +365,7 @@ def recover_stalled_boards(db: Session) -> None:
 # -----------------
 # 탐색기에서 원본 녹음을 지우면 보드도 따라 사라지게 한다.
 #   trash     : 휴지통으로 보낸다 (기본값 — 실수로 지웠어도 복구할 수 있다)
-#   permanent : 보드와 스크립트를 즉시 완전 삭제한다
+#   permanent : 보드와 변환 결과 파일(.txt·_강의스크립트.html)을 즉시 완전 삭제한다
 #   off       : 동기화하지 않는다
 FILE_DELETE_SYNC = os.getenv("FILE_DELETE_SYNC", "trash").lower()
 
@@ -621,6 +621,26 @@ def purge_board_files(board: Board) -> bool:
     return bool(removed)
 
 
+def purge_transcript_files(board: Board) -> list:
+    """원본이 사라진 보드의 변환 결과 파일을 지운다 (텍스트 + 동반 파일).
+
+    오디오는 이미 탐색기에서 지워진 뒤라 목록에 있어도 건너뛴다. 서버가 관리하는 폴더
+    안쪽 파일만 지운다 — 그 밖을 가리키는 경로는 사용자가 직접 넣은 남의 파일일 수 있다.
+    """
+    removed = []
+    for key, path in board_file_targets(board):
+        if key == "audio_path":
+            continue
+        if not os.path.isfile(path) or not is_managed_file(path):
+            continue
+        try:
+            os.remove(path)
+            removed.append(os.path.basename(path))
+        except OSError as e:
+            print(f"[FILE-SYNC-WARN] #{board.id} {key} 삭제 실패 ({path}): {e}", flush=True)
+    return removed
+
+
 def repair_stale_media_paths(db: Session) -> None:
     """프로젝트 폴더를 옮겨 경로가 어긋난 보드를 현재 위치로 다시 연결한다.
 
@@ -764,14 +784,13 @@ def sync_deleted_audio_to_boards(db: Session, missing_streaks: dict) -> None:
         missing_streaks.pop(board.id, None)
         label = f"#{board.id} {board.title}"
         if FILE_DELETE_SYNC == "permanent":
-            # 보드를 지우면 스크립트/요약/북마크도 cascade 로 함께 사라진다
-            if board.txt_path and os.path.exists(board.txt_path):
-                try:
-                    os.remove(board.txt_path)
-                except OSError as e:
-                    print(f"[FILE-SYNC-WARN] 변환 텍스트 삭제 실패 ({board.txt_path}): {e}", flush=True)
+            # 원본이 없어진 녹음의 변환 결과는 더 쓸 데가 없으므로 텍스트와 동반 파일
+            # (`_강의스크립트.html` 등)까지 함께 지운다. 보드를 지우면 스크립트/요약/
+            # 북마크도 cascade 로 함께 사라진다.
+            removed = purge_transcript_files(board)
             db.delete(board)
-            print(f"[FILE-SYNC] 원본이 삭제되어 보드를 완전히 지웠습니다: {label}", flush=True)
+            detail = f" (변환 파일 {len(removed)}개 함께 삭제: {', '.join(removed)})" if removed else ""
+            print(f"[FILE-SYNC] 원본이 삭제되어 보드를 완전히 지웠습니다: {label}{detail}", flush=True)
         else:
             board.is_deleted = True
             print(f"[FILE-SYNC] 원본이 삭제되어 보드를 휴지통으로 옮겼습니다: {label}", flush=True)
