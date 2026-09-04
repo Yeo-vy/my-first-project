@@ -27,7 +27,30 @@ jobs:
         run: chmod +x gradlew
 
       - name: 디버그 APK 빌드
-        run: ./gradlew assembleDebug --no-daemon
+        # 빌드 출력을 파일로도 남긴다. 실패했을 때 아래 단계에서 원인을 요약하기 위함이다.
+        run: |
+          set -o pipefail
+          ./gradlew assembleDebug --no-daemon 2>&1 | tee build.log
+
+      - name: 빌드 실패 원인 요약
+        # 실패했을 때만 돈다. 로그 파일은 로그인해야 받을 수 있어서, 핵심 줄을
+        # ::error:: 로 다시 뱉어 화면(과 API)에서 바로 보이게 한다.
+        if: failure()
+        run: |
+          echo "----- 마지막 120줄 -----"
+          tail -n 120 build.log || true
+          echo "----- 핵심 오류 -----"
+          grep -nE "^e: |error: |FAILURE: |What went wrong|Caused by|Unresolved reference|Could not (find|resolve)" build.log \
+            | head -n 10 \
+            | while IFS= read -r line; do echo "::error::${line}"; done
+
+      - name: 빌드 로그 업로드
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-log
+          path: build.log
+          if-no-files-found: ignore
 
       - name: APK 업로드 (Actions 아티팩트)
         uses: actions/upload-artifact@v4
