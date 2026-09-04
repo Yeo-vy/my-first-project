@@ -41,6 +41,11 @@ data class RecorderUiState(
     val selectedFolder: String? = null,
     val recordings: List<RecordingItem> = emptyList(),
     val isRecording: Boolean = false,
+    val isPaused: Boolean = false,
+    /** 녹음을 멈추고 조각을 합쳐 저장하는 중 */
+    val isSaving: Boolean = false,
+    /** 마이크 입력 세기 0.0~1.0 */
+    val level: Float = 0f,
     val elapsedSeconds: Int = 0,
     val showAddFolderDialog: Boolean = false,
     val renameTarget: RenameTarget? = null,
@@ -79,10 +84,18 @@ class RecorderViewModel(application: Application) : AndroidViewModel(application
         viewModelScope.launch(Dispatchers.IO) {
             // 예전 버전에서 앱 전용 저장소에 남아있던 폴더/파일이 있다면 새 위치로 옮겨온다 (최초 1회).
             store.migrateLegacyPrivateStorageIfNeeded()
-            // 녹음 도중 프로세스가 죽어 남은(IS_PENDING=1) 항목을 정리한다.
-            // 방금 시작한 진짜 녹음과 겹치지 않도록 녹음 중일 때는 건너뛴다.
+            // 방금 시작한 진짜 녹음과 겹치지 않도록, 녹음 중일 때는 건드리지 않는다.
             if (!RecordingService.state.value.isRecording) {
+                // 예전 방식(MediaStore 에 바로 쓰던 시절)으로 남은 IS_PENDING 찌꺼기를 정리한다.
+                // 그때 파일들은 색인(moov)이 없어 어차피 재생할 수 없다.
                 store.cleanupPendingRecordings()
+                // 지금 방식: 앱이 죽어 조각만 남은 녹음을 합쳐서 되살린다.
+                val recovered = RecordingSaver.recoverLeftovers(getApplication<Application>(), store)
+                if (recovered.isNotEmpty()) {
+                    _uiState.value = _uiState.value.copy(
+                        message = "중단됐던 녹음 ${recovered.size}건을 복구해 저장했습니다"
+                    )
+                }
             }
             refreshFolders()
         }
@@ -109,22 +122,31 @@ class RecorderViewModel(application: Application) : AndroidViewModel(application
         // 화면이 꺼지거나 앱이 백그라운드로 가도 서비스가 계속 살아있으므로,
         // 여기서는 서비스가 발행하는 상태를 구독해서 화면에 반영만 한다.
         viewModelScope.launch {
-            var wasRecording = false
+            var wasBusy = false
             RecordingService.state.collect { serviceState ->
                 _uiState.value = _uiState.value.copy(
                     isRecording = serviceState.isRecording,
+                    isPaused = serviceState.isPaused,
+                    isSaving = serviceState.isSaving,
+                    level = serviceState.level,
                     elapsedSeconds = serviceState.elapsedSeconds,
-                    message = serviceState.errorMessage ?: _uiState.value.message
+                    message = serviceState.errorMessage
+                        ?: serviceState.savedMessage
+                        ?: _uiState.value.message
                 )
                 if (serviceState.errorMessage != null) {
                     RecordingService.consumeError()
                 }
-                // 녹음이 막 끝난 시점(true -> false)이면 목록을 새로고침한다.
-                if (wasRecording && !serviceState.isRecording) {
+                if (serviceState.savedMessage != null) {
+                    RecordingService.consumeSavedMessage()
+                }
+                // 파일은 '저장'까지 끝나야 목록에 나타나므로, 녹음과 저장이 모두 끝난 뒤에 새로고침한다.
+                val busy = serviceState.isRecording || serviceState.isSaving
+                if (wasBusy && !busy) {
                     refreshRecordings()
                     refreshFolders()
                 }
-                wasRecording = serviceState.isRecording
+                wasBusy = busy
             }
         }
     }
@@ -217,6 +239,23 @@ class RecorderViewModel(application: Application) : AndroidViewModel(application
         val context = getApplication<Application>()
         val intent = Intent(context, RecordingService::class.java).apply {
             action = RecordingService.ACTION_STOP
+        }
+        context.startService(intent)
+    }
+
+    /** 녹음을 잠시 멈춘다. 재개하면 같은 파일에 이어서 녹음된다. */
+    fun pauseRecording() {
+        val context = getApplication<Application>()
+        val intent = Intent(context, RecordingService::class.java).apply {
+            action = RecordingService.ACTION_PAUSE
+        }
+        context.startService(intent)
+    }
+
+    fun resumeRecording() {
+        val context = getApplication<Application>()
+        val intent = Intent(context, RecordingService::class.java).apply {
+            action = RecordingService.ACTION_RESUME
         }
         context.startService(intent)
     }

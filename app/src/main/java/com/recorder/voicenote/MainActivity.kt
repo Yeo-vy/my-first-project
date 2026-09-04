@@ -14,6 +14,7 @@ import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.core.RepeatMode
 import androidx.compose.animation.core.animateFloat
+import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.infiniteRepeatable
 import androidx.compose.animation.core.rememberInfiniteTransition
 import androidx.compose.animation.core.tween
@@ -404,11 +405,16 @@ private fun RecorderContent(
                             recordings = uiState.recordings,
                             playingRecordingName = uiState.playingRecordingName,
                             isRecording = uiState.isRecording,
+                            isPaused = uiState.isPaused,
+                            isSaving = uiState.isSaving,
+                            level = uiState.level,
                             elapsedSeconds = uiState.elapsedSeconds,
                             onRecordingClick = { viewModel.onRecordingClick(it) },
                             onRecordingLongClick = { viewModel.requestRenameRecording(it) },
                             onRecordingDeleteClick = { viewModel.requestDeleteRecording(it) },
                             onRecordingUploadClick = { viewModel.uploadRecording(it) },
+                            onPauseClick = { viewModel.pauseRecording() },
+                            onResumeClick = { viewModel.resumeRecording() },
                             onRecordClick = {
                                 if (uiState.isRecording) {
                                     viewModel.requestStopRecording()
@@ -436,11 +442,16 @@ private fun RecorderContent(
                     recordings = uiState.recordings,
                     playingRecordingName = uiState.playingRecordingName,
                     isRecording = uiState.isRecording,
+                    isPaused = uiState.isPaused,
+                    isSaving = uiState.isSaving,
+                    level = uiState.level,
                     elapsedSeconds = uiState.elapsedSeconds,
                     onRecordingClick = { viewModel.onRecordingClick(it) },
                     onRecordingLongClick = { viewModel.requestRenameRecording(it) },
                     onRecordingDeleteClick = { viewModel.requestDeleteRecording(it) },
                     onRecordingUploadClick = { viewModel.uploadRecording(it) },
+                    onPauseClick = { viewModel.pauseRecording() },
+                    onResumeClick = { viewModel.resumeRecording() },
                     onRecordClick = {
                         if (uiState.isRecording) {
                             viewModel.requestStopRecording()
@@ -608,11 +619,16 @@ fun FolderDetailScreen(
     recordings: List<RecordingItem>,
     playingRecordingName: String?,
     isRecording: Boolean,
+    isPaused: Boolean,
+    isSaving: Boolean,
+    level: Float,
     elapsedSeconds: Int,
     onRecordingClick: (RecordingItem) -> Unit,
     onRecordingLongClick: (RecordingItem) -> Unit,
     onRecordingDeleteClick: (RecordingItem) -> Unit,
     onRecordingUploadClick: (RecordingItem) -> Unit,
+    onPauseClick: () -> Unit,
+    onResumeClick: () -> Unit,
     onRecordClick: () -> Unit
 ) {
     Box(modifier = Modifier.fillMaxSize()) {
@@ -649,11 +665,31 @@ fun FolderDetailScreen(
                 .fillMaxWidth(),
             horizontalAlignment = Alignment.CenterHorizontally
         ) {
-            AnimatedVisibility(visible = isRecording) {
-                RecordingIndicator(elapsedSeconds = elapsedSeconds)
+            AnimatedVisibility(visible = isRecording || isSaving) {
+                RecordingIndicator(
+                    elapsedSeconds = elapsedSeconds,
+                    isPaused = isPaused,
+                    isSaving = isSaving,
+                    level = level
+                )
             }
             Spacer(modifier = Modifier.height(12.dp))
-            RecordFab(isRecording = isRecording, onClick = onRecordClick)
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(20.dp)
+            ) {
+                // 녹음 중에만 일시정지 버튼을 띄운다. 쉬는 시간에 파일을 나누지 않고 이어 갈 수 있다.
+                if (isRecording) {
+                    PauseResumeFab(isPaused = isPaused, onClick = {
+                        if (isPaused) onResumeClick() else onPauseClick()
+                    })
+                }
+                RecordFab(
+                    isRecording = isRecording,
+                    onClick = onRecordClick,
+                    enabled = !isSaving
+                )
+            }
             Spacer(modifier = Modifier.height(28.dp))
         }
     }
@@ -801,8 +837,13 @@ fun BottomActionBar(
 @Composable
 fun RecordFab(isRecording: Boolean, onClick: () -> Unit, enabled: Boolean = true) {
     FloatingActionButton(
-        onClick = onClick,
-        containerColor = if (isRecording) RecordingRed else MaterialTheme.colorScheme.primary,
+        // FloatingActionButton 에는 enabled 가 없어서 클릭 자체를 막고 색을 흐리게 해서 표시한다
+        onClick = { if (enabled) onClick() },
+        containerColor = when {
+            !enabled -> MaterialTheme.colorScheme.primary.copy(alpha = 0.4f)
+            isRecording -> RecordingRed
+            else -> MaterialTheme.colorScheme.primary
+        },
         contentColor = Color.White,
         shape = CircleShape,
         modifier = Modifier.size(72.dp)
@@ -816,7 +857,12 @@ fun RecordFab(isRecording: Boolean, onClick: () -> Unit, enabled: Boolean = true
 }
 
 @Composable
-fun RecordingIndicator(elapsedSeconds: Int) {
+fun RecordingIndicator(
+    elapsedSeconds: Int,
+    isPaused: Boolean,
+    isSaving: Boolean,
+    level: Float
+) {
     val infiniteTransition = rememberInfiniteTransition(label = "pulse")
     val alpha by infiniteTransition.animateFloat(
         initialValue = 0.3f,
@@ -828,9 +874,19 @@ fun RecordingIndicator(elapsedSeconds: Int) {
         label = "pulseAlpha"
     )
 
-    val minutes = elapsedSeconds / 60
+    val hours = elapsedSeconds / 3600
+    val minutes = (elapsedSeconds % 3600) / 60
     val seconds = elapsedSeconds % 60
-    val timeText = String.format(Locale.getDefault(), "%02d:%02d", minutes, seconds)
+    val timeText = if (hours > 0) {
+        String.format(Locale.getDefault(), "%d:%02d:%02d", hours, minutes, seconds)
+    } else {
+        String.format(Locale.getDefault(), "%02d:%02d", minutes, seconds)
+    }
+    val label = when {
+        isSaving -> "저장 중"
+        isPaused -> "일시정지 $timeText"
+        else -> "녹음 중 $timeText"
+    }
 
     Surface(
         shape = RoundedCornerShape(50),
@@ -840,19 +896,73 @@ fun RecordingIndicator(elapsedSeconds: Int) {
             modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp),
             verticalAlignment = Alignment.CenterVertically
         ) {
-            Box(
-                modifier = Modifier
-                    .size(10.dp)
-                    .clip(CircleShape)
-                    .background(RecordingRed.copy(alpha = alpha))
-            )
+            if (isSaving) {
+                CircularProgressIndicator(
+                    modifier = Modifier.size(12.dp),
+                    strokeWidth = 2.dp,
+                    color = RecordingRed
+                )
+            } else {
+                Box(
+                    modifier = Modifier
+                        .size(10.dp)
+                        .clip(CircleShape)
+                        .background(RecordingRed.copy(alpha = if (isPaused) 0.35f else alpha))
+                )
+            }
             Spacer(modifier = Modifier.width(8.dp))
             Text(
-                text = "녹음 중 $timeText",
+                text = label,
                 color = RecordingRed,
                 fontWeight = FontWeight.SemiBold
             )
+            // 마이크가 실제로 소리를 받고 있는지 눈으로 확인할 수 있게 입력 레벨을 보여 준다.
+            // (마이크가 막혀 3시간을 무음으로 녹음하는 사고를 막는다)
+            if (!isSaving) {
+                Spacer(modifier = Modifier.width(10.dp))
+                LevelMeter(level = if (isPaused) 0f else level)
+            }
         }
+    }
+}
+
+@Composable
+private fun LevelMeter(level: Float) {
+    val animated by animateFloatAsState(
+        targetValue = level.coerceIn(0f, 1f),
+        animationSpec = tween(150),
+        label = "level"
+    )
+    Box(
+        modifier = Modifier
+            .width(64.dp)
+            .height(6.dp)
+            .clip(RoundedCornerShape(3.dp))
+            .background(RecordingRed.copy(alpha = 0.18f))
+    ) {
+        Box(
+            modifier = Modifier
+                .fillMaxWidth(animated)
+                .fillMaxHeight()
+                .clip(RoundedCornerShape(3.dp))
+                .background(RecordingRed)
+        )
+    }
+}
+
+@Composable
+fun PauseResumeFab(isPaused: Boolean, onClick: () -> Unit) {
+    FloatingActionButton(
+        onClick = onClick,
+        containerColor = Color.White,
+        contentColor = RecordingRed,
+        shape = CircleShape,
+        modifier = Modifier.size(56.dp)
+    ) {
+        Icon(
+            imageVector = if (isPaused) Icons.Default.PlayArrow else Icons.Default.Pause,
+            contentDescription = if (isPaused) "녹음 재개" else "녹음 일시정지"
+        )
     }
 }
 

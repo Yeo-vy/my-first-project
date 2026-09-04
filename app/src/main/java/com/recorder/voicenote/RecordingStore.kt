@@ -10,7 +10,6 @@ import android.media.MediaScannerConnection
 import android.net.Uri
 import android.os.Build
 import android.os.Environment
-import android.os.ParcelFileDescriptor
 import android.provider.MediaStore
 import java.io.File
 import java.text.SimpleDateFormat
@@ -28,17 +27,18 @@ data class RecordingItem(
     val filePath: String? = null
 )
 
+/** 공용 저장소로 들여온 녹음 파일. 업로드에 바로 쓸 수 있도록 위치까지 함께 돌려준다. */
+data class ImportedRecording(
+    val displayName: String,
+    val contentUri: Uri?,
+    val filePath: String?
+)
+
 /** 화면에 보여줄 폴더 정보 (이름 + 안에 든 파일 개수) */
 data class FolderInfo(
     val name: String,
     val recordingCount: Int
 )
-
-/** 녹음이 실제로 기록될 대상. 스코프드 스토리지 대응을 위해 두 가지 방식을 지원한다. */
-sealed class RecordingTarget {
-    data class MediaStoreTarget(val uri: Uri, val pfd: ParcelFileDescriptor) : RecordingTarget()
-    data class FileTarget(val file: File) : RecordingTarget()
-}
 
 /** 폴더 이름 변경 결과. 다른 앱이 만든 파일 등 권한이 없어 못 옮긴 항목은 pendingUris로 알려준다. */
 data class RenameFolderResult(
@@ -315,56 +315,73 @@ class RecordingStore(private val context: Context) {
         return "${folderName}_${timeStamp}.m4a"
     }
 
-    /** 녹음을 시작하기 전에 저장될 대상을 준비한다. */
-    fun prepareRecordingTarget(folderName: String, fileName: String): RecordingTarget? {
+    /**
+     * 다 만들어진 녹음 파일을 공용 저장소("내부 저장소 > Recordings > Voice Recorder > 폴더")로 들여온다.
+     *
+     * 녹음 중에는 앱 전용 저장소의 조각 파일로 쌓고(RecordingSession), 여기서 한 번에 옮긴다.
+     * 그래서 목록에는 항상 완성된 파일만 보이고, 예전처럼 녹음이 중단되어 깨진 채로 남는 항목이 없다.
+     *
+     * @return 저장된 항목 정보 (실패하면 null)
+     */
+    fun importRecording(folderName: String, fileName: String, source: File): ImportedRecording? {
+        if (!source.isFile || source.length() <= 0L) return null
+
         return if (isScopedStorage) {
             val values = ContentValues().apply {
                 put(MediaStore.Audio.Media.DISPLAY_NAME, fileName)
                 put(MediaStore.Audio.Media.MIME_TYPE, "audio/mp4")
                 put(MediaStore.Audio.Media.RELATIVE_PATH, relativePathFor(folderName))
+                // 다 옮기기 전까지는 목록에 보이지 않게 했다가, 복사가 끝나면 공개한다.
                 put(MediaStore.Audio.Media.IS_PENDING, 1)
             }
-            val uri = context.contentResolver.insert(MediaStore.Audio.Media.EXTERNAL_CONTENT_URI, values)
-                ?: return null
-            val pfd = try {
-                context.contentResolver.openFileDescriptor(uri, "w")
+            val uri = context.contentResolver.insert(
+                MediaStore.Audio.Media.EXTERNAL_CONTENT_URI, values
+            ) ?: return null
+
+            try {
+                context.contentResolver.openOutputStream(uri)?.use { out ->
+                    source.inputStream().use { input -> input.copyTo(out) }
+                } ?: throw IllegalStateException("저장할 파일을 열 수 없습니다")
+
+                val done = ContentValues().apply { put(MediaStore.Audio.Media.IS_PENDING, 0) }
+                context.contentResolver.update(uri, done, null, null)
+                keepFolderRegistered(folderName)
+                ImportedRecording(queryDisplayName(uri) ?: fileName, contentUri = uri, filePath = null)
             } catch (e: Exception) {
-                context.contentResolver.delete(uri, null, null)
+                e.printStackTrace()
+                try {
+                    context.contentResolver.delete(uri, null, null)
+                } catch (_: Exception) {
+                }
                 null
-            } ?: return null
-            RecordingTarget.MediaStoreTarget(uri, pfd)
+            }
         } else {
-            val dir = legacyDirFor(folderName)
-            RecordingTarget.FileTarget(File(dir, fileName))
-        }
-    }
-
-    /** 녹음이 정상적으로 끝났을 때 호출한다. (IS_PENDING 해제 / 미디어 스캔) */
-    fun finalizeRecording(target: RecordingTarget) {
-        when (target) {
-            is RecordingTarget.MediaStoreTarget -> {
-                try { target.pfd.close() } catch (_: Exception) {}
-                val values = ContentValues().apply { put(MediaStore.Audio.Media.IS_PENDING, 0) }
-                context.contentResolver.update(target.uri, values, null, null)
-            }
-            is RecordingTarget.FileTarget -> {
+            try {
+                val dir = legacyDirFor(folderName)
+                val existing = dir.listFiles { f -> f.isFile }?.map { it.name }?.toSet() ?: emptySet()
+                val target = File(dir, uniqueName(fileName, existing))
+                source.copyTo(target, overwrite = false)
                 MediaScannerConnection.scanFile(
-                    context, arrayOf(target.file.absolutePath), arrayOf("audio/mp4"), null
+                    context, arrayOf(target.absolutePath), arrayOf("audio/mp4"), null
                 )
+                ImportedRecording(target.name, contentUri = null, filePath = target.absolutePath)
+            } catch (e: Exception) {
+                e.printStackTrace()
+                null
             }
         }
     }
 
-    /** 녹음이 취소되었거나 실패했을 때 호출한다. (생성했던 항목 삭제) */
-    fun discardRecording(target: RecordingTarget) {
-        when (target) {
-            is RecordingTarget.MediaStoreTarget -> {
-                try { target.pfd.close() } catch (_: Exception) {}
-                context.contentResolver.delete(target.uri, null, null)
+    /** 저장 직후 실제로 붙은 이름을 읽는다. (같은 이름이 있으면 시스템이 뒤에 (1) 등을 붙인다) */
+    private fun queryDisplayName(uri: Uri): String? {
+        return try {
+            context.contentResolver.query(
+                uri, arrayOf(MediaStore.Audio.Media.DISPLAY_NAME), null, null, null
+            )?.use { cursor ->
+                if (cursor.moveToFirst()) cursor.getString(0) else null
             }
-            is RecordingTarget.FileTarget -> {
-                target.file.delete()
-            }
+        } catch (e: Exception) {
+            null
         }
     }
 
@@ -749,24 +766,6 @@ class RecordingStore(private val context: Context) {
 
     /** 예전 파일 하나를 새 저장 위치로 복사한다. 성공하면 true. */
     private fun migrateSingleFile(folderName: String, sourceFile: File): Boolean {
-        val target = prepareRecordingTarget(folderName, sourceFile.name) ?: return false
-        return try {
-            when (target) {
-                is RecordingTarget.MediaStoreTarget -> {
-                    ParcelFileDescriptor.AutoCloseOutputStream(target.pfd).use { out ->
-                        sourceFile.inputStream().use { input -> input.copyTo(out) }
-                    }
-                    val values = ContentValues().apply { put(MediaStore.Audio.Media.IS_PENDING, 0) }
-                    context.contentResolver.update(target.uri, values, null, null)
-                }
-                is RecordingTarget.FileTarget -> {
-                    sourceFile.copyTo(target.file, overwrite = true)
-                }
-            }
-            true
-        } catch (e: Exception) {
-            discardRecording(target)
-            false
-        }
+        return importRecording(folderName, sourceFile.name, sourceFile) != null
     }
 }
