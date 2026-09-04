@@ -651,13 +651,13 @@ class RecordingStore(private val context: Context) {
     }
 
     private fun tryUpdateRelativePath(uri: Uri, newRelativePath: String): Boolean {
-        return updateMediaItem(uri, MediaStore.Audio.Media.RELATIVE_PATH, newRelativePath)
-            == MediaUpdateOutcome.Success
+        return updateMediaItem(uri, MediaStore.Audio.Media.RELATIVE_PATH, newRelativePath) ==
+            MediaUpdateOutcome.Success
     }
 
     private fun tryUpdateDisplayName(uri: Uri, newDisplayName: String): Boolean {
-        return updateMediaItem(uri, MediaStore.Audio.Media.DISPLAY_NAME, newDisplayName)
-            == MediaUpdateOutcome.Success
+        return updateMediaItem(uri, MediaStore.Audio.Media.DISPLAY_NAME, newDisplayName) ==
+            MediaUpdateOutcome.Success
     }
 
     /**
