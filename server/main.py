@@ -633,6 +633,34 @@ def repair_stale_media_paths(db: Session) -> None:
         print(f"[PATH-REPAIR] 위치가 바뀐 파일 경로 {repaired}건을 현재 폴더 기준으로 고쳤습니다.", flush=True)
 
 
+def find_moved_board(db: Session, new_path: str, mtime: datetime.datetime):
+    """탐색기에서 옮기거나 이름만 바꾼 파일인지 찾아본다.
+
+    파일을 옮기거나 이름을 바꿔도 수정시각(mtime)은 그대로다. 그래서 '원본이 사라진 보드' 중
+    수정시각이 같은 것이 딱 하나 있으면 같은 녹음으로 보고 그 보드를 따라 옮긴다.
+    이렇게 하지 않으면 이름만 바꿔도 새 보드가 생겨 처음부터 다시 받아쓰기를 돌리고,
+    기존 스크립트와 직접 고친 내용이 휴지통으로 사라진다.
+
+    후보가 둘 이상이면(같은 시각에 복사된 파일들 등) 잘못 이어 붙일 수 있으므로 포기한다.
+    """
+    ext = os.path.splitext(new_path)[1].lower()
+    candidates = []
+    for board in db.query(Board).filter(Board.audio_path.isnot(None)).all():
+        if not board.audio_path or os.path.normcase(board.audio_path) == os.path.normcase(new_path):
+            continue
+        if os.path.splitext(board.audio_path)[1].lower() != ext:
+            continue
+        if board.recorded_at is None:
+            continue
+        # 원본이 아직 제자리에 있으면 옮겨진 것이 아니다
+        if os.path.exists(board.audio_path):
+            continue
+        if abs((board.recorded_at - mtime).total_seconds()) <= 2:
+            candidates.append(board)
+
+    return candidates[0] if len(candidates) == 1 else None
+
+
 def sync_deleted_audio_to_boards(db: Session, missing_streaks: dict) -> None:
     """원본 오디오가 사라진 보드를 정리한다. 스캔마다 한 번씩 호출된다."""
     if FILE_DELETE_SYNC == "off":
@@ -746,7 +774,30 @@ def background_audio_watcher():
                         continue
 
                     base_name = os.path.splitext(f)[0]
+                    file_mtime = datetime.datetime.fromtimestamp(os.path.getmtime(full_path))
                     board = db.query(Board).filter_by(folder_id=folder.id, title=base_name).first()
+
+                    if board is None:
+                        # 새 파일처럼 보여도, 탐색기에서 이름을 바꾸거나 폴더를 옮긴 것일 수 있다.
+                        # 그런 경우 기존 보드를 따라 옮겨서 스크립트를 살리고 재변환도 피한다.
+                        moved = find_moved_board(db, full_path, file_mtime)
+                        if moved is not None:
+                            old_label = f"{moved.title} ({moved.audio_path})"
+                            moved.folder_id = folder.id
+                            moved.title = base_name
+                            moved.audio_path = full_path
+                            moved.audio_filename = f
+                            if moved.is_deleted:
+                                moved.is_deleted = False
+                                shutil.rmtree(board_trash_dir(moved.id), ignore_errors=True)
+                            db.commit()
+                            board = moved
+                            print(
+                                f"[FILE-SYNC] 파일이 이동/이름변경된 것으로 보고 보드를 따라 옮겼습니다: "
+                                f"#{moved.id} {old_label} -> {full_path}",
+                                flush=True,
+                            )
+
                     if board is None:
                         board = Board(
                             folder_id=folder.id,
@@ -756,7 +807,7 @@ def background_audio_watcher():
                             status="PENDING",
                             progress_percent=0,
                             keywords_json="[]",
-                            recorded_at=datetime.datetime.fromtimestamp(os.path.getmtime(full_path)),
+                            recorded_at=file_mtime,
                         )
                         db.add(board)
                         db.commit()

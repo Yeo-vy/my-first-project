@@ -84,6 +84,12 @@ sealed class DeleteRecordingResult {
 class RecordingStore(private val context: Context) {
 
     companion object {
+        /**
+         * 폴더를 고르지 않고 녹음할 때 쓰는 폴더.
+         * 서버(daglo)도 폴더를 지정하지 않은 녹음을 같은 이름으로 모으므로 이름을 맞춰 둔다.
+         */
+        const val DEFAULT_FOLDER_NAME = "기본 폴더"
+
         private const val ROOT_FOLDER_NAME = "Voice Recorder"
         private const val PREFS_NAME = "voice_recorder_folders"
         private const val KEY_FOLDER_NAMES = "folder_names"

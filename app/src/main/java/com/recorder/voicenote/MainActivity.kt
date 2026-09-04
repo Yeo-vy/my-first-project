@@ -35,6 +35,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
@@ -128,6 +129,15 @@ fun VoiceRecorderApp(viewModel: RecorderViewModel = viewModel()) {
     // 화면 전환 (녹음 / daglo 웹 / 서버 설정). 화면 회전에도 유지되도록 rememberSaveable 사용.
     var currentScreen by rememberSaveable { mutableStateOf(SCREEN_RECORDER) }
 
+    // 태블릿처럼 넓은 화면이면 폴더 목록과 녹음 목록을 좌우로 함께 띄운다.
+    // (멀티윈도우/DeX 에서 창을 줄이면 설정도 따라 바뀌므로 화면이 아니라 창 크기 기준이 된다)
+    val isTwoPane = LocalConfiguration.current.screenWidthDp.dp >= TWO_PANE_MIN_WIDTH
+
+    // 2단 화면에서는 오른쪽이 비어 있으면 녹음 버튼도 안 보인다. 기본 폴더를 열어 둔다.
+    LaunchedEffect(isTwoPane) {
+        if (isTwoPane) viewModel.selectDefaultFolderIfNone()
+    }
+
     val permissionLauncher = androidx.activity.compose.rememberLauncherForActivityResult(
         contract = ActivityResultContracts.RequestMultiplePermissions()
     ) { result ->
@@ -194,7 +204,7 @@ fun VoiceRecorderApp(viewModel: RecorderViewModel = viewModel()) {
                         )
                     },
                     navigationIcon = {
-                        if (uiState.selectedFolder != null) {
+                        if (uiState.selectedFolder != null && !isTwoPane) {
                             IconButton(
                                 onClick = { viewModel.goBackToFolderList() },
                                 enabled = !uiState.isRecording
@@ -256,6 +266,7 @@ fun VoiceRecorderApp(viewModel: RecorderViewModel = viewModel()) {
                     uiState = uiState,
                     storageLocationLabel = viewModel.storageLocationLabel,
                     viewModel = viewModel,
+                    isTwoPane = isTwoPane,
                     onRecordOrRequest = { requestRecordOrStart() }
                 )
             }
@@ -370,10 +381,11 @@ private fun RecorderContent(
     uiState: RecorderUiState,
     storageLocationLabel: String,
     viewModel: RecorderViewModel,
+    isTwoPane: Boolean,
     onRecordOrRequest: () -> Unit
 ) {
-    BoxWithConstraints(modifier = Modifier.fillMaxSize()) {
-        if (maxWidth >= TWO_PANE_MIN_WIDTH) {
+    Box(modifier = Modifier.fillMaxSize()) {
+        if (isTwoPane) {
             Row(modifier = Modifier.fillMaxSize()) {
                 Box(modifier = Modifier.width(340.dp)) {
                     FolderListScreen(

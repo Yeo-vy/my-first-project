@@ -73,6 +73,9 @@ class RecorderViewModel(application: Application) : AndroidViewModel(application
     private val playerManager = PlayerManager()
     private val settings = DagloSettings(application)
 
+    /** 기본 폴더 자동 선택을 이미 시도했는지 (여러 번 되돌리지 않기 위함) */
+    private var triedDefaultFolder = false
+
     private val _uiState = MutableStateFlow(RecorderUiState())
     val uiState: StateFlow<RecorderUiState> = _uiState.asStateFlow()
 
@@ -206,19 +209,63 @@ class RecorderViewModel(application: Application) : AndroidViewModel(application
      * 실제 녹음은 RecordingService에 위임하므로, 화면을 나가도 녹음이 계속된다.
      */
     fun startRecording() {
-        val folder = _uiState.value.selectedFolder
-        if (folder == null) {
-            _uiState.value = _uiState.value.copy(message = "먼저 폴더를 선택해주세요")
-            return
-        }
         stopPlayback()
 
+        val folder = _uiState.value.selectedFolder
+        if (folder != null) {
+            launchRecordingService(folder)
+            return
+        }
+
+        // 폴더를 고르지 않았으면 기본 폴더를 만들어 그 안에 녹음한다.
+        // 폴더를 만드는 일(MediaStore 조회 포함)은 메인 스레드에서 하면 안 되므로 IO 로 돌린다.
+        viewModelScope.launch(Dispatchers.IO) {
+            val name = ensureDefaultFolder()
+            _uiState.value = _uiState.value.copy(
+                selectedFolder = name,
+                recordings = emptyList(),
+                message = "'$name' 에 녹음합니다"
+            )
+            refreshFolders()
+            refreshRecordings()
+            launchRecordingService(name)
+        }
+    }
+
+    private fun launchRecordingService(folderName: String) {
         val context = getApplication<Application>()
         val intent = Intent(context, RecordingService::class.java).apply {
             action = RecordingService.ACTION_START
-            putExtra(RecordingService.EXTRA_FOLDER_NAME, folder)
+            putExtra(RecordingService.EXTRA_FOLDER_NAME, folderName)
         }
         ContextCompat.startForegroundService(context, intent)
+    }
+
+    /**
+     * 태블릿처럼 폴더 목록과 녹음 목록을 함께 띄우는 화면에서, 아무 폴더도 열려 있지 않으면
+     * 기본 폴더를 열어 둔다. 그래야 앱을 켜자마자 녹음 버튼이 보인다.
+     * 한 번만 시도한다 (사용자가 일부러 목록으로 돌아갔을 때 계속 되돌리지 않도록).
+     */
+    fun selectDefaultFolderIfNone() {
+        if (triedDefaultFolder || _uiState.value.selectedFolder != null) return
+        triedDefaultFolder = true
+        viewModelScope.launch(Dispatchers.IO) {
+            val name = ensureDefaultFolder()
+            if (_uiState.value.selectedFolder == null) {
+                _uiState.value = _uiState.value.copy(selectedFolder = name, recordings = emptyList())
+                refreshFolders()
+                refreshRecordings()
+            }
+        }
+    }
+
+    /** 기본 폴더 이름을 돌려준다. 없으면 만든다. (IO 스레드에서 호출할 것) */
+    private fun ensureDefaultFolder(): String {
+        val existing = store.listFolders().firstOrNull {
+            it.name == RecordingStore.DEFAULT_FOLDER_NAME
+        }
+        // createFolder 는 같은 이름이 있으면 뒤에 번호를 붙이므로, 있는지 먼저 확인해야 한다.
+        return existing?.name ?: store.createFolder(RecordingStore.DEFAULT_FOLDER_NAME)
     }
 
     /** 녹음 정지 버튼을 누르면 바로 멈추지 않고 확인부터 받는다. */
