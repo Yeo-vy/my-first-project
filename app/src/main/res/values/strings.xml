@@ -1,3 +1,4 @@
 <resources>
-    <string name="app_name">음성녹음</string>
+    <!-- 서버 연동 후에는 단순 녹음기가 아니라 daglo 클라이언트라서 이름도 그에 맞춘다 -->
+    <string name="app_name">daglo 녹음</string>
 </resources>

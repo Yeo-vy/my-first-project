@@ -1456,3 +1456,82 @@ body {
 .detail-status-bar button {
     margin-left: auto;
 }
+
+/* -----------------------------------------
+   화면 폭 대응 (태블릿 · 폰)
+   갤럭시 탭 S8 가로는 데스크톱 레이아웃 그대로 잘 맞고,
+   세로(약 800px)부터는 오른쪽 AI 패널이 눌려서 아래로 내려야 쓸 만하다.
+   ----------------------------------------- */
+@media (max-width: 1180px) {
+    /* AI 패널을 아래로 내리고 스크립트에 폭을 몰아준다 */
+    .board-body-grid {
+        grid-template-columns: 1fr;
+        grid-template-rows: minmax(0, 1.15fr) minmax(0, 1fr);
+    }
+
+    .script-panel {
+        border-right: none;
+        border-bottom: 1px solid var(--border-color);
+    }
+
+    .ai-panel {
+        height: 100%;
+        overflow: hidden;
+    }
+}
+
+@media (max-width: 900px) {
+    :root {
+        --sidebar-width: 190px;
+    }
+
+    /* 손가락으로 눌러야 하니 아이콘 버튼을 키우고, 표에서 덜 중요한 열은 감춘다 */
+    .icon-btn-small {
+        min-width: 36px;
+        min-height: 36px;
+    }
+
+    .boards-table th:nth-child(4),
+    .boards-table td:nth-child(4),
+    .boards-table th:nth-child(6),
+    .boards-table td:nth-child(6) {
+        display: none;
+    }
+
+    .detail-right-header {
+        flex-wrap: wrap;
+        justify-content: flex-end;
+        gap: 6px;
+    }
+}
+
+@media (max-width: 720px) {
+    /* 폰: 사이드바는 접고(가로 스크롤 방지) 플레이어는 화면 전체 폭을 쓴다 */
+    #sidebar {
+        display: none;
+    }
+
+    .bottom-audio-bar {
+        left: 0;
+        padding: 0 14px;
+        gap: 10px;
+    }
+
+    .shortcut-tip {
+        display: none;
+    }
+
+    .detail-header {
+        flex-wrap: wrap;
+        gap: 8px;
+    }
+}
+
+/* 태블릿에서 손가락으로 끌 때 스크롤이 끊기지 않게 한다 */
+@media (pointer: coarse) {
+    .table-container,
+    .transcript-container,
+    .ai-panel {
+        -webkit-overflow-scrolling: touch;
+    }
+}

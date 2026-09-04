@@ -58,6 +58,8 @@ class RecordingService : Service() {
     private lateinit var store: RecordingStore
     private lateinit var recorderManager: RecorderManager
     private var currentTarget: RecordingTarget? = null
+    // 업로드할 때 서버에 넘길 파일 이름 (MediaStore 항목은 Uri 만 들고 있어서 따로 기억해 둔다)
+    private var currentFileName: String? = null
 
     private val serviceScope = CoroutineScope(SupervisorJob())
     private var timerJob: Job? = null
@@ -103,6 +105,7 @@ class RecordingService : Service() {
         }
 
         currentTarget = target
+        currentFileName = fileName
         _state.value = RecordingServiceState(isRecording = true, folderName = folderName, elapsedSeconds = 0)
 
         val notification = buildNotification(folderName, 0)
@@ -122,15 +125,48 @@ class RecordingService : Service() {
     private fun stopRecording() {
         val success = recorderManager.stop()
         timerJob?.cancel()
+        val folderName = _state.value.folderName
 
         currentTarget?.let { target ->
-            if (success) store.finalizeRecording(target) else store.discardRecording(target)
+            if (success) {
+                store.finalizeRecording(target)
+                enqueueAutoUpload(target, folderName)
+            } else {
+                store.discardRecording(target)
+            }
         }
         currentTarget = null
+        currentFileName = null
 
         _state.value = RecordingServiceState(isRecording = false)
         ServiceCompat.stopForeground(this, ServiceCompat.STOP_FOREGROUND_REMOVE)
         stopSelf()
+    }
+
+    /**
+     * 녹음이 끝나자마자 daglo 서버로 올린다 (설정에서 자동 업로드를 켠 경우).
+     * 실제 전송은 WorkManager 가 맡으므로, 네트워크가 없으면 생길 때까지 기다렸다 올라간다.
+     */
+    private fun enqueueAutoUpload(target: RecordingTarget, folderName: String?) {
+        val settings = DagloSettings(applicationContext)
+        if (!settings.canAutoUpload) return
+
+        when (target) {
+            is RecordingTarget.MediaStoreTarget -> UploadWorker.enqueue(
+                context = applicationContext,
+                contentUri = target.uri,
+                filePath = null,
+                displayName = currentFileName ?: return,
+                folderName = folderName ?: ""
+            )
+            is RecordingTarget.FileTarget -> UploadWorker.enqueue(
+                context = applicationContext,
+                contentUri = null,
+                filePath = target.file.absolutePath,
+                displayName = target.file.name,
+                folderName = folderName ?: ""
+            )
+        }
     }
 
     private fun cancelRecording() {
@@ -138,6 +174,7 @@ class RecordingService : Service() {
         timerJob?.cancel()
         currentTarget?.let { store.discardRecording(it) }
         currentTarget = null
+        currentFileName = null
 
         _state.value = RecordingServiceState(isRecording = false)
         ServiceCompat.stopForeground(this, ServiceCompat.STOP_FOREGROUND_REMOVE)

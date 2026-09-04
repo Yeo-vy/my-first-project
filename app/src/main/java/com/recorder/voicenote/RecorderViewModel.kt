@@ -50,6 +50,15 @@ data class RecorderUiState(
     val pendingWriteRequest: PendingWriteRequest? = null,
     /** 현재 재생 중인 녹음 파일의 이름 (없으면 재생 중이 아님) */
     val playingRecordingName: String? = null,
+    // ---- daglo 서버 연동 ----
+    val serverUrl: String = "",
+    val apiToken: String = "",
+    val autoUpload: Boolean = true,
+    /** 서버 주소가 채워져 있는지 (앱 안 daglo 화면·업로드 사용 가능 여부) */
+    val serverConfigured: Boolean = false,
+    /** 지금 서버로 올리고 있는 파일 이름 */
+    val uploadingName: String? = null,
+    val isTestingConnection: Boolean = false,
     val message: String? = null
 )
 
@@ -57,6 +66,7 @@ class RecorderViewModel(application: Application) : AndroidViewModel(application
 
     private val store = RecordingStore(application)
     private val playerManager = PlayerManager()
+    private val settings = DagloSettings(application)
 
     private val _uiState = MutableStateFlow(RecorderUiState())
     val uiState: StateFlow<RecorderUiState> = _uiState.asStateFlow()
@@ -75,6 +85,24 @@ class RecorderViewModel(application: Application) : AndroidViewModel(application
                 store.cleanupPendingRecordings()
             }
             refreshFolders()
+        }
+
+        _uiState.value = _uiState.value.copy(
+            serverUrl = settings.serverUrl,
+            apiToken = settings.apiToken,
+            autoUpload = settings.autoUpload,
+            serverConfigured = settings.isConfigured
+        )
+
+        // 업로드는 WorkManager 가 백그라운드에서 돌리므로, 진행/결과를 구독해서 화면에 알린다.
+        viewModelScope.launch {
+            UploadWorker.status.collect { status ->
+                _uiState.value = _uiState.value.copy(
+                    uploadingName = status.uploadingName,
+                    message = status.lastMessage ?: _uiState.value.message
+                )
+                if (status.lastMessage != null) UploadWorker.consumeMessage()
+            }
         }
 
         // 실제 녹음은 RecordingService(포그라운드 서비스)가 담당한다.
@@ -408,6 +436,60 @@ class RecorderViewModel(application: Application) : AndroidViewModel(application
             refreshRecordings()
         }
         refreshFolders()
+    }
+
+    // ----------------------------------------------------------------------------------
+    // daglo 서버 연동 (설정 / 업로드)
+    // ----------------------------------------------------------------------------------
+
+    /** 설정 화면에서 저장을 누르면 호출된다. */
+    fun saveServerSettings(serverUrl: String, apiToken: String, autoUpload: Boolean) {
+        settings.serverUrl = serverUrl
+        settings.apiToken = apiToken
+        settings.autoUpload = autoUpload
+        _uiState.value = _uiState.value.copy(
+            serverUrl = settings.serverUrl,
+            apiToken = settings.apiToken,
+            autoUpload = settings.autoUpload,
+            serverConfigured = settings.isConfigured,
+            message = if (settings.isConfigured) "서버 설정을 저장했습니다" else "서버 주소를 비워 두면 연동이 꺼집니다"
+        )
+    }
+
+    /** 주소·토큰이 맞는지 서버에 한 번 물어본다. */
+    fun testServerConnection(serverUrl: String, apiToken: String) {
+        if (serverUrl.isBlank()) {
+            _uiState.value = _uiState.value.copy(message = "서버 주소를 먼저 입력하세요")
+            return
+        }
+        _uiState.value = _uiState.value.copy(isTestingConnection = true)
+        viewModelScope.launch(Dispatchers.IO) {
+            // 저장하기 전 입력값 그대로 확인한다 (설정에 손대지 않는다).
+            val result = DagloApi(DagloSettings.normalizeUrl(serverUrl), apiToken.trim()).ping()
+            val message = when (result) {
+                is ApiResult.Success -> "서버에 연결됐습니다"
+                is ApiResult.Fatal -> "연결 실패: ${result.message}"
+                is ApiResult.Retryable -> "연결 실패: ${result.message}"
+            }
+            _uiState.value = _uiState.value.copy(isTestingConnection = false, message = message)
+        }
+    }
+
+    /** 녹음 파일 하나를 수동으로 서버에 올린다 (자동 업로드가 꺼져 있거나 실패했을 때). */
+    fun uploadRecording(item: RecordingItem) {
+        if (!settings.isConfigured) {
+            _uiState.value = _uiState.value.copy(message = "먼저 설정에서 서버 주소를 입력하세요")
+            return
+        }
+        val folder = _uiState.value.selectedFolder ?: ""
+        UploadWorker.enqueue(
+            context = getApplication<Application>(),
+            contentUri = item.contentUri,
+            filePath = item.filePath,
+            displayName = item.displayName,
+            folderName = folder
+        )
+        _uiState.value = _uiState.value.copy(message = "서버로 보내는 중입니다")
     }
 
     override fun onCleared() {

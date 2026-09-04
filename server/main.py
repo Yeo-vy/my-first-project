@@ -1833,9 +1833,16 @@ MAX_UPLOAD_BYTES = int(os.getenv("MAX_UPLOAD_MB", "500")) * 1024 * 1024
 @app.post("/api/boards/upload")
 async def upload_audio_file(
     file: UploadFile = File(...),
-    folder_id: int = Form(...),
+    folder_id: Optional[int] = Form(None),
+    folder_name: Optional[str] = Form(None),
     db: Session = Depends(get_db)
 ):
+    """녹음 파일을 올려 바로 변환 큐에 넣는다.
+
+    웹은 폴더를 골라 업로드하므로 folder_id 를 보내지만, 안드로이드 앱은 폰에 있는
+    폴더 '이름'만 알고 서버의 id 는 모른다. 그래서 folder_name 으로도 받을 수 있게 하고,
+    같은 이름의 폴더가 없으면 그 자리에서 만든다 (앱에서 만든 폴더가 서버에도 생긴다).
+    """
     # 업로드 파일명은 신뢰할 수 없다: 경로 구분자·상위 경로 참조를 제거한다
     raw_name = unicodedata.normalize("NFC", os.path.basename(file.filename or ""))
     stem, ext = os.path.splitext(raw_name)
@@ -1849,7 +1856,9 @@ async def upload_audio_file(
     base_name = sanitize_filename(stem, fallback=f"recording_{int(time.time())}")
     filename = base_name + ext
 
-    folder = db.query(Folder).filter_by(id=folder_id).first()
+    folder = db.query(Folder).filter_by(id=folder_id).first() if folder_id else None
+    if not folder and folder_name and folder_name.strip():
+        folder = get_or_create_folder(db, folder_name.strip())
     if not folder:
         folder = get_or_create_folder(db, "기본 폴더")
 
@@ -1897,11 +1906,14 @@ async def upload_audio_file(
     db.commit()
     db.refresh(board)
 
+    # 워커가 죽어 있으면 큐에 넣어도 아무도 꺼내지 않는다 (앱에서 올린 파일이 대기만 하는 것을 막는다)
+    ensure_workers_alive()
     enqueue_board(board.id)
     return {
         "ok": True,
         "board_id": board.id,
         "title": board.title,
+        "folder": folder.name,
         "status": "PENDING",
         "queue_depth": stt_queue.qsize(),
     }

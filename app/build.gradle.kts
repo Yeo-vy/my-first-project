@@ -11,8 +11,8 @@ android {
         applicationId = "com.recorder.voicenote"
         minSdk = 24
         targetSdk = 34
-        versionCode = 1
-        versionName = "1.0"
+        versionCode = 2
+        versionName = "1.1-daglo"
     }
 
     buildTypes {
@@ -51,4 +51,7 @@ dependencies {
     implementation("androidx.compose.material:material-icons-extended")
     implementation("androidx.compose.material3:material3")
     implementation("androidx.lifecycle:lifecycle-viewmodel-compose:2.8.4")
+
+    // 녹음 파일을 서버로 올리는 작업. 네트워크가 없으면 생길 때까지 기다렸다가 자동으로 재시도한다.
+    implementation("androidx.work:work-runtime-ktx:2.9.0")
 }

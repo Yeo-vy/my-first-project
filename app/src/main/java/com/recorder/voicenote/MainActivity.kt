@@ -29,6 +29,7 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.*
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -47,6 +48,15 @@ import com.recorder.voicenote.ui.theme.VoiceRecorderTheme
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
+
+// 앱 안에서 오가는 화면들. 화면 회전에도 유지해야 해서 저장 가능한 문자열로 둔다.
+private const val SCREEN_RECORDER = "recorder"
+private const val SCREEN_DAGLO = "daglo"
+private const val SCREEN_SETTINGS = "settings"
+
+// 이 너비부터는 폴더 목록과 녹음 목록을 좌우로 함께 띄운다.
+// 갤럭시 탭 S8 은 가로 약 1280dp, 세로 약 800dp 라서 두 방향 모두 2단으로 열린다.
+private val TWO_PANE_MIN_WIDTH = 720.dp
 
 class MainActivity : ComponentActivity() {
 
@@ -114,6 +124,9 @@ fun VoiceRecorderApp(viewModel: RecorderViewModel = viewModel()) {
     // 권한 승인 후 바로 녹음을 시작하기 위한 플래그
     var pendingRecordAfterPermission by remember { mutableStateOf(false) }
 
+    // 화면 전환 (녹음 / daglo 웹 / 서버 설정). 화면 회전에도 유지되도록 rememberSaveable 사용.
+    var currentScreen by rememberSaveable { mutableStateOf(SCREEN_RECORDER) }
+
     val permissionLauncher = androidx.activity.compose.rememberLauncherForActivityResult(
         contract = ActivityResultContracts.RequestMultiplePermissions()
     ) { result ->
@@ -170,24 +183,51 @@ fun VoiceRecorderApp(viewModel: RecorderViewModel = viewModel()) {
     Scaffold(
         snackbarHost = { SnackbarHost(snackbarHostState) },
         topBar = {
-            TopAppBar(
-                title = {
-                    Text(
-                        text = uiState.selectedFolder ?: "내 녹음",
-                        fontWeight = FontWeight.Bold
-                    )
-                },
-                navigationIcon = {
-                    if (uiState.selectedFolder != null) {
+            // 하위 화면(daglo 웹 / 설정)은 자기 상단바를 갖고 있으므로 여기서는 녹음 화면만 그린다.
+            if (currentScreen == SCREEN_RECORDER) {
+                TopAppBar(
+                    title = {
+                        Text(
+                            text = uiState.selectedFolder ?: "내 녹음",
+                            fontWeight = FontWeight.Bold
+                        )
+                    },
+                    navigationIcon = {
+                        if (uiState.selectedFolder != null) {
+                            IconButton(
+                                onClick = { viewModel.goBackToFolderList() },
+                                enabled = !uiState.isRecording
+                            ) {
+                                Icon(Icons.Default.ArrowBack, contentDescription = "뒤로가기")
+                            }
+                        }
+                    },
+                    actions = {
+                        // 업로드가 도는 동안에는 그 사실을 상단바에 계속 보여 준다
+                        if (uiState.uploadingName != null) {
+                            CircularProgressIndicator(
+                                modifier = Modifier.size(20.dp),
+                                strokeWidth = 2.dp
+                            )
+                            Spacer(modifier = Modifier.width(8.dp))
+                        }
                         IconButton(
-                            onClick = { viewModel.goBackToFolderList() },
-                            enabled = !uiState.isRecording
+                            onClick = {
+                                if (uiState.serverConfigured) {
+                                    currentScreen = SCREEN_DAGLO
+                                } else {
+                                    currentScreen = SCREEN_SETTINGS
+                                }
+                            }
                         ) {
-                            Icon(Icons.Default.ArrowBack, contentDescription = "뒤로가기")
+                            Icon(Icons.Default.Language, contentDescription = "daglo 열기")
+                        }
+                        IconButton(onClick = { currentScreen = SCREEN_SETTINGS }) {
+                            Icon(Icons.Default.Settings, contentDescription = "서버 설정")
                         }
                     }
-                }
-            )
+                )
+            }
         }
     ) { padding ->
         Box(
@@ -195,32 +235,27 @@ fun VoiceRecorderApp(viewModel: RecorderViewModel = viewModel()) {
                 .fillMaxSize()
                 .padding(padding)
         ) {
-            if (uiState.selectedFolder == null) {
-                FolderListScreen(
-                    folders = uiState.folders,
-                    storageLocationLabel = viewModel.storageLocationLabel,
-                    onFolderClick = { viewModel.openFolder(it) },
-                    onFolderLongClick = { viewModel.requestRenameFolder(it) },
-                    onFolderDeleteClick = { viewModel.requestDeleteFolder(it) },
-                    onAddFolderClick = { viewModel.openAddFolderDialog() },
-                    onRecordClick = { requestRecordOrStart() }
+            when (currentScreen) {
+                SCREEN_SETTINGS -> ServerSettingsScreen(
+                    initialServerUrl = uiState.serverUrl,
+                    initialApiToken = uiState.apiToken,
+                    initialAutoUpload = uiState.autoUpload,
+                    isTesting = uiState.isTestingConnection,
+                    onSave = { url, token, auto -> viewModel.saveServerSettings(url, token, auto) },
+                    onTest = { url, token -> viewModel.testServerConnection(url, token) },
+                    onBack = { currentScreen = SCREEN_RECORDER }
                 )
-            } else {
-                FolderDetailScreen(
-                    recordings = uiState.recordings,
-                    playingRecordingName = uiState.playingRecordingName,
-                    isRecording = uiState.isRecording,
-                    elapsedSeconds = uiState.elapsedSeconds,
-                    onRecordingClick = { viewModel.onRecordingClick(it) },
-                    onRecordingLongClick = { viewModel.requestRenameRecording(it) },
-                    onRecordingDeleteClick = { viewModel.requestDeleteRecording(it) },
-                    onRecordClick = {
-                        if (uiState.isRecording) {
-                            viewModel.requestStopRecording()
-                        } else {
-                            requestRecordOrStart()
-                        }
-                    }
+
+                SCREEN_DAGLO -> DagloWebScreen(
+                    serverUrl = uiState.serverUrl,
+                    onBack = { currentScreen = SCREEN_RECORDER }
+                )
+
+                else -> RecorderContent(
+                    uiState = uiState,
+                    storageLocationLabel = viewModel.storageLocationLabel,
+                    viewModel = viewModel,
+                    onRecordOrRequest = { requestRecordOrStart() }
                 )
             }
 
@@ -322,6 +357,104 @@ fun VoiceRecorderApp(viewModel: RecorderViewModel = viewModel()) {
 }
 
 // ---------------------------------------------------------------------------------
+// 녹음 화면 본문 (화면 크기에 따라 1단/2단)
+// ---------------------------------------------------------------------------------
+/**
+ * 폰에서는 지금까지처럼 폴더 목록 -> 녹음 목록으로 한 화면씩 넘어가고,
+ * 태블릿처럼 넓은 화면에서는 둘을 좌우로 함께 보여 준다.
+ * 넓은 화면에서 한 번에 한 목록만 띄우면 화면 절반이 비어 버리기 때문이다.
+ */
+@Composable
+private fun RecorderContent(
+    uiState: RecorderUiState,
+    storageLocationLabel: String,
+    viewModel: RecorderViewModel,
+    onRecordOrRequest: () -> Unit
+) {
+    BoxWithConstraints(modifier = Modifier.fillMaxSize()) {
+        if (maxWidth >= TWO_PANE_MIN_WIDTH) {
+            Row(modifier = Modifier.fillMaxSize()) {
+                Box(modifier = Modifier.width(340.dp)) {
+                    FolderListScreen(
+                        folders = uiState.folders,
+                        storageLocationLabel = storageLocationLabel,
+                        onFolderClick = { viewModel.openFolder(it) },
+                        onFolderLongClick = { viewModel.requestRenameFolder(it) },
+                        onFolderDeleteClick = { viewModel.requestDeleteFolder(it) },
+                        onAddFolderClick = { viewModel.openAddFolderDialog() },
+                        onRecordClick = onRecordOrRequest,
+                        showRecordButton = false
+                    )
+                }
+                Box(
+                    modifier = Modifier
+                        .fillMaxHeight()
+                        .width(1.dp)
+                        .background(MaterialTheme.colorScheme.outlineVariant)
+                )
+                Box(modifier = Modifier.weight(1f)) {
+                    if (uiState.selectedFolder == null) {
+                        EmptyState(
+                            modifier = Modifier.align(Alignment.Center),
+                            title = "폴더를 선택하세요",
+                            subtitle = "왼쪽에서 폴더를 고르면 녹음 목록이 열립니다"
+                        )
+                    } else {
+                        FolderDetailScreen(
+                            recordings = uiState.recordings,
+                            playingRecordingName = uiState.playingRecordingName,
+                            isRecording = uiState.isRecording,
+                            elapsedSeconds = uiState.elapsedSeconds,
+                            onRecordingClick = { viewModel.onRecordingClick(it) },
+                            onRecordingLongClick = { viewModel.requestRenameRecording(it) },
+                            onRecordingDeleteClick = { viewModel.requestDeleteRecording(it) },
+                            onRecordingUploadClick = { viewModel.uploadRecording(it) },
+                            onRecordClick = {
+                                if (uiState.isRecording) {
+                                    viewModel.requestStopRecording()
+                                } else {
+                                    onRecordOrRequest()
+                                }
+                            }
+                        )
+                    }
+                }
+            }
+        } else {
+            if (uiState.selectedFolder == null) {
+                FolderListScreen(
+                    folders = uiState.folders,
+                    storageLocationLabel = storageLocationLabel,
+                    onFolderClick = { viewModel.openFolder(it) },
+                    onFolderLongClick = { viewModel.requestRenameFolder(it) },
+                    onFolderDeleteClick = { viewModel.requestDeleteFolder(it) },
+                    onAddFolderClick = { viewModel.openAddFolderDialog() },
+                    onRecordClick = onRecordOrRequest
+                )
+            } else {
+                FolderDetailScreen(
+                    recordings = uiState.recordings,
+                    playingRecordingName = uiState.playingRecordingName,
+                    isRecording = uiState.isRecording,
+                    elapsedSeconds = uiState.elapsedSeconds,
+                    onRecordingClick = { viewModel.onRecordingClick(it) },
+                    onRecordingLongClick = { viewModel.requestRenameRecording(it) },
+                    onRecordingDeleteClick = { viewModel.requestDeleteRecording(it) },
+                    onRecordingUploadClick = { viewModel.uploadRecording(it) },
+                    onRecordClick = {
+                        if (uiState.isRecording) {
+                            viewModel.requestStopRecording()
+                        } else {
+                            onRecordOrRequest()
+                        }
+                    }
+                )
+            }
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------------
 // 폴더 목록 화면 (홈)
 // ---------------------------------------------------------------------------------
 @Composable
@@ -332,7 +465,10 @@ fun FolderListScreen(
     onFolderLongClick: (String) -> Unit,
     onFolderDeleteClick: (String) -> Unit,
     onAddFolderClick: () -> Unit,
-    onRecordClick: () -> Unit
+    onRecordClick: () -> Unit,
+    // 태블릿 2단 화면에서는 왼쪽(폴더 목록)에 녹음 버튼을 두지 않는다.
+    // 녹음은 오른쪽에서 실제로 열려 있는 폴더에 하는 것이라 헷갈리지 않게 한 곳에만 둔다.
+    showRecordButton: Boolean = true
 ) {
     Box(modifier = Modifier.fillMaxSize()) {
         Column(modifier = Modifier.fillMaxSize()) {
@@ -374,7 +510,8 @@ fun FolderListScreen(
             modifier = Modifier.align(Alignment.BottomCenter),
             onAddFolderClick = onAddFolderClick,
             onRecordClick = onRecordClick,
-            recordEnabled = true
+            recordEnabled = true,
+            showRecordButton = showRecordButton
         )
     }
 }
@@ -475,6 +612,7 @@ fun FolderDetailScreen(
     onRecordingClick: (RecordingItem) -> Unit,
     onRecordingLongClick: (RecordingItem) -> Unit,
     onRecordingDeleteClick: (RecordingItem) -> Unit,
+    onRecordingUploadClick: (RecordingItem) -> Unit,
     onRecordClick: () -> Unit
 ) {
     Box(modifier = Modifier.fillMaxSize()) {
@@ -498,7 +636,8 @@ fun FolderDetailScreen(
                         isPlaying = playingRecordingName == item.displayName,
                         onClick = { onRecordingClick(item) },
                         onLongClick = { onRecordingLongClick(item) },
-                        onDeleteClick = { onRecordingDeleteClick(item) }
+                        onDeleteClick = { onRecordingDeleteClick(item) },
+                        onUploadClick = { onRecordingUploadClick(item) }
                     )
                 }
             }
@@ -526,7 +665,8 @@ fun RecordingCard(
     isPlaying: Boolean,
     onClick: () -> Unit,
     onLongClick: () -> Unit,
-    onDeleteClick: () -> Unit
+    onDeleteClick: () -> Unit,
+    onUploadClick: () -> Unit
 ) {
     var showMenu by remember { mutableStateOf(false) }
 
@@ -600,6 +740,15 @@ fun RecordingCard(
                         onLongClick()
                     }
                 )
+                // 자동 업로드가 꺼져 있거나, 서버가 꺼져 있어 실패했던 파일을 다시 올릴 때 쓴다.
+                DropdownMenuItem(
+                    text = { Text("daglo 서버로 보내기") },
+                    leadingIcon = { Icon(Icons.Default.CloudUpload, contentDescription = null) },
+                    onClick = {
+                        showMenu = false
+                        onUploadClick()
+                    }
+                )
                 DropdownMenuItem(
                     text = { Text("삭제", color = RecordingRed) },
                     leadingIcon = {
@@ -623,13 +772,14 @@ fun BottomActionBar(
     modifier: Modifier = Modifier,
     onAddFolderClick: () -> Unit,
     onRecordClick: () -> Unit,
-    recordEnabled: Boolean
+    recordEnabled: Boolean,
+    showRecordButton: Boolean = true
 ) {
     Row(
         modifier = modifier
             .fillMaxWidth()
             .padding(bottom = 28.dp, start = 32.dp, end = 32.dp),
-        horizontalArrangement = Arrangement.SpaceBetween,
+        horizontalArrangement = if (showRecordButton) Arrangement.SpaceBetween else Arrangement.Start,
         verticalAlignment = Alignment.CenterVertically
     ) {
         FloatingActionButton(
@@ -642,7 +792,9 @@ fun BottomActionBar(
             Icon(Icons.Default.CreateNewFolder, contentDescription = "폴더 추가")
         }
 
-        RecordFab(isRecording = false, onClick = onRecordClick, enabled = recordEnabled)
+        if (showRecordButton) {
+            RecordFab(isRecording = false, onClick = onRecordClick, enabled = recordEnabled)
+        }
     }
 }
 
