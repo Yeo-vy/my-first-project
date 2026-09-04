@@ -12,6 +12,7 @@ let isUserEditing = false;
 let isModified = false;
 let currentActiveBlock = null;
 let autoPollTimer = null;
+let isRefreshing = false;
 
 const audioPlayer = document.getElementById("global-audio-element");
 let currentUser = null;
@@ -324,6 +325,49 @@ function renderBoardsTable() {
 
 function handleSearch(query) {
     loadBoards(query);
+}
+
+// 목록을 서버와 다시 맞춘다.
+// 서버는 이 요청을 받으면 녹음 폴더를 그 자리에서 한 번 훑기 때문에, 방금 탐색기에 넣은 파일도
+// 감시 주기(5초)를 기다리지 않고 바로 보인다. 옮기거나 지운 파일, 폴더 개수도 함께 반영된다.
+async function refreshBoards() {
+    if (isRefreshing) return;
+    isRefreshing = true;
+
+    const btn = document.getElementById("refresh-boards-btn");
+    const icon = document.getElementById("refresh-boards-icon");
+    if (btn) btn.disabled = true;
+    if (icon) icon.classList.add("fa-spin");
+
+    let result = null;
+    try {
+        const res = await fetch("/api/boards/refresh", { method: "POST" });
+        if (res.ok) result = await res.json();
+    } catch (e) {
+        console.error("보드 새로고침 실패:", e);
+    }
+
+    try {
+        // 폴더 검사가 실패해도 목록만이라도 다시 읽는다
+        await Promise.all([
+            loadFolders(),
+            loadBoards(document.getElementById("board-search-input").value || ""),
+        ]);
+    } finally {
+        isRefreshing = false;
+        if (btn) btn.disabled = false;
+        if (icon) icon.classList.remove("fa-spin");
+    }
+
+    if (!result) {
+        showToast("목록만 다시 읽었습니다. (폴더 검사에 실패했습니다)");
+    } else if (result.added > 0) {
+        showToast(`새 녹음 ${result.added}개를 찾았습니다. 변환을 시작합니다.`);
+    } else if (!result.scanned) {
+        showToast("폴더를 검사하는 중입니다. 잠시 뒤 목록에 반영됩니다.");
+    } else {
+        showToast("목록을 최신 상태로 맞췄습니다.");
+    }
 }
 
 // -----------------------------------------

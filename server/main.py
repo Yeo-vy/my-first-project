@@ -394,6 +394,32 @@ def is_watched_path(path: str) -> bool:
     return is_inside(path, AUDIO_DIR)
 
 
+def path_basename(path: str) -> str:
+    r"""OS가 달라도 파일명만 떼어낸다.
+
+    `os.path.basename` 은 실행 중인 OS 의 구분자만 안다. 그래서 윈도우에서 만든 DB 를
+    리눅스 서버로 옮기면 `C:\...\녹음.m4a` 의 basename 이 경로 전체가 되어 버리고,
+    경로 복구가 조용히 실패한다. 여기서는 두 구분자를 모두 잘라 낸다.
+    """
+    return re.split(r"[\\/]", path)[-1] if path else ""
+
+
+def is_foreign_os_path(path: str) -> bool:
+    r"""다른 OS 에서 만들어져 이 서버에서는 해석할 수 없는 경로인지 판별한다.
+
+    이런 경로는 `os.path.exists` 도, 감시 폴더 안쪽인지 판정하는 `is_watched_path` 도
+    전부 False 가 되어, 원본을 지워도 보드가 영영 남는다. 옮겨 온 DB 를 이 서버 기준으로
+    다시 잇기 위해 먼저 가려낸다.
+    """
+    if not path:
+        return False
+    if os.name == "nt":
+        # 윈도우에서 리눅스 절대경로를 만난 경우
+        return path.startswith("/")
+    # 리눅스에서 `C:\...` 같은 윈도우 절대경로를 만난 경우
+    return bool(re.match(r"^[A-Za-z]:[\\/]", path))
+
+
 def is_managed_file(path: str) -> bool:
     """서버가 관리하는 폴더 안의 파일인지 확인한다.
 
@@ -615,22 +641,41 @@ def repair_stale_media_paths(db: Session) -> None:
     audio_index = build_index(AUDIO_DIR, VALID_AUDIO_EXTS)
     txt_index = build_index(RESULT_DIR, (".txt",))
     repaired = 0
+    rebased = 0
 
     for board in db.query(Board).all():
         for attr, index in (("audio_path", audio_index), ("txt_path", txt_index)):
             path = getattr(board, attr)
             if not path or os.path.exists(path):
                 continue
-            found = index.get(unicodedata.normalize("NFC", os.path.basename(path)))
+            name = path_basename(path)
+            found = index.get(unicodedata.normalize("NFC", name))
             if found:
                 setattr(board, attr, found)
                 if attr == "audio_path":
-                    board.audio_filename = os.path.basename(found)
+                    board.audio_filename = path_basename(found)
                 repaired += 1
+            elif attr == "audio_path" and is_foreign_os_path(path):
+                # 다른 OS 에서 만든 DB 를 그대로 가져온 보드다. 이런 경로는 이 서버에서
+                # `파일이 있는지`도 `감시 폴더 안쪽인지`도 판정할 수 없어서, 원본을 지워도
+                # 보드가 영영 남는다. 지금 폴더 규칙으로 있어야 할 자리를 다시 계산해 두면
+                # 그 뒤로는 감시 스레드가 평소 규칙대로(연속 3회 안 보이면 휴지통) 처리한다.
+                folder_name = board.folder.name if board.folder else "기본 폴더"
+                sub_dir = "" if folder_name == "기본 폴더" else sanitize_filename(folder_name)
+                setattr(board, attr, os.path.join(AUDIO_DIR, sub_dir, name))
+                board.audio_filename = name
+                rebased += 1
 
-    if repaired:
+    if repaired or rebased:
         db.commit()
+    if repaired:
         print(f"[PATH-REPAIR] 위치가 바뀐 파일 경로 {repaired}건을 현재 폴더 기준으로 고쳤습니다.", flush=True)
+    if rebased:
+        print(
+            f"[PATH-REPAIR] 다른 OS 에서 만들어져 해석할 수 없던 경로 {rebased}건을 이 서버 기준으로 바꿨습니다. "
+            f"원본이 실제로 없는 보드는 이후 감시에서 휴지통으로 정리됩니다.",
+            flush=True,
+        )
 
 
 def find_moved_board(db: Session, new_path: str, mtime: datetime.datetime):
@@ -737,17 +782,88 @@ def sync_deleted_audio_to_boards(db: Session, missing_streaks: dict) -> None:
 # -----------------
 # Background Auto Folder Watcher (SFTP/RaiDrive 자동 감지 엔진)
 # -----------------
+# 감시 스레드가 한 바퀴 돌고 쉬는 시간
+WATCH_INTERVAL_SECONDS = float(os.getenv("WATCH_INTERVAL_SECONDS", "5"))
+# 복사가 끝났다고 볼 때까지 파일이 조용해야 하는 시간
+FILE_SETTLE_SECONDS = 4
+
+# 웹에서 `새로고침`을 눌렀을 때 감시 스레드를 바로 깨우기 위한 신호.
+# 스캔은 언제나 감시 스레드 한 곳에서만 돌아야 같은 파일로 보드가 두 번 생기지 않는다.
+_scan_wakeup = threading.Event()
+_scan_state = threading.Condition()
+_scan_requests = 0   # 지금까지 들어온 새로고침 요청 번호
+_scan_served = 0     # 그 요청을 반영해 끝난 스캔까지의 요청 번호
+
+
+def audio_file_settled(path: str, size: int, seen_sizes: dict, force: bool = False) -> bool:
+    """복사가 끝난 파일인지 판단하고, 관찰 기록(seen_sizes)을 갱신한다.
+
+    평소에는 `크기가 FILE_SETTLE_SECONDS 초 넘게 그대로였는지`로 확인한다. 처음 본 파일은
+    다음 스캔을 기다려야 하는데, 사용자가 직접 새로고침을 눌렀을 때까지 그러면 방금 넣은
+    녹음이 안 보인다. 그래서 강제 스캔에서는 `마지막 수정 시각이 그만큼 지났는지`도 함께 본다.
+    """
+    now = time.time()
+    last = seen_sizes.get(path)
+    if last is None or last[0] != size:
+        seen_sizes[path] = (size, now)
+    elif now - last[1] >= FILE_SETTLE_SECONDS:
+        return True
+
+    if not force:
+        return False
+    try:
+        return now - os.path.getmtime(path) >= FILE_SETTLE_SECONDS
+    except OSError:
+        return False
+
+
+def request_immediate_scan(timeout: float = 10.0) -> bool:
+    """감시 스레드에 지금 한 바퀴 돌라고 요청하고, 그 스캔이 끝날 때까지 기다린다.
+
+    요청 번호를 매겨 두었으므로, 이미 돌고 있던 스캔이 끝난 것을 내 요청의 결과로
+    착각하지 않는다. 시간 안에 못 끝내면 False 를 돌려준다 (감시 스레드가 큰 폴더를
+    훑는 중일 수 있다. 요청 자체는 남아 있으니 곧 반영된다).
+    """
+    global _scan_requests
+    with _scan_state:
+        _scan_requests += 1
+        target = _scan_requests
+    _scan_wakeup.set()
+
+    deadline = time.time() + timeout
+    with _scan_state:
+        while _scan_served < target:
+            remaining = deadline - time.time()
+            if remaining <= 0:
+                return False
+            _scan_state.wait(remaining)
+    return True
+
+
 def background_audio_watcher():
     """`녹음파일원본`에 복사된 새 오디오를 감지해 PENDING 보드로 등록하고 STT 큐에 넣는다."""
+    global _scan_served
+
     time.sleep(3)
     seen_sizes = {}
     missing_streaks = {}
 
     while True:
+        # 이번 바퀴가 반영할 새로고침 요청 번호. 요청이 있었다면 파일 판정을 서두른다.
+        # 요청 번호를 읽기 `전에` 신호를 지워야, 읽은 직후 들어온 요청이 묻히지 않는다.
+        _scan_wakeup.clear()
+        with _scan_state:
+            serving = _scan_requests
+            force = serving > _scan_served
+
         db = None
         try:
             db = SessionLocal()
             live_paths = set()
+
+            # 새로고침은 `DB를 지금 파일 상태에 맞추는` 동작이므로 끊긴 경로부터 되살린다
+            if force:
+                repair_stale_media_paths(db)
 
             for root_dir, _, files in os.walk(AUDIO_DIR):
                 audio_files = [f for f in files if f.lower().endswith(VALID_AUDIO_EXTS)]
@@ -766,11 +882,7 @@ def background_audio_watcher():
                         continue
 
                     # 복사가 끝났는지 확인: 크기가 4초 이상 변하지 않아야 한다
-                    last = seen_sizes.get(full_path)
-                    if last is None or last[0] != current_size:
-                        seen_sizes[full_path] = (current_size, time.time())
-                        continue
-                    if time.time() - last[1] < 4:
+                    if not audio_file_settled(full_path, current_size, seen_sizes, force):
                         continue
 
                     base_name = os.path.splitext(f)[0]
@@ -813,7 +925,10 @@ def background_audio_watcher():
                         db.commit()
                         db.refresh(board)
                         print(f"[AUTO-DETECT] New audio found: {f} (Board #{board.id})")
-                    elif not board.audio_path:
+                    elif not board.audio_path or not os.path.exists(board.audio_path):
+                        # 경로가 비었거나 어긋난(폴더 이동·다른 OS 에서 만든 DB 등) 보드를
+                        # 눈앞에 실제로 있는 이 파일로 다시 이어 준다. 이걸 안 하면 원본이
+                        # 멀쩡히 있는데도 재생·다시받아쓰기가 안 되고, 삭제 동기화도 못 한다.
                         board.audio_path = full_path
                         board.audio_filename = f
                         db.commit()
@@ -867,7 +982,14 @@ def background_audio_watcher():
         except Exception as e:
             print(f"[WORKER-SUPERVISOR-ERROR] {e}", flush=True)
 
-        time.sleep(5)
+        # 이번 바퀴가 끝났음을 알린다 (`새로고침`을 눌러 기다리는 요청이 여기서 풀린다)
+        if force:
+            with _scan_state:
+                _scan_served = max(_scan_served, serving)
+                _scan_state.notify_all()
+
+        # 평소에는 5초마다, 새로고침 요청이 들어오면 곧바로 다음 바퀴를 돈다
+        _scan_wakeup.wait(WATCH_INTERVAL_SECONDS)
 
 
 @app.on_event("startup")
@@ -1267,6 +1389,34 @@ def delete_folder(folder_id: int, db: Session = Depends(get_db)):
 # -----------------
 # 2. Board Endpoints
 # -----------------
+@app.post("/api/boards/refresh")
+def refresh_boards(db: Session = Depends(get_db)):
+    """녹음 폴더를 지금 한 번 훑어 DB를 실제 파일 상태에 맞춘다.
+
+    감시 스레드가 5초마다 하는 일과 같지만, 화면의 `새로고침` 버튼이 이 경로로 스캔을
+    앞당겨 요청한다. 방금 탐색기에 넣은 녹음이 바로 목록에 뜨고, 옮기거나 지운 파일도
+    그 자리에서 반영된다. 스캔 자체는 감시 스레드 한 곳에서만 돌기 때문에
+    새로고침을 연달아 눌러도 같은 파일로 보드가 두 번 생기지 않는다.
+    """
+    before = db.query(Board).count()
+    scanned = request_immediate_scan()
+    # 스캔은 다른 세션에서 커밋되므로, 읽던 트랜잭션을 닫아야 새 내용이 보인다
+    db.rollback()
+
+    total = db.query(Board).filter(Board.is_deleted == False).count()  # noqa: E712
+    in_flight = (
+        db.query(Board)
+        .filter(Board.is_deleted == False, Board.status.in_(["PENDING", "PROCESSING"]))  # noqa: E712
+        .count()
+    )
+    return {
+        "scanned": scanned,
+        "added": max(0, db.query(Board).count() - before),
+        "total": total,
+        "in_flight": in_flight,
+    }
+
+
 @app.get("/api/boards")
 def get_boards(
     folder_id: Optional[int] = Query(None),

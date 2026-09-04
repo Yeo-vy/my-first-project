@@ -79,6 +79,10 @@
                         <input type="text" id="board-search-input" placeholder="보드 제목 또는 자막 내용 검색..." oninput="handleSearch(this.value)">
                     </div>
                     <div class="header-actions">
+                        <button class="btn-secondary" id="refresh-boards-btn" onclick="refreshBoards()"
+                                title="녹음 폴더를 지금 다시 읽어 목록을 최신 상태로 맞춥니다">
+                            <i class="fa-solid fa-rotate" id="refresh-boards-icon"></i> 새로고침
+                        </button>
                         <button class="primary-btn" onclick="openUploadModal()">
                             <i class="fa-solid fa-plus"></i> 새 받아쓰기
                         </button>
