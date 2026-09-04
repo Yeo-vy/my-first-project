@@ -1355,15 +1355,31 @@ def restore_board(board_id: int, db: Session = Depends(get_db)):
 
 @app.post("/api/boards/{board_id}/reprocess")
 def reprocess_board(board_id: int, db: Session = Depends(get_db)):
-    """실패했거나 중단된 보드의 STT 변환을 다시 큐에 넣는다."""
+    """보드의 STT 변환을 다시 큐에 넣는다 (실패 재시도 / 완료본 다시 받아쓰기 공통).
+
+    이미 완료된 보드도 원본 오디오만 남아 있으면 처음부터 다시 받아쓸 수 있다.
+    기존 스크립트는 새 변환이 끝나 새 세그먼트를 저장하는 시점에 교체되므로,
+    변환이 도는 동안에도(그리고 변환이 실패해도) 예전 스크립트는 그대로 남는다.
+    """
     b = db.query(Board).filter_by(id=board_id).first()
     if not b:
         raise HTTPException(status_code=404, detail="보드를 찾을 수 없습니다.")
+
+    # 이미 큐/워커가 잡고 있는 보드를 또 넣으면 같은 파일을 두 번 변환하게 된다.
+    # (큐에서 유실돼 상태만 남은 보드는 여기서 걸리지 않으므로 수동 재투입이 가능하다)
+    if b.status in ("PENDING", "PROCESSING"):
+        with _queue_lock:
+            active = b.id in _queued_board_ids or b.id in _inflight
+        if active:
+            raise HTTPException(status_code=409, detail="이미 변환 중이거나 대기 중인 보드입니다.")
+
     # 휴지통에 있던 보드를 다시 변환하려는 경우이니 파일부터 제자리로 돌려놓는다
     if b.is_deleted:
         restore_board_files_from_trash(b)
     if not b.audio_path or not os.path.exists(b.audio_path):
         raise HTTPException(status_code=400, detail="원본 오디오 파일이 없어 다시 변환할 수 없습니다.")
+
+    had_transcript = db.query(TranscriptSegment).filter_by(board_id=b.id).count() > 0
 
     b.status = "PENDING"
     b.progress_percent = 0
@@ -1371,8 +1387,16 @@ def reprocess_board(board_id: int, db: Session = Depends(get_db)):
     b.is_deleted = False
     db.commit()
 
+    # 워커가 죽어 있으면 큐에 넣어도 아무도 꺼내지 않는다. 넣기 전에 확인한다.
+    ensure_workers_alive()
     enqueue_board(b.id)
-    return {"ok": True, "board_id": b.id, "status": "PENDING", "queue_depth": stt_queue.qsize()}
+    return {
+        "ok": True,
+        "board_id": b.id,
+        "status": "PENDING",
+        "retranscribe": had_transcript,
+        "queue_depth": stt_queue.qsize(),
+    }
 
 
 @app.post("/api/boards/batch-delete")

@@ -279,11 +279,15 @@ function renderBoardsTable() {
                 <button class="icon-btn-small" onclick="deleteBoardPermanent(${b.id})" title="완전 삭제"><i class="fa-solid fa-xmark"></i></button>
             `;
         } else {
-            const retryBtn = (b.status === "FAILED" && b.has_audio)
-                ? `<button class="icon-btn-small" onclick="reprocessBoard(event, ${b.id})" title="변환 다시 시도"><i class="fa-solid fa-rotate-right"></i></button>`
-                : "";
+            // 실패한 보드는 곧바로 재시도, 이미 끝난 보드는 확인을 거쳐 다시 받아쓰기
+            let redoBtn = "";
+            if (b.has_audio && b.status === "FAILED") {
+                redoBtn = `<button class="icon-btn-small" onclick="reprocessBoard(event, ${b.id})" title="변환 다시 시도"><i class="fa-solid fa-rotate-right"></i></button>`;
+            } else if (b.has_audio && !IN_FLIGHT_STATUSES.includes(b.status)) {
+                redoBtn = `<button class="icon-btn-small" onclick="retranscribeBoard(event, ${b.id})" title="다시 받아쓰기"><i class="fa-solid fa-rotate-right"></i></button>`;
+            }
             actionButtons = `
-                ${retryBtn}
+                ${redoBtn}
                 <button class="icon-btn-small" onclick="deleteBoard(${b.id})" title="삭제"><i class="fa-regular fa-trash-can"></i></button>
             `;
         }
@@ -367,19 +371,65 @@ async function deleteBoard(boardId) {
     loadFolders();
 }
 
+// 실패/중단된 보드의 변환을 다시 시도한다 (남아 있는 결과가 없으니 확인 없이 바로)
 async function reprocessBoard(event, boardId) {
     if (event) event.stopPropagation();
+    await requestReprocess(boardId, "변환 대기열에 다시 넣었습니다.");
+}
+
+// 이미 스크립트가 있는 보드를 원본 녹음으로 처음부터 다시 받아쓴다
+async function retranscribeBoard(event, boardId) {
+    if (event) event.stopPropagation();
+    // 템플릿 리터럴이라 줄바꿈이 그대로 확인 창에 들어간다
+    const ok = confirm(
+`원본 녹음으로 스크립트를 처음부터 다시 만듭니다.
+
+· 지금 스크립트는 새 변환이 끝나는 순간 통째로 교체됩니다 (직접 고친 내용도 사라집니다)
+· 키워드와 기본 요약도 새로 만들어집니다
+· 북마크와 AI 대화 기록은 그대로 남습니다
+· 변환이 끝나기 전까지는 기존 스크립트를 그대로 볼 수 있습니다
+
+계속할까요?`
+    );
+    if (!ok) return;
+    await requestReprocess(boardId, "다시 받아쓰기를 시작했습니다. 변환이 끝나면 스크립트가 교체됩니다.");
+}
+
+// 상세 화면 헤더의 `다시 받아쓰기` 버튼
+function retranscribeCurrentBoard() {
+    if (!currentBoard) return;
+    if (!currentBoard.has_audio) {
+        alert("원본 녹음 파일이 없어 다시 받아쓸 수 없습니다.");
+        return;
+    }
+    if (IN_FLIGHT_STATUSES.includes(currentBoard.status)) {
+        alert("이미 변환 중입니다. 변환이 끝난 뒤에 다시 시도해주세요.");
+        return;
+    }
+    retranscribeBoard(null, currentBoard.id);
+}
+
+async function requestReprocess(boardId, successMessage) {
     try {
         const res = await fetch(`/api/boards/${boardId}/reprocess`, { method: "POST" });
         const data = await res.json();
         if (!res.ok) {
             alert(data.detail || "다시 변환할 수 없습니다.");
-            return;
+            return null;
         }
-        showToast("변환 대기열에 다시 넣었습니다.");
+        showToast(successMessage);
+        // 상세 화면에서 눌렀다면 폴러가 완료를 감지하도록 상태를 바로 반영한다
+        if (currentBoard && currentBoard.id === boardId) {
+            currentBoard.status = "PENDING";
+            currentBoard.progress_percent = 0;
+            currentBoard.error_message = null;
+            renderDetailStatus(currentBoard);
+        }
         loadBoards();
+        return data;
     } catch (e) {
         alert("재시도 요청에 실패했습니다.");
+        return null;
     }
 }
 
@@ -1132,6 +1182,8 @@ function startProcessingPoller() {
 }
 
 function renderDetailStatus(board) {
+    updateRetranscribeBtn(board);
+
     const bar = document.getElementById("detail-status-bar");
     if (!bar) return;
 
@@ -1159,6 +1211,23 @@ function renderDetailStatus(board) {
         bar.style.display = "none";
         bar.innerHTML = "";
     }
+}
+
+function updateRetranscribeBtn(board) {
+    const btn = document.getElementById("detail-retranscribe-btn");
+    if (!btn) return;
+
+    // 원본 녹음이 없으면 다시 받아쓸 방법이 없고, 변환 중에는 중복 투입을 막는다
+    if (!board || !board.has_audio) {
+        btn.style.display = "none";
+        return;
+    }
+    const inFlight = IN_FLIGHT_STATUSES.includes(board.status);
+    btn.style.display = "";
+    btn.disabled = inFlight;
+    btn.title = inFlight
+        ? "변환이 끝난 뒤에 다시 받아쓸 수 있습니다"
+        : "원본 녹음으로 스크립트를 처음부터 다시 만듭니다";
 }
 
 function escapeHtml(str) {

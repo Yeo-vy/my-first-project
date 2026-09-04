@@ -136,6 +136,9 @@
                         <h3 class="detail-title" id="detail-title" contenteditable="true" onblur="saveBoardTitle(this.innerText)">보드 제목</h3>
                     </div>
                     <div class="detail-right-header">
+                        <button class="btn-secondary" id="detail-retranscribe-btn" onclick="retranscribeCurrentBoard()" title="원본 녹음으로 스크립트를 처음부터 다시 만듭니다">
+                            <i class="fa-solid fa-rotate-right"></i> 다시 받아쓰기
+                        </button>
                         <button class="btn-secondary" onclick="openSpeakerModal()"><i class="fa-solid fa-user-pen"></i> 화자 이름 변경</button>
                         <button class="btn-secondary" onclick="openExportModal()"><i class="fa-solid fa-download"></i> 내보내기</button>
                         <button class="icon-btn danger" onclick="deleteCurrentBoard()" title="삭제">
