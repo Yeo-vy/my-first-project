@@ -41,3 +41,6 @@ local.properties
 
 # 웹에서 삭제한 녹음이 옮겨지는 곳
 휴지통/
+daglo.db-shm
+daglo.db-wal
+.gitignore
