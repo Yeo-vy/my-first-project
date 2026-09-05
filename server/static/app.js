@@ -183,13 +183,26 @@ function renderFolderList() {
         const item = document.createElement("div");
         item.className = `folder-item ${currentFolderId === f.id ? "active" : ""}`;
         item.onclick = () => selectFolder(f.id, f.name);
+        // 기본 폴더는 서버에서도 삭제를 막으므로 버튼을 아예 만들지 않는다
+        const canDelete = f.name !== "기본 폴더";
         item.innerHTML = `
             <div class="folder-info">
                 <i class="fa-solid fa-folder"></i>
                 <span>${escapeHtml(f.name)}</span>
             </div>
-            <span class="badge">${f.board_count || 0}</span>
+            <div class="folder-meta">
+                <span class="badge">${f.board_count || 0}</span>
+                ${canDelete
+                    ? `<button class="folder-del-btn" title="폴더 삭제"><i class="fa-solid fa-trash"></i></button>`
+                    : `<span class="folder-del-spacer"></span>`}
+            </div>
         `;
+        if (canDelete) {
+            item.querySelector(".folder-del-btn").onclick = (e) => {
+                e.stopPropagation();   // 폴더 선택으로 번지지 않게 한다
+                openDeleteFolderModal(f);
+            };
+        }
         container.appendChild(item);
     });
 
@@ -1133,6 +1146,74 @@ async function submitCreateFolder() {
         loadFolders();
     } catch (e) {
         alert("폴더 생성 실패");
+    }
+}
+
+// 삭제 확인 모달이 떠 있는 동안 어떤 폴더를 지우려는지 들고 있는다
+let folderPendingDelete = null;
+
+function openDeleteFolderModal(folder) {
+    folderPendingDelete = folder;
+    const count = folder.board_count || 0;
+    const keepBtn = document.getElementById("folder-delete-keep-btn");
+    const trashBtn = document.getElementById("folder-delete-trash-btn");
+
+    document.getElementById("folder-delete-title").textContent = `'${folder.name}' 폴더 삭제`;
+    if (count > 0) {
+        // 안에 보드가 있으면 살릴지 함께 버릴지 고르게 한다
+        document.getElementById("folder-delete-desc").textContent =
+            `이 폴더에 보드 ${count}개가 있습니다. 보드를 어떻게 할지 고르세요. 원본 녹음 파일과 변환 텍스트도 보드를 따라 함께 옮겨집니다. ` +
+            `휴지통으로 보낸 보드는 휴지통에서 되돌릴 수 있습니다.`;
+        keepBtn.textContent = "보드는 기본 폴더로";
+        trashBtn.style.display = "";
+    } else {
+        document.getElementById("folder-delete-desc").textContent =
+            "빈 폴더입니다. 삭제하면 탐색기의 폴더도 함께 정리됩니다.";
+        keepBtn.textContent = "삭제";
+        trashBtn.style.display = "none";
+    }
+    document.getElementById("folder-delete-modal").style.display = "flex";
+}
+
+function closeDeleteFolderModal() {
+    document.getElementById("folder-delete-modal").style.display = "none";
+    folderPendingDelete = null;
+}
+
+async function submitDeleteFolder(withBoards) {
+    // 확인 절차는 이 모달 자체다 (무엇이 어떻게 되는지 위에 적어 두고 버튼으로 고르게 한다)
+    const folder = folderPendingDelete;
+    if (!folder) return;
+
+    try {
+        const res = await fetch(`/api/folders/${folder.id}?with_boards=${withBoards}`, { method: "DELETE" });
+        const data = await res.json().catch(() => ({}));
+        if (!res.ok) {
+            showToast(data.detail || "폴더를 삭제하지 못했습니다.");
+            return;
+        }
+        closeDeleteFolderModal();
+
+        let msg = "폴더를 삭제했습니다.";
+        if (data.trashed_boards) {
+            msg = `폴더를 삭제하고 보드 ${data.trashed_boards}개를 휴지통으로 옮겼습니다.`;
+        } else if (data.moved_boards) {
+            msg = `폴더를 삭제하고 보드 ${data.moved_boards}개를 기본 폴더로 옮겼습니다.`;
+        }
+        if (data.leftover_files) {
+            msg += ` (서버가 모르는 파일 ${data.leftover_files}개가 남아 있어 탐색기 폴더는 두었습니다)`;
+        }
+        showToast(msg);
+
+        // 지운 폴더를 보고 있었다면 전체 보드로 돌아간다 (changeFilter 가 목록도 다시 읽는다)
+        if (currentFolderId === folder.id) {
+            changeFilter("all");
+        } else {
+            loadBoards();
+        }
+        loadFolders();
+    } catch (e) {
+        showToast("폴더 삭제에 실패했습니다.");
     }
 }
 

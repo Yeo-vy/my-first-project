@@ -389,6 +389,13 @@ def is_inside(path: str, base: str) -> bool:
         return False
 
 
+def is_same_dir(a: str, b: str) -> bool:
+    """두 경로가 같은 디렉터리를 가리키는지 판별한다 (대소문자·상대경로 차이 무시)."""
+    if not a or not b:
+        return False
+    return os.path.normcase(os.path.abspath(a)) == os.path.normcase(os.path.abspath(b))
+
+
 def is_watched_path(path: str) -> bool:
     """감시 폴더(`녹음파일원본`) 안쪽 경로인지 판별한다."""
     return is_inside(path, AUDIO_DIR)
@@ -591,6 +598,105 @@ def restore_board_files_from_trash(board: Board) -> bool:
             flush=True,
         )
     return bool(restored)
+
+
+def move_board_files_to_folder(board: Board, folder_name: str) -> bool:
+    """보드에 딸린 파일을 다른 폴더의 디렉터리로 옮기고 DB 경로도 함께 고친다.
+
+    폴더를 지우면서 보드는 살려 둘 때 쓴다. DB에서 폴더만 바꾸면 파일은 지워질
+    디렉터리에 그대로 남고, 감시 스레드가 그 파일을 보고 폴더를 다시 만들어 낸다.
+    """
+    if WEB_DELETE_SYNC == "off":
+        return False
+
+    sub = "" if folder_name == "기본 폴더" else sanitize_filename(folder_name)
+    moved = []
+    for key, src in board_file_targets(board):
+        if not os.path.isfile(src) or not is_managed_file(src):
+            continue
+        if is_inside(src, TRASH_DIR):      # 휴지통 안의 파일은 되돌아갈 자리가 따로 적혀 있다
+            continue
+        base = AUDIO_DIR if is_inside(src, AUDIO_DIR) else RESULT_DIR
+        dest_dir = os.path.join(base, sub) if sub else base
+        if is_same_dir(os.path.dirname(src), dest_dir):
+            continue
+        try:
+            os.makedirs(dest_dir, exist_ok=True)
+            dest = unique_path(os.path.join(dest_dir, os.path.basename(src)))
+            shutil.move(src, dest)
+        except OSError as e:
+            print(f"[FOLDER-DELETE-WARN] #{board.id} {key} 이동 실패 ({src}): {e}", flush=True)
+            continue
+        if key == "audio_path":
+            board.audio_path = dest
+            board.audio_filename = os.path.basename(dest)
+        elif key == "txt_path":
+            board.txt_path = dest
+        moved.append(os.path.basename(dest))
+
+    if moved:
+        print(
+            f"[FOLDER-DELETE] #{board.id} {board.title}: 파일 {len(moved)}개를 '{folder_name}' 로 옮겼습니다 "
+            f"({', '.join(moved)})",
+            flush=True,
+        )
+    return bool(moved)
+
+
+def folder_dirs_on_disk(folder_name: str) -> list:
+    """폴더 이름에 해당하는 실제 디렉터리들을 깊은 곳부터 찾는다.
+
+    `get_folder_name` 이 중첩 경로에서도 마지막 폴더명만 보고 폴더를 잇기 때문에,
+    이름이 같은 디렉터리는 어디에 있든 이 폴더 하나로 모인다. 지울 때도 같은 기준을 쓴다.
+    """
+    if not folder_name or folder_name == "기본 폴더":
+        return []
+    names = {folder_name, sanitize_filename(folder_name)}
+    found = []
+    for base in (AUDIO_DIR, RESULT_DIR):
+        if not os.path.isdir(base):
+            continue
+        for root, dirs, _ in os.walk(base):
+            for d in dirs:
+                if d in names:
+                    found.append(os.path.join(root, d))
+    # 깊은 것부터 지워야 상위 디렉터리도 비워진 뒤에 정리된다
+    found.sort(key=lambda path: path.count(os.sep), reverse=True)
+    return found
+
+
+def remove_folder_dirs(folder_name: str) -> tuple:
+    """폴더의 실제 디렉터리를 지우고 (지운 목록, 남아 있던 항목 수) 를 돌려준다.
+
+    빈 디렉터리를 남겨 두면 감시 스레드가 폴더를 되살리므로 함께 정리한다. 서버가
+    모르는 파일이 남아 있으면 디렉터리를 그대로 둔다 — 사용자가 직접 넣은 것일 수 있다.
+    """
+    removed, leftover = [], 0
+    for target in folder_dirs_on_disk(folder_name):
+        if not os.path.isdir(target) or not is_managed_file(target):
+            continue
+        try:
+            # 안쪽의 빈 하위 디렉터리부터 걷어 내야 이 디렉터리도 비워진다
+            for root, dirs, _ in os.walk(target, topdown=False):
+                for d in dirs:
+                    try:
+                        os.rmdir(os.path.join(root, d))
+                    except OSError:
+                        pass
+            remaining = os.listdir(target)
+            if remaining:
+                leftover += len(remaining)
+                print(
+                    f"[FOLDER-DELETE-WARN] 남은 항목이 있어 디렉터리를 두었습니다: "
+                    f"{target} ({len(remaining)}개)",
+                    flush=True,
+                )
+                continue
+            os.rmdir(target)
+            removed.append(target)
+        except OSError as e:
+            print(f"[FOLDER-DELETE-WARN] 디렉터리 정리 실패 ({target}): {e}", flush=True)
+    return removed, leftover
 
 
 def purge_board_files(board: Board) -> bool:
@@ -1378,32 +1484,59 @@ def rename_folder(folder_id: int, req: FolderUpdate, db: Session = Depends(get_d
     return {"id": folder.id, "name": folder.name}
 
 @app.delete("/api/folders/{folder_id}")
-def delete_folder(folder_id: int, db: Session = Depends(get_db)):
+def delete_folder(folder_id: int, with_boards: bool = False, db: Session = Depends(get_db)):
+    """폴더를 지운다. 안에 있던 보드를 어떻게 할지는 `with_boards` 로 고른다.
+
+    with_boards=False (기본): 보드는 살려서 `기본 폴더` 로 옮긴다. 원본 오디오와 변환
+        텍스트도 함께 옮긴다 — 파일을 두고 오면 감시 스레드가 그 파일을 보고 지운 폴더를
+        곧바로 다시 만들어 낸다.
+    with_boards=True: 보드도 휴지통으로 보낸다. 파일은 `휴지통` 폴더로 옮겨지므로
+        휴지통에서 복원하면 원래 자리로 되돌아온다.
+    """
     folder = db.query(Folder).filter_by(id=folder_id).first()
     if not folder:
         raise HTTPException(status_code=404, detail="폴더를 찾을 수 없습니다.")
     if folder.name == "기본 폴더":
         raise HTTPException(status_code=400, detail="기본 폴더는 삭제할 수 없습니다.")
-    
-    # 소속 보드들을 기본 폴더로 이동
-    default_folder = db.query(Folder).filter_by(name="기본 폴더").first()
-    if default_folder:
-        db.query(Board).filter_by(folder_id=folder.id).update({Board.folder_id: default_folder.id})
 
     folder_name = folder.name
+    default_folder = get_or_create_folder(db, "기본 폴더")
+    boards = db.query(Board).filter_by(folder_id=folder.id).all()
+
+    moved_count = 0
+    trashed_count = 0
+    for b in boards:
+        if not with_boards:
+            move_board_files_to_folder(b, default_folder.name)
+            moved_count += 1
+        elif not b.is_deleted:
+            move_board_files_to_trash(b)
+            b.is_deleted = True
+            trashed_count += 1
+        # 폴더 행을 지우면 딸린 보드까지 같이 사라지므로(cascade) 반드시 먼저 옮겨 둔다
+        b.folder_id = default_folder.id
+    db.flush()
+
+    # 이 폴더에서만 쓰던 용어집은 폴더와 함께 정리한다 (남으면 주인 없는 행이 된다)
+    db.query(GlossaryTerm).filter_by(folder_id=folder.id).delete(synchronize_session=False)
+
     db.delete(folder)
     db.commit()
 
-    # 빈 디렉터리를 남겨 두면 감시 스레드가 폴더를 되살리므로 함께 정리한다
-    for base in (AUDIO_DIR, RESULT_DIR):
-        target = os.path.join(base, folder_name)
-        try:
-            if os.path.isdir(target) and not os.listdir(target):
-                os.rmdir(target)
-        except OSError:
-            pass
+    removed_dirs, leftover_files = remove_folder_dirs(folder_name)
+    print(
+        f"[FOLDER-DELETE] '{folder_name}' 폴더를 삭제했습니다 "
+        f"(보드 이동 {moved_count}개 / 휴지통 {trashed_count}개, 디렉터리 {len(removed_dirs)}개 정리)",
+        flush=True,
+    )
 
-    return {"ok": True}
+    return {
+        "ok": True,
+        "moved_boards": moved_count,
+        "trashed_boards": trashed_count,
+        "removed_dirs": len(removed_dirs),
+        "leftover_files": leftover_files,
+    }
 
 # -----------------
 # 2. Board Endpoints
