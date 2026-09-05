@@ -51,8 +51,6 @@ async function loadCurrentUser() {
 function goHome() {
     // 로고를 누르면 상세 화면·검색어·필터를 모두 처음 상태로 되돌린다
     closeUserMenu();
-    document.getElementById("dashboard-view").style.display = "flex";
-    document.getElementById("board-detail-view").style.display = "none";
     const search = document.getElementById("board-search-input");
     if (search) search.value = "";
     loadFolders();
@@ -141,6 +139,7 @@ function showToast(msg) {
 // 1. 필터 및 폴더 관리
 // -----------------------------------------
 function changeFilter(filterType) {
+    exitDetailView();          // 상세 화면에서 눌렀다면 목록으로 먼저 나온다
     currentFilter = filterType;
     currentFolderId = null;
 
@@ -224,6 +223,7 @@ function renderFolderList() {
 }
 
 function selectFolder(folderId, folderName) {
+    exitDetailView();          // 상세 화면에서 눌렀다면 목록으로 먼저 나온다
     currentFolderId = folderId;
     currentFilter = "folder";
 
@@ -233,9 +233,29 @@ function selectFolder(folderId, folderName) {
     loadBoards();
 }
 
-function showDashboard() {
+function stopPlayback() {
+    // 목록으로 나가면서 재생을 놔두면, 다른 보드를 열었을 때 이전 녹음이 계속 들린다
+    try {
+        audioPlayer.pause();
+        audioPlayer.currentTime = 0;
+    } catch (e) {
+        /* src 가 비어 있을 때는 무시한다 */
+    }
+}
+
+function exitDetailView() {
+    // 상세 화면에서 목록으로 빠져나오는 유일한 통로.
+    // 사이드바(전체/중요/미완료/휴지통/폴더)에서 불러도 화면이 같이 전환되도록 여기 한 곳에 모은다.
+    const detail = document.getElementById("board-detail-view");
+    if (detail.style.display === "none") return;   // 이미 목록이면 할 일이 없다
+    stopPlayback();
+    currentBoard = null;
+    detail.style.display = "none";
     document.getElementById("dashboard-view").style.display = "flex";
-    document.getElementById("board-detail-view").style.display = "none";
+}
+
+function showDashboard() {
+    exitDetailView();
     loadBoards();
     loadFolders();
 }
