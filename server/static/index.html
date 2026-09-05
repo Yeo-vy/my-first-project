@@ -13,13 +13,17 @@
         <!-- 좌측 사이드바 -->
         <aside id="sidebar">
             <div class="sidebar-header">
-                <div class="user-badge" id="user-badge" onclick="toggleUserMenu(event)" title="계정 메뉴">
-                    <div class="avatar" id="user-avatar">··</div>
-                    <div class="user-badge-text">
-                        <span class="brand-name">daglo AI</span>
-                        <span class="user-name" id="user-name">불러오는 중</span>
-                    </div>
-                    <i class="fa-solid fa-chevron-down user-badge-caret"></i>
+                <div class="user-badge" id="user-badge">
+                    <button type="button" class="brand-home" onclick="goHome()" title="메인으로 돌아가기">
+                        <div class="avatar" id="user-avatar">··</div>
+                        <div class="user-badge-text">
+                            <span class="brand-name">daglo AI</span>
+                            <span class="user-name" id="user-name">불러오는 중</span>
+                        </div>
+                    </button>
+                    <button type="button" class="user-badge-caret-btn" id="user-menu-btn" onclick="toggleUserMenu(event)" title="계정 메뉴">
+                        <i class="fa-solid fa-chevron-down user-badge-caret"></i>
+                    </button>
                 </div>
                 <div class="user-menu" id="user-menu">
                     <button class="user-menu-item" onclick="openPasswordModal()">

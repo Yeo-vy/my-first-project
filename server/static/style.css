@@ -59,16 +59,45 @@ body {
 .user-badge {
     display: flex;
     align-items: center;
-    gap: 10px;
-    padding: 4px 6px;
+    gap: 4px;
     margin: -4px -6px;
-    border-radius: 10px;
-    cursor: pointer;
     user-select: none;
+}
+
+.brand-home {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    flex: 1;
+    min-width: 0;
+    padding: 4px 6px;
+    border: none;
+    background: none;
+    border-radius: 10px;
+    font: inherit;
+    color: inherit;
+    text-align: left;
+    cursor: pointer;
     transition: background-color .15s;
 }
 
-.user-badge:hover {
+.brand-home:hover {
+    background-color: #f1f5f9;
+}
+
+.user-badge-caret-btn {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    padding: 8px;
+    border: none;
+    background: none;
+    border-radius: 8px;
+    cursor: pointer;
+    transition: background-color .15s;
+}
+
+.user-badge-caret-btn:hover {
     background-color: #f1f5f9;
 }
 
@@ -87,7 +116,6 @@ body {
 }
 
 .user-badge-caret {
-    margin-left: auto;
     font-size: 10px;
     color: var(--text-subtle);
 }
@@ -140,6 +168,7 @@ body {
 .user-badge .avatar {
     width: 38px;
     height: 38px;
+    flex-shrink: 0;
     background: linear-gradient(135deg, #10b981, #059669);
     color: white;
     font-size: 14px;

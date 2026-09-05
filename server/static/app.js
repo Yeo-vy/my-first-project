@@ -42,10 +42,21 @@ async function loadCurrentUser() {
         const name = currentUser.display_name || currentUser.username;
         document.getElementById("user-name").textContent = name;
         document.getElementById("user-avatar").textContent = name.slice(0, 2);
-        document.getElementById("user-badge").title = `${name} (${currentUser.username})`;
+        document.getElementById("user-menu-btn").title = `${name} (${currentUser.username})`;
     } catch (e) {
         /* 인터셉터가 401을 처리하므로 여기서는 조용히 넘어간다 */
     }
+}
+
+function goHome() {
+    // 로고를 누르면 상세 화면·검색어·필터를 모두 처음 상태로 되돌린다
+    closeUserMenu();
+    document.getElementById("dashboard-view").style.display = "flex";
+    document.getElementById("board-detail-view").style.display = "none";
+    const search = document.getElementById("board-search-input");
+    if (search) search.value = "";
+    loadFolders();
+    changeFilter("all");   // 전체 보드로 리셋하면서 목록도 다시 읽는다
 }
 
 function toggleUserMenu(event) {
