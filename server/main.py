@@ -31,6 +31,7 @@ from server.migrator import (
 )
 from server.ai_service import (
     GEMINI_TIMEOUT_MS,
+    group_by_sentence,
     GLOSSARY_MAX_TERMS,
     load_glossary_terms,
     resolve_end_times,
@@ -1919,14 +1920,19 @@ def update_transcript(board_id: int, req: TranscriptUpdateRequest, db: Session =
             sequence=idx
         )
         db.add(seg)
-        txt_lines.append(f"{seg.timestamp_str} {seg.content}")
+        txt_lines.append((start_ms, seg.speaker, seg.content))
     b.updated_at = datetime.datetime.utcnow()
     db.commit()
 
     if b.txt_path and os.path.isdir(os.path.dirname(b.txt_path)):
         try:
+            # txt 는 사람이 읽는 파일이라 1분 내외 문단으로 묶어 쓴다 (DB 세그먼트는 그대로 둔다)
+            paragraphs = [
+                f"[{ms_to_timestamp(start)}] {text}"
+                for start, _spk, text in group_by_sentence(txt_lines)
+            ]
             with open(b.txt_path, "w", encoding="utf-8") as f:
-                f.write("\n\n".join(txt_lines))
+                f.write("\n\n".join(paragraphs))
         except OSError as e:
             print(f"[TRANSCRIPT-WARN] Board #{board_id} txt save failed: {e}")
 
@@ -2159,12 +2165,14 @@ def export_board(
         media_type = "text/markdown; charset=utf-8"
         filename = f"{sanitize_filename(b.title)}.md"
     else:
+        # 예전에 촘촘하게 저장된 보드도 내보낼 때는 1분 내외 문단으로 묶어 준다
+        pieces = [(s.start_time_ms or 0, s.speaker or "화자 1", s.content) for s in b.segments]
         lines = []
-        for s in b.segments:
+        for start_ms, speaker, text in group_by_sentence(pieces):
             prefix = ""
-            if include_timestamps: prefix += f"{s.timestamp_str} "
-            if include_speakers and s.speaker: prefix += f"[{s.speaker}] "
-            lines.append(f"{prefix}{s.content}")
+            if include_timestamps: prefix += f"[{ms_to_timestamp(start_ms)}] "
+            if include_speakers and speaker: prefix += f"[{speaker}] "
+            lines.append(f"{prefix}{text}")
         content = "\n\n".join(lines)
         media_type = "text/plain; charset=utf-8"
         filename = f"{sanitize_filename(b.title)}.txt"

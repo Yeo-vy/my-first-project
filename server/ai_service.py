@@ -201,6 +201,54 @@ SUBTITLE_MAX_MS = 30 * 1000
 SUBTITLE_MIN_MS = 1000
 
 
+# 문장이 끝났는지 판단한다. 닫는 따옴표/괄호가 뒤에 붙어 있어도 문장 끝으로 본다.
+SENTENCE_END_PATTERN = re.compile('[.!?…。][”’")\\]]*$')
+
+# 자막 문단 하나가 담을 목표 길이와, 문장이 끝나지 않아도 강제로 끊는 상한
+PARAGRAPH_TARGET_MS = max(10_000, int(os.getenv("PARAGRAPH_TARGET_MS", "60000")))
+PARAGRAPH_MAX_MS = max(PARAGRAPH_TARGET_MS, int(os.getenv("PARAGRAPH_MAX_MS", "120000")))
+
+
+def group_by_sentence(items, target_ms: int = None, max_ms: int = None) -> list:
+    """짧은 조각들을 1분 내외의 문단으로 묶는다.
+
+    items: [(start_ms, speaker, text), ...]  (시간순)
+    반환:  [(start_ms, speaker, merged_text), ...]
+
+    딱 1분에서 자르면 말이 문장 중간에 끊겨 읽기 나빠진다. 그래서 1분을 넘긴 뒤
+    `처음 문장이 끝나는 곳`에서 끊는다. 받아쓰기에 마침표가 없어 문장 끝이 계속
+    안 나오는 구간을 대비해 max_ms 에서는 문장 중간이라도 강제로 끊는다.
+    화자가 바뀌면 길이와 무관하게 끊는다 (다른 사람 말을 한 문단에 담으면 안 된다).
+    """
+    target = PARAGRAPH_TARGET_MS if target_ms is None else target_ms
+    limit = PARAGRAPH_MAX_MS if max_ms is None else max_ms
+
+    groups = []
+    state = {"start": None, "speaker": None, "parts": []}
+
+    def flush():
+        if state["parts"]:
+            groups.append((state["start"], state["speaker"], " ".join(state["parts"])))
+        state["start"], state["parts"] = None, []
+
+    for item_start, item_speaker, text in items:
+        text = (text or "").strip()
+        if not text:
+            continue
+        if state["start"] is not None and item_speaker != state["speaker"]:
+            flush()
+        if state["start"] is None:
+            state["start"], state["speaker"] = item_start, item_speaker
+        state["parts"].append(text)
+
+        elapsed = item_start - state["start"]
+        if (elapsed >= target and SENTENCE_END_PATTERN.search(text)) or elapsed >= limit:
+            flush()
+
+    flush()
+    return groups
+
+
 def resolve_end_times(start_ms_list: List[int], total_ms: int = 0) -> List[int]:
     """세그먼트 시작 시각들로 서로 겹치지 않는 종료 시각을 계산한다.
 
@@ -441,10 +489,10 @@ def process_audio_file_to_board(board_id: int, audio_path: str, db_session_facto
         lines = full_transcript.strip().split('\n')
         db.query(TranscriptSegment).filter_by(board_id=board.id).delete()
 
-        seq = 0
+        # 먼저 (시각, 화자, 문장) 조각으로 훑는다. AI 는 한 문장씩 끊어 주기 때문에
+        # 이대로 저장하면 타임스탬프가 몇 초 간격으로 촘촘히 박혀 읽기 나쁘다.
+        pieces = []
         last_ms = 0
-        txt_lines = []
-        built = []
         for line in lines:
             line = line.strip()
             if not line:
@@ -452,31 +500,27 @@ def process_audio_file_to_board(board_id: int, audio_path: str, db_session_facto
             match = TIMESTAMP_PATTERN.search(line)
             if match:
                 ts = match.group(1)
-                t_ms = timestamp_to_seconds(ts) * 1000
-                last_ms = t_ms
-                clean = line.replace(f"[{ts}]", "").strip()
-                seg = TranscriptSegment(
-                    board_id=board.id,
-                    start_time_ms=t_ms,
-                    end_time_ms=t_ms,          # 아래에서 다음 문단 기준으로 다시 채운다
-                    timestamp_str=f"[{ts}]",
-                    speaker="화자 1",
-                    content=clean,
-                    sequence=seq
-                )
-                txt_lines.append(f"[{ts}] {clean}")
+                last_ms = timestamp_to_seconds(ts) * 1000
+                pieces.append((last_ms, "화자 1", line.replace(f"[{ts}]", "").strip()))
             else:
-                seg = TranscriptSegment(
-                    board_id=board.id,
-                    start_time_ms=last_ms,
-                    end_time_ms=last_ms,
-                    timestamp_str=ms_to_timestamp_str(last_ms),
-                    speaker="화자 1",
-                    content=line,
-                    sequence=seq
-                )
-                txt_lines.append(line)
-            built.append(seg)
+                pieces.append((last_ms, "화자 1", line))
+
+        # 1분 내외 + 문장이 끝나는 지점으로 묶어, 원본 타임스탬프 간격 자체를 넓힌다
+        seq = 0
+        txt_lines = []
+        built = []
+        for start_ms, speaker, text in group_by_sentence(pieces):
+            stamp = ms_to_timestamp_str(start_ms)
+            built.append(TranscriptSegment(
+                board_id=board.id,
+                start_time_ms=start_ms,
+                end_time_ms=start_ms,          # 아래에서 다음 문단 기준으로 다시 채운다
+                timestamp_str=stamp,
+                speaker=speaker,
+                content=text,
+                sequence=seq
+            ))
+            txt_lines.append(f"{stamp} {text}")
             seq += 1
 
         # 종료 시각은 이웃 문단을 봐야 정해지므로 다 만든 뒤에 한 번에 채운다 (SRT 자막 겹침 방지)

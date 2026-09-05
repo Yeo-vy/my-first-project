@@ -753,6 +753,12 @@ function renderTranscript(segments) {
         return;
     }
 
+    // 새로 변환한 보드는 서버가 이미 1분 내외 문단으로 묶어 주지만,
+    // 예전에 촘촘하게 저장된 보드는 문단마다 타임스탬프가 붙어 읽기 힘들다.
+    // `마지막으로 띄운 배지에서 1분이 지났을 때만` 다시 띄워 둘 다 자연스럽게 만든다.
+    // (분 단위로 자르면 01:10 / 01:55 처럼 같은 분에 걸친 문단의 배지가 잘못 사라진다)
+    let lastShownMs = null;
+
     segments.forEach((seg, idx) => {
         const block = document.createElement("div");
         block.className = "script-block";
@@ -761,9 +767,15 @@ function renderTranscript(segments) {
         block.dataset.speaker = seg.speaker || "화자 1";
         block.id = `seg-${seg.id || idx}`;
 
+        const startMs = seg.start_time_ms || 0;
+        const showTs = lastShownMs === null || startMs - lastShownMs >= 60000;
+        if (showTs) lastShownMs = startMs;
+
         block.innerHTML = `
             <div class="block-meta">
-                <span class="ts-badge" onclick="playAtMs(${seg.start_time_ms})">${seg.timestamp_str}</span>
+                ${showTs
+                    ? `<span class="ts-badge" onclick="playAtMs(${seg.start_time_ms})">${seg.timestamp_str}</span>`
+                    : ""}
                 <span class="speaker-badge" onclick="openSpeakerModalFor('${escapeHtml(seg.speaker || "화자 1")}')">${escapeHtml(seg.speaker || "화자 1")}</span>
             </div>
             <div class="text-content" contenteditable="true" spellcheck="false">${escapeHtml(seg.content)}</div>
@@ -909,12 +921,12 @@ function setupAudioListeners() {
         }
 
         if (active && active !== currentActiveBlock) {
+            // 재생 중에는 밑줄로 위치만 표시한다.
+            // 여기서 스크롤까지 하면 읽고 있던 자리가 계속 밀려나서, 화면을 따라가는 게 아니라
+            // 화면에 끌려다니게 된다. 스크롤은 사용자가 재생 바로 구간을 옮겼을 때만 한다.
             if (currentActiveBlock) currentActiveBlock.classList.remove("active");
             active.classList.add("active");
             currentActiveBlock = active;
-            if (!isUserEditing) {
-                active.scrollIntoView({ behavior: "smooth", block: "center" });
-            }
         }
     });
 
@@ -949,7 +961,20 @@ function onSeekInput(percent) {
 
 function onSeekChange(percent) {
     const durSec = audioPlayer.duration || currentBoard?.duration_seconds || 0;
-    audioPlayer.currentTime = (percent / 100) * durSec;
+    const targetSec = (percent / 100) * durSec;
+    audioPlayer.currentTime = targetSec;
+    scrollToBlockAt(targetSec * 1000);   // 구간을 건너뛴 것이므로 자막도 그 자리로 데려간다
+}
+
+function scrollToBlockAt(ms) {
+    // 해당 시각을 포함하는(= 시작 시각이 ms 를 넘지 않는 마지막) 자막 문단으로 스크롤한다.
+    // timeupdate 의 밑줄 갱신과 같은 규칙을 쓰므로 밑줄과 스크롤 위치가 어긋나지 않는다.
+    const blocks = document.querySelectorAll(".script-block[data-ms]");
+    let target = null;
+    for (let i = 0; i < blocks.length; i++) {
+        if (parseFloat(blocks[i].dataset.ms) <= ms) target = blocks[i];
+    }
+    if (target) target.scrollIntoView({ behavior: "smooth", block: "center" });
 }
 
 function changeSpeed(val) {

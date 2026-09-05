@@ -822,9 +822,14 @@ body {
     background-color: #f8fafc;
 }
 
-.script-block.active {
-    background-color: #eaf3ff;
-    border-left: 4px solid var(--primary-color);
+.script-block.active .text-content {
+    /* 재생 위치는 밑줄로만 알린다. 블록 배경/좌측 테두리는 시선을 너무 끌고,
+       테두리가 붙었다 떨어질 때 글이 좌우로 흔들려서 읽기 방해가 된다. */
+    text-decoration: underline;
+    text-decoration-color: var(--primary-color);
+    text-decoration-thickness: 2px;
+    text-underline-offset: 5px;
+    text-decoration-skip-ink: none;
 }
 
 .block-meta {
@@ -833,6 +838,8 @@ body {
     gap: 4px;
     flex-shrink: 0;
     align-items: flex-start;
+    /* 타임스탬프는 1분에 한 번만 뜨므로, 없는 문단에서도 본문 시작선이 밀리지 않게 폭을 잡아 둔다 */
+    min-width: 62px;
 }
 
 .ts-badge {
