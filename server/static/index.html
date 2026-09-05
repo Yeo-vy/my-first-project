@@ -364,6 +364,19 @@
         </div>
     </div>
 
+    <!-- 모달: 폴더 삭제 (안에 보드가 있으면 어떻게 할지 고른다) -->
+    <div id="folder-delete-modal" class="modal-backdrop" style="display: none;">
+        <div class="modal-card">
+            <h3 id="folder-delete-title">폴더 삭제</h3>
+            <p class="modal-desc" id="folder-delete-desc"></p>
+            <div class="modal-actions">
+                <button class="btn-secondary" onclick="closeDeleteFolderModal()">취소</button>
+                <button class="btn-secondary" id="folder-delete-keep-btn" onclick="submitDeleteFolder(false)">보드는 기본 폴더로</button>
+                <button class="primary-btn danger" id="folder-delete-trash-btn" onclick="submitDeleteFolder(true)">보드도 휴지통으로</button>
+            </div>
+        </div>
+    </div>
+
     <!-- 모달: 음성 파일 업로드 -->
     <div id="upload-modal" class="modal-backdrop" style="display: none;">
         <div class="modal-card">

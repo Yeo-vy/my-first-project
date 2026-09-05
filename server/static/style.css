@@ -270,12 +270,61 @@ body {
     color: #f59e0b;
 }
 
+.folder-item .folder-meta {
+    display: flex;
+    align-items: center;
+    gap: 4px;
+    flex-shrink: 0;
+}
+
 .folder-item .badge {
     font-size: 11px;
     color: var(--text-subtle);
     background-color: #f1f5f9;
     padding: 2px 6px;
     border-radius: 10px;
+}
+
+/* 삭제 버튼은 평소엔 숨겨 두고 폴더에 마우스를 올렸을 때만 보인다 */
+.folder-item .folder-del-btn {
+    background: none;
+    border: none;
+    padding: 2px 4px;
+    border-radius: 4px;
+    font-size: 11px;
+    color: var(--text-subtle);
+    cursor: pointer;
+    /* 평소엔 흐리게, 마우스를 올리면 또렷하게. 아예 숨기지 않는 이유는 두 가지다.
+       - hover 로만 나타나게 하면 터치 화면(태블릿)에서는 영영 누를 수 없다
+       - 숨어 있던 버튼은 나타나는 순간의 첫 클릭이 폴더 선택으로 새어 들어간다 */
+    opacity: 0.45;
+    transition: opacity 0.15s ease;
+}
+
+.folder-item:hover .folder-del-btn,
+.folder-item .folder-del-btn:focus-visible {
+    opacity: 1;
+}
+
+/* 삭제 버튼이 없는 기본 폴더도 개수 배지가 같은 자리에 오도록 자리를 채운다 */
+.folder-item .folder-del-spacer {
+    display: inline-block;
+    width: 19px;
+}
+
+.folder-item .folder-del-btn:hover {
+    background-color: #fee2e2;
+    color: var(--danger-color);
+}
+
+.primary-btn.danger {
+    background-color: var(--danger-color);
+    border-color: var(--danger-color);
+}
+
+.primary-btn.danger:hover {
+    background-color: #dc2626;
+    border-color: #dc2626;
 }
 
 .sidebar-footer {
