@@ -48,6 +48,75 @@ async function loadCurrentUser() {
     }
 }
 
+// -----------------------------------------
+// 0-1. 브라우저 뒤로/앞으로 (History API)
+// -----------------------------------------
+// 화면 전환을 주소창 기록으로 남겨서 크롬의 뒤로가기 버튼이 앱 안에서도 동작하게 한다.
+// 경로 대신 쿼리스트링(`/?board=3`)을 쓰는 이유: 서버 라우팅을 건드리지 않아도
+// 새로고침·즐겨찾기·링크 공유가 그대로 동작한다.
+
+function dashboardUrl(filter, folderId) {
+    if (folderId) return `?folder=${folderId}`;
+    if (filter && filter !== "all") return `?filter=${filter}`;
+    return location.pathname;   // 전체 보드는 쿼리 없이 깔끔하게 둔다
+}
+
+function pushHistory(state, url) {
+    const cur = history.state;
+    // 같은 화면을 다시 그린 것뿐이면(화자 이름 변경 후 재로드 등) 기록을 늘리지 않는다.
+    // 안 그러면 뒤로가기를 여러 번 눌러야 실제로 이전 화면이 나온다.
+    if (cur && cur.view === state.view && cur.boardId === state.boardId
+        && cur.filter === state.filter && cur.folderId === state.folderId) {
+        return;
+    }
+    // depth: 우리가 이 세션에서 직접 쌓은 항목 수. 0이면 뒤로 갈 곳이 앱 밖이라는 뜻이라
+    // 앱 안 뒤로가기 버튼이 history.back() 대신 목록을 직접 그려야 한다.
+    state.depth = ((cur && cur.depth) || 0) + 1;
+    history.pushState(state, "", url);
+}
+
+function onPopState(event) {
+    const state = event.state;
+    // record=false: 복원하는 중이므로 새 기록을 쌓지 않는다 (안 그러면 뒤로가기가 제자리걸음)
+    if (state && state.view === "board") {
+        openBoardDetail(state.boardId, false);
+    } else if (state && state.folderId) {
+        selectFolder(state.folderId, state.folderName || "폴더", false);
+    } else {
+        changeFilter((state && state.filter) || "all", false);
+    }
+}
+
+async function applyInitialRoute() {
+    // 주소창에 이미 들어 있는 상태(새로고침·공유 링크)를 첫 화면에 반영한다.
+    const params = new URLSearchParams(location.search);
+    const boardId = parseInt(params.get("board"), 10);
+    const folderId = parseInt(params.get("folder"), 10);
+    const filter = params.get("filter");
+
+    if (Number.isInteger(boardId)) {
+        history.replaceState({ view: "board", boardId, depth: 0 }, "", location.search);
+        await openBoardDetail(boardId, false);
+        return;
+    }
+    if (Number.isInteger(folderId)) {
+        const found = folders.find(f => f.id === folderId);
+        const name = found ? found.name : "폴더";
+        history.replaceState(
+            { view: "dashboard", filter: "folder", folderId, folderName: name, depth: 0 },
+            "", location.search
+        );
+        selectFolder(folderId, name, false);
+        return;
+    }
+    const initial = filter || "all";
+    history.replaceState(
+        { view: "dashboard", filter: initial, folderId: null, depth: 0 },
+        "", dashboardUrl(initial, null)
+    );
+    changeFilter(initial, false);
+}
+
 function goHome() {
     // 로고를 누르면 상세 화면·검색어·필터를 모두 처음 상태로 되돌린다
     closeUserMenu();
@@ -118,14 +187,17 @@ async function submitPasswordChange() {
 // -----------------------------------------
 // 초기화
 // -----------------------------------------
-document.addEventListener("DOMContentLoaded", () => {
+document.addEventListener("DOMContentLoaded", async () => {
     loadCurrentUser();
-    loadFolders();
-    loadBoards();
     setupAudioListeners();
     setupKeyboardShortcuts();
     startProcessingPoller();
     document.addEventListener("click", closeUserMenu);
+    window.addEventListener("popstate", onPopState);
+    // 폴더를 먼저 받아야 `?folder=3` 으로 들어왔을 때 폴더 이름을 제목에 띄울 수 있다.
+    // 목록 로드는 applyInitialRoute 안의 changeFilter/selectFolder 가 맡는다 (중복 호출 방지).
+    await loadFolders();
+    applyInitialRoute();
 });
 
 function showToast(msg) {
@@ -138,7 +210,7 @@ function showToast(msg) {
 // -----------------------------------------
 // 1. 필터 및 폴더 관리
 // -----------------------------------------
-function changeFilter(filterType) {
+function changeFilter(filterType, record = true) {
     exitDetailView();          // 상세 화면에서 눌렀다면 목록으로 먼저 나온다
     currentFilter = filterType;
     currentFolderId = null;
@@ -173,6 +245,10 @@ function changeFilter(filterType) {
     }
 
     loadBoards();
+    if (record) {
+        pushHistory({ view: "dashboard", filter: filterType, folderId: null },
+                    dashboardUrl(filterType, null));
+    }
 }
 
 async function loadFolders() {
@@ -222,7 +298,7 @@ function renderFolderList() {
     }
 }
 
-function selectFolder(folderId, folderName) {
+function selectFolder(folderId, folderName, record = true) {
     exitDetailView();          // 상세 화면에서 눌렀다면 목록으로 먼저 나온다
     currentFolderId = folderId;
     currentFilter = "folder";
@@ -231,6 +307,10 @@ function selectFolder(folderId, folderName) {
     document.getElementById("current-folder-title").textContent = folderName;
     renderFolderList();
     loadBoards();
+    if (record) {
+        pushHistory({ view: "dashboard", filter: "folder", folderId, folderName },
+                    dashboardUrl("folder", folderId));
+    }
 }
 
 function stopPlayback() {
@@ -255,8 +335,15 @@ function exitDetailView() {
 }
 
 function showDashboard() {
-    exitDetailView();
-    loadBoards();
+    // 우리가 쌓아 둔 기록이 있으면 진짜 '뒤로'를 눌러 준다.
+    // 앱 안 뒤로가기 버튼과 크롬 뒤로가기가 같은 자리로 가고, 기록도 한 겹만 쌓인다.
+    const state = history.state;
+    if (state && state.view === "board" && (state.depth || 0) > 0) {
+        history.back();        // popstate 가 목록 복원을 맡는다
+        return;
+    }
+    // 링크로 상세 화면에 바로 들어온 경우(뒤로 갈 곳이 앱 밖) 전체 보드를 직접 그린다
+    changeFilter("all");
     loadFolders();
 }
 
@@ -572,9 +659,15 @@ async function batchMoveBoards() {
 // -----------------------------------------
 // 4. 보드 상세 뷰 (2-패널)
 // -----------------------------------------
-async function openBoardDetail(boardId) {
+async function openBoardDetail(boardId, record = true) {
     try {
         const res = await fetch(`/api/boards/${boardId}`);
+        if (!res.ok) {
+            // 지운 보드로 '앞으로 가기' 를 눌렀을 때 빈 상세 화면이 뜨지 않게 막는다
+            showToast("보드를 찾을 수 없습니다.");
+            changeFilter("all");
+            return;
+        }
         currentBoard = await res.json();
 
         document.getElementById("dashboard-view").style.display = "none";
@@ -609,6 +702,10 @@ async function openBoardDetail(boardId) {
         renderBookmarks(currentBoard.bookmarks || []);
 
         document.getElementById("transcript-container").scrollTop = 0;
+
+        if (record) {
+            pushHistory({ view: "board", boardId }, `?board=${boardId}`);
+        }
     } catch (e) {
         console.error("보드 상세 로드 실패:", e);
     }
