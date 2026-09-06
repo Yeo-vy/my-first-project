@@ -48,10 +48,17 @@ class UploadWorker(
         val settings = DagloSettings(applicationContext)
         if (!settings.isConfigured) {
             // 서버 주소가 없으면 재시도해도 소용없다. 조용히 끝낸다.
+            UploadLog.mark(applicationContext, displayName, UploadState.FAILED, "서버 주소가 설정되지 않았습니다")
+            return@withContext Result.failure()
+        }
+        if (!settings.isLoggedIn) {
+            // 로그인해야 서버가 받아 준다. 다시 로그인하면 목록에서 [다시 보내기] 로 올릴 수 있다.
+            UploadLog.mark(applicationContext, displayName, UploadState.FAILED, "로그인이 필요합니다")
             return@withContext Result.failure()
         }
 
         _status.value = UploadStatus(uploadingName = displayName)
+        UploadLog.mark(applicationContext, displayName, UploadState.UPLOADING, "전송 중")
 
         val api = DagloApi(settings)
         val result = api.uploadRecording(
@@ -65,6 +72,7 @@ class UploadWorker(
         when (result) {
             is ApiResult.Success -> {
                 _status.value = UploadStatus(lastMessage = "서버로 보냈습니다: $displayName")
+                UploadLog.mark(applicationContext, displayName, UploadState.DONE, "서버로 보냄")
                 Result.success()
             }
             is ApiResult.Fatal -> {
@@ -72,6 +80,7 @@ class UploadWorker(
                     lastMessage = "업로드 실패: ${result.message}",
                     lastFailed = true
                 )
+                UploadLog.mark(applicationContext, displayName, UploadState.FAILED, result.message)
                 Result.failure()
             }
             is ApiResult.Retryable -> {
@@ -80,12 +89,20 @@ class UploadWorker(
                         lastMessage = "업로드를 여러 번 시도했지만 실패했습니다: ${result.message}",
                         lastFailed = true
                     )
+                    UploadLog.mark(
+                        applicationContext, displayName, UploadState.FAILED,
+                        "여러 번 시도했지만 실패: ${result.message}"
+                    )
                     Result.failure()
                 } else {
-                    // 녹음 파일은 폰에 그대로 남아 있으니, 나중에 수동으로 다시 올릴 수도 있다.
+                    // 녹음 파일은 태블릿에 그대로 남아 있으니, 나중에 수동으로 다시 올릴 수도 있다.
                     _status.value = UploadStatus(
                         lastMessage = "서버에 연결하지 못해 나중에 다시 시도합니다",
                         lastFailed = true
+                    )
+                    UploadLog.mark(
+                        applicationContext, displayName, UploadState.PENDING,
+                        "연결되면 다시 시도합니다"
                     )
                     Result.retry()
                 }
@@ -135,6 +152,9 @@ class UploadWorker(
                 )
                 .setBackoffCriteria(BackoffPolicy.EXPONENTIAL, 30, TimeUnit.SECONDS)
                 .build()
+
+            // 아직 못 보낸 상태로 목록에 표시된다. 실제 전송은 네트워크가 생기면 시작된다.
+            UploadLog.mark(context, displayName, UploadState.PENDING, "전송 대기 중")
 
             WorkManager.getInstance(context.applicationContext).enqueueUniqueWork(
                 WORK_PREFIX + displayName,

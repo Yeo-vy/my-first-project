@@ -20,6 +20,7 @@ import androidx.compose.animation.core.rememberInfiniteTransition
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
@@ -127,12 +128,12 @@ fun VoiceRecorderApp(viewModel: RecorderViewModel = viewModel()) {
     // 권한 승인 후 바로 녹음을 시작하기 위한 플래그
     var pendingRecordAfterPermission by remember { mutableStateOf(false) }
 
-    // 화면 전환 (daglo / 녹음 / 웹 화면 / 서버 설정). 화면 회전에도 유지되도록 rememberSaveable 사용.
-    // 앱의 첫 화면은 daglo 다 — 태블릿에서는 웹 서버와 같은 화면이 이 앱의 본체이고,
-    // 녹음은 그 화면에서 필요할 때 들어가는 통로다.
-    var currentScreen by rememberSaveable { mutableStateOf(SCREEN_DAGLO) }
+    // 화면 전환 (녹음 / daglo / 웹 화면 / 서버 설정). 화면 회전에도 유지되도록 rememberSaveable 사용.
+    // 이 태블릿은 녹음기로 쓰기 때문에 첫 화면은 녹음 화면이다. daglo 화면(변환 결과 확인)은
+    // 상단바의 지구본 버튼으로 들어간다.
+    var currentScreen by rememberSaveable { mutableStateOf(SCREEN_RECORDER) }
     // 설정 화면에서 뒤로 갈 자리 (녹음 화면에서 열었는지 daglo 화면에서 열었는지)
-    var settingsReturn by rememberSaveable { mutableStateOf(SCREEN_DAGLO) }
+    var settingsReturn by rememberSaveable { mutableStateOf(SCREEN_RECORDER) }
     val dagloViewModel: DagloBoardViewModel = viewModel()
 
     // 태블릿처럼 넓은 화면이면 폴더 목록과 녹음 목록을 좌우로 함께 띄운다.
@@ -280,7 +281,12 @@ fun VoiceRecorderApp(viewModel: RecorderViewModel = viewModel()) {
                     storageLocationLabel = viewModel.storageLocationLabel,
                     viewModel = viewModel,
                     isTwoPane = isTwoPane,
-                    onRecordOrRequest = { requestRecordOrStart() }
+                    onRecordOrRequest = { requestRecordOrStart() },
+                    onOpenDaglo = { currentScreen = SCREEN_DAGLO },
+                    onOpenSettings = {
+                        settingsReturn = SCREEN_RECORDER
+                        currentScreen = SCREEN_SETTINGS
+                    }
                 )
             }
 
@@ -395,9 +401,22 @@ private fun RecorderContent(
     storageLocationLabel: String,
     viewModel: RecorderViewModel,
     isTwoPane: Boolean,
-    onRecordOrRequest: () -> Unit
+    onRecordOrRequest: () -> Unit,
+    onOpenDaglo: () -> Unit,
+    onOpenSettings: () -> Unit
 ) {
-    Box(modifier = Modifier.fillMaxSize()) {
+    Column(modifier = Modifier.fillMaxSize()) {
+        // 녹음기로만 쓰는 태블릿에서는 '지금 자동 전송이 되는 상태인가'가 가장 중요한 정보다.
+        // 안 되는 상태면 화면 맨 위에 계속 띄워 둔다.
+        ServerStatusBanner(
+            serverConfigured = uiState.serverConfigured,
+            loggedIn = uiState.loggedIn,
+            autoUpload = uiState.autoUpload,
+            onOpenDaglo = onOpenDaglo,
+            onOpenSettings = onOpenSettings
+        )
+        // 배너를 뺀 나머지 높이를 목록이 다 쓰게 한다
+        Box(modifier = Modifier.weight(1f).fillMaxWidth()) {
         if (isTwoPane) {
             Row(modifier = Modifier.fillMaxSize()) {
                 Box(modifier = Modifier.width(340.dp)) {
@@ -428,6 +447,7 @@ private fun RecorderContent(
                     } else {
                         FolderDetailScreen(
                             recordings = uiState.recordings,
+                            uploadStates = uiState.uploadStates,
                             playingRecordingName = uiState.playingRecordingName,
                             isRecording = uiState.isRecording,
                             isPaused = uiState.isPaused,
@@ -465,6 +485,7 @@ private fun RecorderContent(
             } else {
                 FolderDetailScreen(
                     recordings = uiState.recordings,
+                    uploadStates = uiState.uploadStates,
                     playingRecordingName = uiState.playingRecordingName,
                     isRecording = uiState.isRecording,
                     isPaused = uiState.isPaused,
@@ -487,6 +508,90 @@ private fun RecorderContent(
                 )
             }
         }
+    }
+    }
+}
+
+/** 자동 전송이 막혀 있으면 이유와 해결 버튼을 같이 보여 준다. */
+@Composable
+private fun ServerStatusBanner(
+    serverConfigured: Boolean,
+    loggedIn: Boolean,
+    autoUpload: Boolean,
+    onOpenDaglo: () -> Unit,
+    onOpenSettings: () -> Unit
+) {
+    val (message, actionLabel, action) = when {
+        !serverConfigured ->
+            Triple("서버 주소를 넣어야 녹음이 daglo 로 전송됩니다", "설정", onOpenSettings)
+        !loggedIn ->
+            Triple("daglo 에 로그인해야 녹음이 자동 전송됩니다", "로그인", onOpenDaglo)
+        !autoUpload ->
+            Triple("자동 전송이 꺼져 있습니다", "설정", onOpenSettings)
+        else -> return
+    }
+
+    Surface(color = RecordingRed.copy(alpha = 0.10f), modifier = Modifier.fillMaxWidth()) {
+        Row(
+            modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 10.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Icon(
+                imageVector = Icons.Default.CloudOff,
+                contentDescription = null,
+                tint = RecordingRed,
+                modifier = Modifier.size(18.dp)
+            )
+            Spacer(modifier = Modifier.width(10.dp))
+            Text(
+                text = message,
+                modifier = Modifier.weight(1f),
+                style = MaterialTheme.typography.bodyMedium
+            )
+            TextButton(onClick = action) { Text(actionLabel) }
+        }
+    }
+}
+
+/**
+ * 이 녹음이 서버로 갔는지 한 줄로 보여 준다.
+ *
+ * 실패했을 때는 눌러서 바로 다시 보낼 수 있다 — 강의실 와이파이가 끊겼거나 서버 PC 가 꺼져
+ * 있었던 경우가 대부분이라, 목록에서 그 자리에서 해결되는 편이 낫다.
+ */
+@Composable
+private fun UploadBadge(record: UploadRecord?, onRetry: () -> Unit) {
+    if (record == null) return   // 이 앱으로 올린 적 없는 파일 (예전 녹음 등)
+
+    val label = when (record.state) {
+        UploadState.PENDING -> "전송 대기 중"
+        UploadState.UPLOADING -> "전송 중..."
+        UploadState.DONE -> "daglo 로 전송됨"
+        UploadState.FAILED -> "전송 실패 — 눌러서 다시 보내기"
+    }
+    val color = when (record.state) {
+        UploadState.DONE -> Color(0xFF16A34A)
+        UploadState.FAILED -> RecordingRed
+        else -> TextSecondary
+    }
+
+    Spacer(modifier = Modifier.height(4.dp))
+    Row(
+        verticalAlignment = Alignment.CenterVertically,
+        modifier = if (record.state == UploadState.FAILED) {
+            Modifier.clickable { onRetry() }
+        } else {
+            Modifier
+        }
+    ) {
+        val icon = when (record.state) {
+            UploadState.DONE -> Icons.Default.CloudDone
+            UploadState.FAILED -> Icons.Default.CloudOff
+            else -> Icons.Default.CloudUpload
+        }
+        Icon(imageVector = icon, contentDescription = null, tint = color, modifier = Modifier.size(14.dp))
+        Spacer(modifier = Modifier.width(5.dp))
+        Text(text = label, style = MaterialTheme.typography.bodySmall, color = color)
     }
 }
 
@@ -642,6 +747,7 @@ fun FolderCard(
 @Composable
 fun FolderDetailScreen(
     recordings: List<RecordingItem>,
+    uploadStates: Map<String, UploadRecord>,
     playingRecordingName: String?,
     isRecording: Boolean,
     isPaused: Boolean,
@@ -674,6 +780,7 @@ fun FolderDetailScreen(
                 items(recordings, key = { it.displayName }) { item ->
                     RecordingCard(
                         item = item,
+                        uploadRecord = uploadStates[item.displayName],
                         isPlaying = playingRecordingName == item.displayName,
                         onClick = { onRecordingClick(item) },
                         onLongClick = { onRecordingLongClick(item) },
@@ -723,6 +830,7 @@ fun FolderDetailScreen(
 @Composable
 fun RecordingCard(
     item: RecordingItem,
+    uploadRecord: UploadRecord?,
     isPlaying: Boolean,
     onClick: () -> Unit,
     onLongClick: () -> Unit,
@@ -789,6 +897,7 @@ fun RecordingCard(
                         style = MaterialTheme.typography.bodyMedium,
                         color = TextSecondary
                     )
+                    UploadBadge(record = uploadRecord, onRetry = onUploadClick)
                 }
             }
 

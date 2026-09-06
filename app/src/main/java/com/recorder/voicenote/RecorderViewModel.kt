@@ -58,6 +58,10 @@ data class RecorderUiState(
     // ---- daglo 서버 연동 ----
     val serverUrl: String = "",
     val loginPath: String = DagloSettings.DEFAULT_LOGIN_PATH,
+    /** 서버에 로그인해 둔 세션이 있는지 (없으면 자동 전송이 안 된다) */
+    val loggedIn: Boolean = false,
+    /** 녹음 파일 이름 -> 서버 전송 상태 */
+    val uploadStates: Map<String, UploadRecord> = emptyMap(),
     val autoUpload: Boolean = true,
     /** 서버 주소가 채워져 있는지 (앱 안 daglo 화면·업로드 사용 가능 여부) */
     val serverConfigured: Boolean = false,
@@ -107,8 +111,17 @@ class RecorderViewModel(application: Application) : AndroidViewModel(application
             serverUrl = settings.serverUrl,
             loginPath = settings.loginPath,
             autoUpload = settings.autoUpload,
-            serverConfigured = settings.isConfigured
+            serverConfigured = settings.isConfigured,
+            loggedIn = settings.isLoggedIn,
+            uploadStates = UploadLog.all(getApplication())
         )
+
+        // 전송 상태가 바뀔 때마다(백그라운드 업로드 포함) 목록의 배지를 다시 그린다.
+        viewModelScope.launch {
+            UploadLog.version.collect {
+                _uiState.value = _uiState.value.copy(uploadStates = UploadLog.all(getApplication()))
+            }
+        }
 
         // 업로드는 WorkManager 가 백그라운드에서 돌리므로, 진행/결과를 구독해서 화면에 알린다.
         viewModelScope.launch {
@@ -424,6 +437,8 @@ class RecorderViewModel(application: Application) : AndroidViewModel(application
 
         when (val result = store.deleteRecording(item)) {
             is DeleteRecordingResult.Success -> {
+                // 지운 파일의 전송 기록은 남겨 둘 이유가 없다 (서버 쪽 파일은 그대로다)
+                UploadLog.forget(getApplication(), item.displayName)
                 // 마지막 파일을 지워서 0개가 되어도 폴더 자체는 앱 목록에 계속 남도록 한다.
                 if (folder != null) store.keepFolderRegistered(folder)
                 refreshRecordings()
@@ -522,6 +537,12 @@ class RecorderViewModel(application: Application) : AndroidViewModel(application
             refreshRecordings()
         }
         refreshFolders()
+        // daglo 화면에서 로그인/로그아웃하고 돌아왔을 수 있다
+        _uiState.value = _uiState.value.copy(
+            serverConfigured = settings.isConfigured,
+            loggedIn = settings.isLoggedIn,
+            uploadStates = UploadLog.all(getApplication())
+        )
     }
 
     // ----------------------------------------------------------------------------------
