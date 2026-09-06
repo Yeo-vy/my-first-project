@@ -1619,3 +1619,123 @@ body {
         -webkit-overflow-scrolling: touch;
     }
 }
+
+
+/* -----------------------------------------
+   웹에서 바로 녹음 (MediaRecorder)
+   ----------------------------------------- */
+.record-btn {
+    width: 100%;
+    padding: 11px;
+    margin-bottom: 8px;
+    border: 1px solid var(--border-color);
+    border-radius: 10px;
+    background-color: var(--bg-card);
+    color: var(--text-main);
+    font-size: 14px;
+    font-weight: 600;
+    cursor: pointer;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 8px;
+    transition: all 0.15s;
+}
+
+.record-btn:hover {
+    border-color: var(--danger-color);
+    color: var(--danger-color);
+}
+
+.record-card {
+    width: 420px;
+}
+
+.record-stage {
+    margin: 18px 0 14px;
+    padding: 18px;
+    border-radius: 12px;
+    background-color: var(--bg-main);
+    text-align: center;
+}
+
+.record-time {
+    font-size: 34px;
+    font-weight: 700;
+    letter-spacing: 1px;
+    font-variant-numeric: tabular-nums;
+    color: var(--text-main);
+}
+
+.record-level {
+    height: 6px;
+    margin: 14px 0 10px;
+    border-radius: 3px;
+    background-color: var(--border-color);
+    overflow: hidden;
+}
+
+.record-level-fill {
+    height: 100%;
+    width: 0%;
+    border-radius: 3px;
+    background-color: var(--primary-color);
+    transition: width 0.1s linear;
+}
+
+.record-state {
+    font-size: 12.5px;
+    color: var(--text-muted);
+}
+
+.record-state.recording {
+    color: var(--danger-color);
+    font-weight: 600;
+}
+
+.record-controls {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 10px;
+}
+
+.record-main-btn {
+    display: flex;
+    align-items: center;
+    gap: 9px;
+    padding: 12px 22px;
+    border: none;
+    border-radius: 30px;
+    background-color: var(--danger-color);
+    color: #fff;
+    font-size: 15px;
+    font-weight: 700;
+    cursor: pointer;
+}
+
+.record-main-btn:disabled {
+    background-color: var(--border-hover);
+    cursor: not-allowed;
+}
+
+.record-main-btn.stop {
+    background-color: var(--text-main);
+}
+
+.record-warning {
+    margin-top: 14px;
+    padding: 11px 13px;
+    border-radius: 9px;
+    background-color: #fef2f2;
+    color: var(--danger-color);
+    font-size: 12.5px;
+    line-height: 1.6;
+}
+
+/* 녹음 중에는 사이드바 버튼도 상태를 보여 준다 */
+.record-btn.active {
+    border-color: var(--danger-color);
+    background-color: #fef2f2;
+    color: var(--danger-color);
+}

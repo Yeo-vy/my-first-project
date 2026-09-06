@@ -67,6 +67,9 @@
             </div>
 
             <div class="sidebar-footer">
+                <button class="record-btn" onclick="openRecordModal()">
+                    <i class="fa-solid fa-microphone"></i> 녹음하기
+                </button>
                 <button class="new-task-btn" onclick="openUploadModal()">
                     <i class="fa-solid fa-plus"></i> 새 받아쓰기
                 </button>
@@ -86,6 +89,9 @@
                         <button class="btn-secondary" id="refresh-boards-btn" onclick="refreshBoards()"
                                 title="녹음 폴더를 지금 다시 읽어 목록을 최신 상태로 맞춥니다">
                             <i class="fa-solid fa-rotate" id="refresh-boards-icon"></i> 새로고침
+                        </button>
+                        <button class="btn-secondary" onclick="openRecordModal()" title="이 기기의 마이크로 바로 녹음합니다">
+                            <i class="fa-solid fa-microphone"></i> 녹음
                         </button>
                         <button class="primary-btn" onclick="openUploadModal()">
                             <i class="fa-solid fa-plus"></i> 새 받아쓰기
@@ -377,6 +383,45 @@
                 <button class="btn-secondary" onclick="closeDeleteFolderModal()">취소</button>
                 <button class="btn-secondary" id="folder-delete-keep-btn" onclick="submitDeleteFolder(false)">보드는 기본 폴더로</button>
                 <button class="primary-btn danger" id="folder-delete-trash-btn" onclick="submitDeleteFolder(true)">보드도 휴지통으로</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- 모달: 브라우저에서 바로 녹음 -->
+    <div id="record-modal" class="modal-backdrop" style="display: none;">
+        <div class="modal-card record-card">
+            <h3>녹음하기</h3>
+            <p class="modal-desc" id="record-desc">
+                이 기기의 마이크로 녹음합니다. 정지하면 선택한 폴더로 올라가고 바로 받아쓰기가 시작됩니다.
+                <br><b>긴 녹음(강의 등)은 태블릿의 daglo 앱을 쓰세요.</b> 브라우저 녹음은 화면을 끄거나
+                다른 탭으로 옮기면 끊길 수 있습니다.
+            </p>
+
+            <div class="form-group" id="record-folder-group">
+                <label>저장할 폴더</label>
+                <select id="record-folder-select"></select>
+            </div>
+
+            <div class="record-stage">
+                <div class="record-time" id="record-time">00:00:00</div>
+                <div class="record-level"><div class="record-level-fill" id="record-level-fill"></div></div>
+                <div class="record-state" id="record-state">준비됨</div>
+            </div>
+
+            <div class="record-controls">
+                <button class="record-main-btn" id="record-main-btn" onclick="toggleRecording()">
+                    <i class="fa-solid fa-microphone" id="record-main-icon"></i>
+                    <span id="record-main-label">녹음 시작</span>
+                </button>
+                <button class="btn-secondary" id="record-pause-btn" onclick="togglePauseRecording()" style="display:none;">
+                    <i class="fa-solid fa-pause" id="record-pause-icon"></i> <span id="record-pause-label">일시정지</span>
+                </button>
+            </div>
+
+            <p class="record-warning" id="record-warning" style="display:none;"></p>
+
+            <div class="modal-actions">
+                <button class="btn-secondary" onclick="closeRecordModal()">닫기</button>
             </div>
         </div>
     </div>

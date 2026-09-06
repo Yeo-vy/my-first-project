@@ -292,9 +292,15 @@ function renderFolderList() {
         container.appendChild(item);
     });
 
+    const optionsHtml = folders.map(f => `<option value="${f.id}">${escapeHtml(f.name)}</option>`).join("");
     const uploadSelect = document.getElementById("upload-folder-select");
-    if (uploadSelect) {
-        uploadSelect.innerHTML = folders.map(f => `<option value="${f.id}">${escapeHtml(f.name)}</option>`).join("");
+    if (uploadSelect) uploadSelect.innerHTML = optionsHtml;
+    // 녹음 모달도 같은 폴더 목록을 쓴다
+    const recordSelect = document.getElementById("record-folder-select");
+    if (recordSelect) {
+        const keep = recordSelect.value;
+        recordSelect.innerHTML = optionsHtml;
+        if (keep) recordSelect.value = keep;
     }
 }
 
@@ -1671,4 +1677,380 @@ function updateRetranscribeBtn(board) {
 function escapeHtml(str) {
     if (!str) return "";
     return str.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;").replace(/'/g, "&#039;");
+}
+
+// -----------------------------------------
+// 10. 브라우저에서 바로 녹음하기
+// -----------------------------------------
+// 태블릿을 녹음기로 쓰기 위해 앱을 따로 두는 대신, 이 화면에서 바로 녹음해서 그대로 올린다.
+// 정지하면 업로드 API 로 보내므로 그다음(변환·스크립트)은 파일을 넣었을 때와 완전히 같다.
+//
+// 주의: getUserMedia 는 보안 컨텍스트(https 또는 localhost)에서만 동작한다.
+// 집 안 LAN 의 http:// 로 들어오면 브라우저가 마이크 자체를 막으므로, 그때는 이유를 화면에 적어 준다.
+
+let mediaRecorder = null;
+let recordChunks = [];
+let recordStream = null;
+let recordMimeType = "";
+let recordTimerId = null;
+let recordStartedAt = 0;      // 이번 구간이 시작된 시각
+let recordElapsedMs = 0;      // 일시정지로 끊긴 구간까지 합친 길이
+let recordAudioCtx = null;
+let recordAnalyser = null;
+let recordLevelRaf = null;
+let recordWakeLock = null;
+let recordUploading = false;
+
+/** 브라우저가 녹음을 지원하고, 마이크를 열 수 있는 상태인지 */
+function recordingUnavailableReason() {
+    if (!window.isSecureContext) {
+        return "이 주소(http)에서는 브라우저가 마이크를 열어 주지 않습니다. " +
+            "태블릿에서는 daglo 앱의 [녹음] 을 쓰세요 — 앱은 화면을 꺼도 녹음이 이어집니다. " +
+            "이 화면에서 녹음하려면 서버 PC 에서 http://localhost 로 열거나 https 로 접속하세요.";
+    }
+    if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+        return "이 브라우저는 마이크 녹음을 지원하지 않습니다.";
+    }
+    if (typeof MediaRecorder === "undefined") {
+        return "이 브라우저는 MediaRecorder 를 지원하지 않습니다.";
+    }
+    return null;
+}
+
+/** 브라우저마다 만들 수 있는 형식이 다르다. 서버가 받는 것 중 되는 것을 고른다. */
+function pickRecordMimeType() {
+    const candidates = [
+        "audio/mp4",                 // 사파리 계열
+        "audio/webm;codecs=opus",    // 크롬 계열 (갤럭시 탭 포함)
+        "audio/webm",
+        "audio/ogg;codecs=opus",
+    ];
+    for (const type of candidates) {
+        if (MediaRecorder.isTypeSupported && MediaRecorder.isTypeSupported(type)) return type;
+    }
+    return "";
+}
+
+function extensionForMime(mime) {
+    if (!mime) return ".webm";
+    if (mime.includes("mp4")) return ".m4a";
+    if (mime.includes("ogg")) return ".ogg";
+    return ".webm";
+}
+
+function openRecordModal() {
+    const select = document.getElementById("record-folder-select");
+    select.innerHTML = folders.map(f => `<option value="${f.id}">${escapeHtml(f.name)}</option>`).join("");
+    // 지금 보고 있는 폴더가 있으면 그 폴더를 기본값으로 (그 폴더에 넣으려고 들어온 경우가 많다)
+    if (currentFolderId) select.value = String(currentFolderId);
+
+    const reason = recordingUnavailableReason();
+    const warning = document.getElementById("record-warning");
+    const mainBtn = document.getElementById("record-main-btn");
+    if (reason) {
+        warning.style.display = "block";
+        warning.textContent = reason;
+        mainBtn.disabled = true;
+    } else {
+        warning.style.display = "none";
+        mainBtn.disabled = false;
+    }
+
+    document.getElementById("record-modal").style.display = "flex";
+}
+
+function closeRecordModal() {
+    // 녹음 중에 닫아도 녹음은 계속된다 (실수로 닫아 통째로 날리는 것을 막는다).
+    document.getElementById("record-modal").style.display = "none";
+    if (isRecordingNow()) {
+        showToast("녹음은 계속되고 있습니다. 사이드바의 [녹음하기] 로 다시 열 수 있습니다.");
+    }
+}
+
+function isRecordingNow() {
+    return !!mediaRecorder && mediaRecorder.state !== "inactive";
+}
+
+function toggleRecording() {
+    if (isRecordingNow()) stopRecording();
+    else startRecording();
+}
+
+async function startRecording() {
+    const reason = recordingUnavailableReason();
+    if (reason) {
+        alert(reason);
+        return;
+    }
+
+    try {
+        recordStream = await navigator.mediaDevices.getUserMedia({
+            audio: {
+                channelCount: 1,
+                echoCancellation: false,   // 강의·회의 녹음이라 원음을 그대로 남긴다
+                noiseSuppression: false,
+                autoGainControl: true,
+            },
+        });
+    } catch (e) {
+        const denied = e && (e.name === "NotAllowedError" || e.name === "SecurityError");
+        alert(denied
+            ? "마이크 사용이 거부되었습니다. 브라우저 주소창의 자물쇠(또는 설정)에서 마이크를 허용해 주세요."
+            : "마이크를 열지 못했습니다: " + (e && e.message ? e.message : e));
+        return;
+    }
+
+    recordMimeType = pickRecordMimeType();
+    try {
+        mediaRecorder = recordMimeType
+            ? new MediaRecorder(recordStream, { mimeType: recordMimeType, audioBitsPerSecond: 64000 })
+            : new MediaRecorder(recordStream);
+    } catch (e) {
+        stopStreamTracks();
+        alert("녹음을 시작하지 못했습니다: " + (e && e.message ? e.message : e));
+        return;
+    }
+    recordMimeType = mediaRecorder.mimeType || recordMimeType;
+
+    recordChunks = [];
+    mediaRecorder.ondataavailable = (event) => {
+        if (event.data && event.data.size > 0) recordChunks.push(event.data);
+    };
+    mediaRecorder.onstop = () => { finishRecording(); };
+    mediaRecorder.onerror = (event) => {
+        console.error("녹음 오류:", event);
+        showToast("녹음이 중단되었습니다. 그때까지 녹음된 내용은 저장합니다.");
+        if (mediaRecorder.state !== "inactive") mediaRecorder.stop();
+    };
+
+    // 1초마다 조각을 받아 둔다. 조각이 쌓여 있으면 오류로 끊겨도 그때까지는 남는다.
+    mediaRecorder.start(1000);
+
+    recordElapsedMs = 0;
+    recordStartedAt = Date.now();
+    startRecordTimer();
+    startLevelMeter();
+    requestWakeLock();
+    window.addEventListener("beforeunload", warnWhileRecording);
+
+    setRecordUiRecording(true);
+    showToast("녹음을 시작했습니다.");
+}
+
+function togglePauseRecording() {
+    if (!isRecordingNow()) return;
+    if (mediaRecorder.state === "recording") {
+        mediaRecorder.pause();
+        recordElapsedMs += Date.now() - recordStartedAt;
+        document.getElementById("record-pause-icon").className = "fa-solid fa-play";
+        document.getElementById("record-pause-label").textContent = "이어서 녹음";
+        setRecordState("일시정지됨", false);
+    } else if (mediaRecorder.state === "paused") {
+        mediaRecorder.resume();
+        recordStartedAt = Date.now();
+        document.getElementById("record-pause-icon").className = "fa-solid fa-pause";
+        document.getElementById("record-pause-label").textContent = "일시정지";
+        setRecordState("녹음 중", true);
+    }
+}
+
+function stopRecording() {
+    if (!isRecordingNow()) return;
+    if (mediaRecorder.state === "recording") recordElapsedMs += Date.now() - recordStartedAt;
+    setRecordState("마무리하는 중...", false);
+    mediaRecorder.stop();   // onstop -> finishRecording()
+}
+
+/** 정지한 뒤: 조각을 하나로 합쳐 서버로 올린다. */
+async function finishRecording() {
+    stopRecordTimer();
+    stopLevelMeter();
+    stopStreamTracks();
+    releaseWakeLock();
+    window.removeEventListener("beforeunload", warnWhileRecording);
+
+    const chunks = recordChunks;
+    recordChunks = [];
+    mediaRecorder = null;
+
+    setRecordUiRecording(false);
+
+    if (!chunks.length) {
+        setRecordState("녹음된 내용이 없습니다", false);
+        return;
+    }
+
+    const blob = new Blob(chunks, { type: recordMimeType || "audio/webm" });
+    const select = document.getElementById("record-folder-select");
+    const folderId = select.value;
+    const folderName = select.options[select.selectedIndex]
+        ? select.options[select.selectedIndex].text
+        : "기본 폴더";
+    const fileName = `${folderName}_${recordingStamp()}${extensionForMime(recordMimeType)}`;
+
+    const formData = new FormData();
+    formData.append("file", blob, fileName);
+    if (folderId) formData.append("folder_id", folderId);
+
+    recordUploading = true;
+    setRecordState(`올리는 중... (${Math.round(blob.size / (1024 * 1024) * 10) / 10}MB)`, false);
+    document.getElementById("record-main-btn").disabled = true;
+
+    try {
+        const res = await fetch("/api/boards/upload", { method: "POST", body: formData });
+        const data = await res.json().catch(() => ({}));
+        if (!res.ok) {
+            setRecordState("업로드 실패", false);
+            alert(data.detail || "녹음을 올리지 못했습니다.");
+            return;
+        }
+        setRecordState("올렸습니다. 변환이 시작됩니다.", false);
+        showToast("녹음을 올렸습니다. 받아쓰기가 시작됩니다.");
+        document.getElementById("record-time").textContent = "00:00:00";
+        loadBoards();
+        loadFolders();
+    } catch (e) {
+        setRecordState("업로드 실패", false);
+        alert("녹음을 올리는 중 오류가 발생했습니다.");
+    } finally {
+        recordUploading = false;
+        document.getElementById("record-main-btn").disabled = false;
+    }
+}
+
+/** 파일 이름에 쓰는 시각 (앱이 쓰던 규칙과 같게 [폴더명]_YYYYMMDD_HHMMSS) */
+function recordingStamp() {
+    const now = new Date();
+    const pad = (n) => String(n).padStart(2, "0");
+    return `${now.getFullYear()}${pad(now.getMonth() + 1)}${pad(now.getDate())}_` +
+        `${pad(now.getHours())}${pad(now.getMinutes())}${pad(now.getSeconds())}`;
+}
+
+function setRecordUiRecording(recording) {
+    const mainBtn = document.getElementById("record-main-btn");
+    const icon = document.getElementById("record-main-icon");
+    const label = document.getElementById("record-main-label");
+    const pauseBtn = document.getElementById("record-pause-btn");
+    const sidebarBtn = document.querySelector(".record-btn");
+
+    if (recording) {
+        mainBtn.classList.add("stop");
+        icon.className = "fa-solid fa-stop";
+        label.textContent = "정지하고 올리기";
+        pauseBtn.style.display = "";
+        document.getElementById("record-pause-icon").className = "fa-solid fa-pause";
+        document.getElementById("record-pause-label").textContent = "일시정지";
+        setRecordState("녹음 중", true);
+        if (sidebarBtn) sidebarBtn.classList.add("active");
+    } else {
+        mainBtn.classList.remove("stop");
+        icon.className = "fa-solid fa-microphone";
+        label.textContent = "녹음 시작";
+        pauseBtn.style.display = "none";
+        if (sidebarBtn) sidebarBtn.classList.remove("active");
+    }
+}
+
+function setRecordState(text, recording) {
+    const el = document.getElementById("record-state");
+    if (!el) return;
+    el.textContent = text;
+    el.classList.toggle("recording", !!recording);
+}
+
+function startRecordTimer() {
+    stopRecordTimer();
+    recordTimerId = setInterval(() => {
+        const running = mediaRecorder && mediaRecorder.state === "recording";
+        const total = recordElapsedMs + (running ? Date.now() - recordStartedAt : 0);
+        document.getElementById("record-time").textContent = formatLongTime(total);
+    }, 250);
+}
+
+function stopRecordTimer() {
+    if (recordTimerId) clearInterval(recordTimerId);
+    recordTimerId = null;
+}
+
+function formatLongTime(ms) {
+    const total = Math.floor(ms / 1000);
+    const pad = (n) => String(n).padStart(2, "0");
+    return `${pad(Math.floor(total / 3600))}:${pad(Math.floor((total % 3600) / 60))}:${pad(total % 60)}`;
+}
+
+/** 마이크가 실제로 소리를 받고 있는지 눈으로 확인할 수 있게 입력 레벨을 그린다. */
+function startLevelMeter() {
+    try {
+        const Ctx = window.AudioContext || window.webkitAudioContext;
+        recordAudioCtx = new Ctx();
+        const source = recordAudioCtx.createMediaStreamSource(recordStream);
+        recordAnalyser = recordAudioCtx.createAnalyser();
+        recordAnalyser.fftSize = 512;
+        source.connect(recordAnalyser);
+
+        const buffer = new Uint8Array(recordAnalyser.frequencyBinCount);
+        const fill = document.getElementById("record-level-fill");
+        const draw = () => {
+            recordAnalyser.getByteTimeDomainData(buffer);
+            let peak = 0;
+            for (let i = 0; i < buffer.length; i++) {
+                peak = Math.max(peak, Math.abs(buffer[i] - 128));
+            }
+            const percent = Math.min(100, Math.round((peak / 128) * 160));
+            if (fill) fill.style.width = percent + "%";
+            recordLevelRaf = requestAnimationFrame(draw);
+        };
+        draw();
+    } catch (e) {
+        /* 레벨 표시는 있으면 좋은 것이라, 실패해도 녹음은 계속한다 */
+    }
+}
+
+function stopLevelMeter() {
+    if (recordLevelRaf) cancelAnimationFrame(recordLevelRaf);
+    recordLevelRaf = null;
+    const fill = document.getElementById("record-level-fill");
+    if (fill) fill.style.width = "0%";
+    if (recordAudioCtx) {
+        try { recordAudioCtx.close(); } catch (e) {}
+        recordAudioCtx = null;
+    }
+    recordAnalyser = null;
+}
+
+function stopStreamTracks() {
+    if (!recordStream) return;
+    recordStream.getTracks().forEach(track => { try { track.stop(); } catch (e) {} });
+    recordStream = null;
+}
+
+/** 녹음 중에는 화면이 꺼지지 않게 한다 (태블릿을 세워 두고 쓰는 경우가 많다). */
+async function requestWakeLock() {
+    try {
+        if (navigator.wakeLock && navigator.wakeLock.request) {
+            recordWakeLock = await navigator.wakeLock.request("screen");
+        }
+    } catch (e) {
+        /* 지원하지 않는 브라우저면 그냥 넘어간다 */
+    }
+}
+
+function releaseWakeLock() {
+    if (!recordWakeLock) return;
+    try { recordWakeLock.release(); } catch (e) {}
+    recordWakeLock = null;
+}
+
+// 화면을 잠갔다 돌아오면 wake lock 이 풀려 있다. 녹음 중이면 다시 잡는다.
+document.addEventListener("visibilitychange", () => {
+    if (document.visibilityState === "visible" && isRecordingNow() && !recordWakeLock) {
+        requestWakeLock();
+    }
+});
+
+function warnWhileRecording(event) {
+    if (!isRecordingNow() && !recordUploading) return;
+    event.preventDefault();
+    event.returnValue = "녹음 중입니다. 이 화면을 벗어나면 녹음이 사라집니다.";
+    return event.returnValue;
 }
