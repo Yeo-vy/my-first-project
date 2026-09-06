@@ -1,0 +1,612 @@
+package com.recorder.voicenote
+
+import android.app.Application
+import android.content.Intent
+import android.content.IntentSender
+import android.net.Uri
+import androidx.core.content.ContextCompat
+import androidx.lifecycle.AndroidViewModel
+import androidx.lifecycle.viewModelScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.launch
+
+/** 이름 변경 다이얼로그가 어떤 대상을 향한 것인지 나타낸다. */
+sealed class RenameTarget {
+    data class Folder(val name: String) : RenameTarget()
+    data class Recording(val item: RecordingItem) : RenameTarget()
+}
+
+/**
+ * 다른 앱이 만든 파일 등, 우리 앱이 소유하지 않은 항목을 옮기거나 이름을 바꾸려면
+ * Android 11 이상에서는 시스템 승인 다이얼로그(MediaStore.createWriteRequest)가 필요하다.
+ * 그 승인을 기다리는 동안의 대기 상태를 나타낸다.
+ */
+sealed class PendingWriteRequest {
+    data class FolderMove(
+        val uris: List<Uri>,
+        val newRelativePath: String,
+        val oldRelativePath: String
+    ) : PendingWriteRequest()
+    data class RecordingRename(val uri: Uri, val newDisplayName: String) : PendingWriteRequest()
+    data class FolderDelete(val uris: List<Uri>, val relativePath: String) : PendingWriteRequest()
+    data class RecordingDelete(val uri: Uri, val folderName: String?) : PendingWriteRequest()
+}
+
+data class RecorderUiState(
+    val folders: List<FolderInfo> = emptyList(),
+    // null 이면 폴더 목록(홈) 화면, 값이 있으면 해당 폴더 상세 화면
+    val selectedFolder: String? = null,
+    val recordings: List<RecordingItem> = emptyList(),
+    val isRecording: Boolean = false,
+    val isPaused: Boolean = false,
+    /** 녹음을 멈추고 조각을 합쳐 저장하는 중 */
+    val isSaving: Boolean = false,
+    /** 마이크 입력 세기 0.0~1.0 */
+    val level: Float = 0f,
+    val elapsedSeconds: Int = 0,
+    val showAddFolderDialog: Boolean = false,
+    val renameTarget: RenameTarget? = null,
+    val deleteFolderTarget: String? = null,
+    val deleteRecordingTarget: RecordingItem? = null,
+    val showStopConfirm: Boolean = false,
+    val pendingWriteRequest: PendingWriteRequest? = null,
+    /** 현재 재생 중인 녹음 파일의 이름 (없으면 재생 중이 아님) */
+    val playingRecordingName: String? = null,
+    // ---- daglo 서버 연동 ----
+    val serverUrl: String = "",
+
+    /** 서버에 로그인해 둔 세션이 있는지 (없으면 자동 전송이 안 된다) */
+    val loggedIn: Boolean = false,
+    /** 녹음 파일 이름 -> 서버 전송 상태 */
+    val uploadStates: Map<String, UploadRecord> = emptyMap(),
+    val autoUpload: Boolean = true,
+    /** 서버 주소가 채워져 있는지 (앱 안 daglo 화면·업로드 사용 가능 여부) */
+    val serverConfigured: Boolean = false,
+    /** 지금 서버로 올리고 있는 파일 이름 */
+    val uploadingName: String? = null,
+    val isTestingConnection: Boolean = false,
+    val message: String? = null
+)
+
+class RecorderViewModel(application: Application) : AndroidViewModel(application) {
+
+    private val store = RecordingStore(application)
+    private val playerManager = PlayerManager()
+    private val settings = DagloSettings(application)
+
+    /** 기본 폴더 자동 선택을 이미 시도했는지 (여러 번 되돌리지 않기 위함) */
+    private var triedDefaultFolder = false
+
+    private val _uiState = MutableStateFlow(RecorderUiState())
+    val uiState: StateFlow<RecorderUiState> = _uiState.asStateFlow()
+
+    /** 저장 위치 안내 문구 (예: "내부 저장소 > Recordings > Voice Recorder") */
+    val storageLocationLabel: String get() = store.displayLocation
+
+    init {
+        // 파일 복사·MediaStore 쿼리가 포함된 초기화 작업은 메인 스레드에서 하면 ANR 위험이 있어 IO로 돌린다.
+        viewModelScope.launch(Dispatchers.IO) {
+            // 예전 버전에서 앱 전용 저장소에 남아있던 폴더/파일이 있다면 새 위치로 옮겨온다 (최초 1회).
+            store.migrateLegacyPrivateStorageIfNeeded()
+            // 방금 시작한 진짜 녹음과 겹치지 않도록, 녹음 중일 때는 건드리지 않는다.
+            if (!RecordingService.state.value.isRecording) {
+                // 예전 방식(MediaStore 에 바로 쓰던 시절)으로 남은 IS_PENDING 찌꺼기를 정리한다.
+                // 그때 파일들은 색인(moov)이 없어 어차피 재생할 수 없다.
+                store.cleanupPendingRecordings()
+                // 지금 방식: 앱이 죽어 조각만 남은 녹음을 합쳐서 되살린다.
+                val recovered = RecordingSaver.recoverLeftovers(getApplication<Application>(), store)
+                if (recovered.isNotEmpty()) {
+                    _uiState.value = _uiState.value.copy(
+                        message = "중단됐던 녹음 ${recovered.size}건을 복구해 저장했습니다"
+                    )
+                }
+            }
+            refreshFolders()
+        }
+
+        _uiState.value = _uiState.value.copy(
+            serverUrl = settings.serverUrl,
+            autoUpload = settings.autoUpload,
+            serverConfigured = settings.isConfigured,
+            loggedIn = settings.isLoggedIn,
+            uploadStates = UploadLog.all(getApplication<Application>())
+        )
+
+        // 전송 상태가 바뀔 때마다(백그라운드 업로드 포함) 목록의 배지를 다시 그린다.
+        viewModelScope.launch {
+            UploadLog.version.collect {
+                // 업로드가 세션 만료로 막혔으면 여기서 로그인 상태도 같이 바뀐다 (배너가 바로 뜬다)
+                _uiState.value = _uiState.value.copy(
+                    uploadStates = UploadLog.all(getApplication<Application>()),
+                    loggedIn = settings.isLoggedIn
+                )
+            }
+        }
+
+        // 업로드는 WorkManager 가 백그라운드에서 돌리므로, 진행/결과를 구독해서 화면에 알린다.
+        viewModelScope.launch {
+            UploadWorker.status.collect { status ->
+                _uiState.value = _uiState.value.copy(
+                    uploadingName = status.uploadingName,
+                    message = status.lastMessage ?: _uiState.value.message
+                )
+                if (status.lastMessage != null) UploadWorker.consumeMessage()
+            }
+        }
+
+        // 실제 녹음은 RecordingService(포그라운드 서비스)가 담당한다.
+        // 화면이 꺼지거나 앱이 백그라운드로 가도 서비스가 계속 살아있으므로,
+        // 여기서는 서비스가 발행하는 상태를 구독해서 화면에 반영만 한다.
+        viewModelScope.launch {
+            var wasBusy = false
+            RecordingService.state.collect { serviceState ->
+                _uiState.value = _uiState.value.copy(
+                    isRecording = serviceState.isRecording,
+                    isPaused = serviceState.isPaused,
+                    isSaving = serviceState.isSaving,
+                    level = serviceState.level,
+                    elapsedSeconds = serviceState.elapsedSeconds,
+                    message = serviceState.errorMessage
+                        ?: serviceState.savedMessage
+                        ?: _uiState.value.message
+                )
+                if (serviceState.errorMessage != null) {
+                    RecordingService.consumeError()
+                }
+                if (serviceState.savedMessage != null) {
+                    RecordingService.consumeSavedMessage()
+                }
+                // 파일은 '저장'까지 끝나야 목록에 나타나므로, 녹음과 저장이 모두 끝난 뒤에 새로고침한다.
+                val busy = serviceState.isRecording || serviceState.isSaving
+                if (wasBusy && !busy) {
+                    refreshRecordings()
+                    refreshFolders()
+                }
+                wasBusy = busy
+            }
+        }
+    }
+
+    private fun refreshFolders() {
+        viewModelScope.launch(Dispatchers.IO) {
+            val folders = store.listFolders()
+            _uiState.value = _uiState.value.copy(folders = folders)
+        }
+    }
+
+    private fun refreshRecordings() {
+        val folder = _uiState.value.selectedFolder ?: return
+        viewModelScope.launch(Dispatchers.IO) {
+            val recordings = store.listRecordings(folder)
+            // 로드하는 동안 다른 폴더로 이동했다면 결과를 무시한다.
+            if (_uiState.value.selectedFolder == folder) {
+                _uiState.value = _uiState.value.copy(recordings = recordings)
+            }
+        }
+    }
+
+    /** 폴더를 눌러서 안으로 들어간다 (녹음 파일 목록 표시) */
+    fun openFolder(folderName: String) {
+        stopPlayback()
+        _uiState.value = _uiState.value.copy(selectedFolder = folderName, recordings = emptyList())
+        refreshRecordings()
+    }
+
+    /** 상세화면에서 뒤로가기 -> 폴더 목록 화면 */
+    fun goBackToFolderList() {
+        if (_uiState.value.isRecording) return // 녹음 중엔 못 나가게
+        stopPlayback()
+        refreshFolders()
+        _uiState.value = _uiState.value.copy(selectedFolder = null, recordings = emptyList())
+    }
+
+    fun openAddFolderDialog() {
+        _uiState.value = _uiState.value.copy(showAddFolderDialog = true)
+    }
+
+    fun dismissAddFolderDialog() {
+        _uiState.value = _uiState.value.copy(showAddFolderDialog = false)
+    }
+
+    fun confirmAddFolder(name: String) {
+        if (name.isNotBlank()) {
+            store.createFolder(name)
+            refreshFolders()
+        }
+        _uiState.value = _uiState.value.copy(showAddFolderDialog = false)
+    }
+
+    /**
+     * 현재 선택된(들어가 있는) 폴더에 녹음을 시작한다.
+     * 폴더에 들어가 있지 않으면 안내 메시지만 띄운다.
+     * 실제 녹음은 RecordingService에 위임하므로, 화면을 나가도 녹음이 계속된다.
+     */
+    fun startRecording() {
+        stopPlayback()
+
+        val folder = _uiState.value.selectedFolder
+        if (folder != null) {
+            launchRecordingService(folder)
+            return
+        }
+
+        // 폴더를 고르지 않았으면 기본 폴더를 만들어 그 안에 녹음한다.
+        // 폴더를 만드는 일(MediaStore 조회 포함)은 메인 스레드에서 하면 안 되므로 IO 로 돌린다.
+        viewModelScope.launch(Dispatchers.IO) {
+            val name = ensureDefaultFolder()
+            _uiState.value = _uiState.value.copy(
+                selectedFolder = name,
+                recordings = emptyList(),
+                message = "'$name' 에 녹음합니다"
+            )
+            refreshFolders()
+            refreshRecordings()
+            launchRecordingService(name)
+        }
+    }
+
+    private fun launchRecordingService(folderName: String) {
+        val context = getApplication<Application>()
+        val intent = Intent(context, RecordingService::class.java).apply {
+            action = RecordingService.ACTION_START
+            putExtra(RecordingService.EXTRA_FOLDER_NAME, folderName)
+        }
+        ContextCompat.startForegroundService(context, intent)
+    }
+
+    /**
+     * 태블릿처럼 폴더 목록과 녹음 목록을 함께 띄우는 화면에서, 아무 폴더도 열려 있지 않으면
+     * 기본 폴더를 열어 둔다. 그래야 앱을 켜자마자 녹음 버튼이 보인다.
+     * 한 번만 시도한다 (사용자가 일부러 목록으로 돌아갔을 때 계속 되돌리지 않도록).
+     */
+    fun selectDefaultFolderIfNone() {
+        if (triedDefaultFolder || _uiState.value.selectedFolder != null) return
+        triedDefaultFolder = true
+        viewModelScope.launch(Dispatchers.IO) {
+            val name = ensureDefaultFolder()
+            if (_uiState.value.selectedFolder == null) {
+                _uiState.value = _uiState.value.copy(selectedFolder = name, recordings = emptyList())
+                refreshFolders()
+                refreshRecordings()
+            }
+        }
+    }
+
+    /** 기본 폴더 이름을 돌려준다. 없으면 만든다. (IO 스레드에서 호출할 것) */
+    private fun ensureDefaultFolder(): String {
+        val existing = store.listFolders().firstOrNull {
+            it.name == RecordingStore.DEFAULT_FOLDER_NAME
+        }
+        // createFolder 는 같은 이름이 있으면 뒤에 번호를 붙이므로, 있는지 먼저 확인해야 한다.
+        return existing?.name ?: store.createFolder(RecordingStore.DEFAULT_FOLDER_NAME)
+    }
+
+    /** 녹음 정지 버튼을 누르면 바로 멈추지 않고 확인부터 받는다. */
+    fun requestStopRecording() {
+        _uiState.value = _uiState.value.copy(showStopConfirm = true)
+    }
+
+    fun dismissStopConfirm() {
+        _uiState.value = _uiState.value.copy(showStopConfirm = false)
+    }
+
+    fun confirmStopRecording() {
+        _uiState.value = _uiState.value.copy(showStopConfirm = false)
+        stopRecording()
+    }
+
+    fun stopRecording() {
+        val context = getApplication<Application>()
+        val intent = Intent(context, RecordingService::class.java).apply {
+            action = RecordingService.ACTION_STOP
+        }
+        context.startService(intent)
+    }
+
+    /** 녹음을 잠시 멈춘다. 재개하면 같은 파일에 이어서 녹음된다. */
+    fun pauseRecording() {
+        val context = getApplication<Application>()
+        val intent = Intent(context, RecordingService::class.java).apply {
+            action = RecordingService.ACTION_PAUSE
+        }
+        context.startService(intent)
+    }
+
+    fun resumeRecording() {
+        val context = getApplication<Application>()
+        val intent = Intent(context, RecordingService::class.java).apply {
+            action = RecordingService.ACTION_RESUME
+        }
+        context.startService(intent)
+    }
+
+    fun cancelRecording() {
+        val context = getApplication<Application>()
+        val intent = Intent(context, RecordingService::class.java).apply {
+            action = RecordingService.ACTION_CANCEL
+        }
+        context.startService(intent)
+    }
+
+    fun consumeMessage() {
+        _uiState.value = _uiState.value.copy(message = null)
+    }
+
+    // ----------------------------------------------------------------------------------
+    // 재생
+    // ----------------------------------------------------------------------------------
+
+    /** 녹음 파일을 누르면 바로 재생한다. 재생 중인 파일을 다시 누르면 정지한다. */
+    fun onRecordingClick(item: RecordingItem) {
+        val context = getApplication<Application>()
+        if (_uiState.value.playingRecordingName == item.displayName) {
+            stopPlayback()
+            return
+        }
+        val started = playerManager.play(context, item.contentUri, item.filePath) {
+            // 재생이 끝까지 진행되어 자동으로 종료된 경우
+            if (_uiState.value.playingRecordingName == item.displayName) {
+                _uiState.value = _uiState.value.copy(playingRecordingName = null)
+            }
+        }
+        _uiState.value = if (started) {
+            _uiState.value.copy(playingRecordingName = item.displayName)
+        } else {
+            _uiState.value.copy(message = "재생할 수 없습니다")
+        }
+    }
+
+    fun stopPlayback() {
+        if (_uiState.value.playingRecordingName == null) return
+        playerManager.stop()
+        _uiState.value = _uiState.value.copy(playingRecordingName = null)
+    }
+
+    // ----------------------------------------------------------------------------------
+    // 이름 변경 (폴더 / 녹음 파일 길게 누르기)
+    // ----------------------------------------------------------------------------------
+
+    fun requestRenameFolder(folderName: String) {
+        _uiState.value = _uiState.value.copy(renameTarget = RenameTarget.Folder(folderName))
+    }
+
+    fun requestRenameRecording(item: RecordingItem) {
+        _uiState.value = _uiState.value.copy(renameTarget = RenameTarget.Recording(item))
+    }
+
+    fun dismissRename() {
+        _uiState.value = _uiState.value.copy(renameTarget = null)
+    }
+
+    fun confirmRename(newName: String) {
+        when (val target = _uiState.value.renameTarget) {
+            is RenameTarget.Folder -> {
+                if (newName.isNotBlank()) {
+                    val result = store.renameFolder(target.name, newName)
+                    refreshFolders()
+                    if (_uiState.value.selectedFolder == target.name) {
+                        _uiState.value = _uiState.value.copy(selectedFolder = result.finalName)
+                        refreshRecordings()
+                    }
+                    if (result.pendingUris.isNotEmpty()) {
+                        _uiState.value = _uiState.value.copy(
+                            pendingWriteRequest = PendingWriteRequest.FolderMove(
+                                result.pendingUris, result.newRelativePath, result.oldRelativePath
+                            )
+                        )
+                    }
+                }
+            }
+            is RenameTarget.Recording -> {
+                if (newName.isNotBlank()) {
+                    when (val result = store.renameRecording(target.item, newName)) {
+                        is RenameRecordingResult.Success -> refreshRecordings()
+                        is RenameRecordingResult.Failed -> {
+                            _uiState.value = _uiState.value.copy(message = "이름을 변경할 수 없습니다")
+                        }
+                        is RenameRecordingResult.NeedsPermission -> {
+                            _uiState.value = _uiState.value.copy(
+                                pendingWriteRequest = PendingWriteRequest.RecordingRename(
+                                    result.uri, result.newDisplayName
+                                )
+                            )
+                        }
+                    }
+                }
+            }
+            null -> Unit
+        }
+        _uiState.value = _uiState.value.copy(renameTarget = null)
+    }
+
+    fun requestDeleteRecording(item: RecordingItem) {
+        _uiState.value = _uiState.value.copy(deleteRecordingTarget = item)
+    }
+
+    fun dismissDeleteRecording() {
+        _uiState.value = _uiState.value.copy(deleteRecordingTarget = null)
+    }
+
+    fun confirmDeleteRecording() {
+        val item = _uiState.value.deleteRecordingTarget ?: return
+        val folder = _uiState.value.selectedFolder
+        _uiState.value = _uiState.value.copy(deleteRecordingTarget = null)
+        if (_uiState.value.playingRecordingName == item.displayName) {
+            stopPlayback()
+        }
+
+        when (val result = store.deleteRecording(item)) {
+            is DeleteRecordingResult.Success -> {
+                // 지운 파일의 전송 기록은 남겨 둘 이유가 없다 (서버 쪽 파일은 그대로다)
+                UploadLog.forget(getApplication<Application>(), item.displayName)
+                // 마지막 파일을 지워서 0개가 되어도 폴더 자체는 앱 목록에 계속 남도록 한다.
+                if (folder != null) store.keepFolderRegistered(folder)
+                refreshRecordings()
+                refreshFolders()
+            }
+            is DeleteRecordingResult.Failed -> {
+                _uiState.value = _uiState.value.copy(message = "삭제할 수 없습니다")
+            }
+            is DeleteRecordingResult.NeedsPermission -> {
+                _uiState.value = _uiState.value.copy(
+                    pendingWriteRequest = PendingWriteRequest.RecordingDelete(result.uri, folder)
+                )
+            }
+        }
+    }
+
+    fun requestDeleteFolder(folderName: String) {
+        _uiState.value = _uiState.value.copy(deleteFolderTarget = folderName)
+    }
+
+    fun dismissDeleteFolder() {
+        _uiState.value = _uiState.value.copy(deleteFolderTarget = null)
+    }
+
+    fun confirmDeleteFolder() {
+        val folderName = _uiState.value.deleteFolderTarget ?: return
+        _uiState.value = _uiState.value.copy(deleteFolderTarget = null)
+        stopPlayback()
+
+        val result = store.deleteFolder(folderName)
+        refreshFolders()
+        if (_uiState.value.selectedFolder == folderName) {
+            _uiState.value = _uiState.value.copy(selectedFolder = null, recordings = emptyList())
+        }
+
+        when (result) {
+            is DeleteFolderResult.NeedsPermission -> {
+                _uiState.value = _uiState.value.copy(
+                    pendingWriteRequest = PendingWriteRequest.FolderDelete(result.uris, result.relativePath)
+                )
+            }
+            is DeleteFolderResult.Success -> Unit
+        }
+    }
+
+    /** MainActivity가 시스템 승인 다이얼로그를 띄울 때 필요한 IntentSender를 요청한다. */
+    fun writeRequestIntentSender(): IntentSender? {
+        return when (val pending = _uiState.value.pendingWriteRequest) {
+            is PendingWriteRequest.FolderMove -> store.createWriteRequestIntentSender(pending.uris)
+            is PendingWriteRequest.RecordingRename -> store.createWriteRequestIntentSender(listOf(pending.uri))
+            is PendingWriteRequest.FolderDelete -> store.createDeleteRequestIntentSender(pending.uris)
+            is PendingWriteRequest.RecordingDelete -> store.createDeleteRequestIntentSender(listOf(pending.uri))
+            null -> null
+        }
+    }
+
+    /** IntentSender를 만들 수 없는 경우(API 30 미만 등) 대기 상태를 정리한다. */
+    fun onWriteRequestUnavailable() {
+        if (_uiState.value.pendingWriteRequest != null) {
+            _uiState.value = _uiState.value.copy(
+                message = "일부 항목은 시스템 제한으로 변경하지 못했습니다",
+                pendingWriteRequest = null
+            )
+        }
+    }
+
+    /** 시스템 승인 다이얼로그 결과 처리 */
+    fun onWriteRequestResult(granted: Boolean) {
+        val pending = _uiState.value.pendingWriteRequest
+        _uiState.value = _uiState.value.copy(pendingWriteRequest = null)
+        if (pending == null) return
+
+        if (granted) {
+            when (pending) {
+                is PendingWriteRequest.FolderMove ->
+                    store.applyPendingFolderMove(pending.uris, pending.newRelativePath, pending.oldRelativePath)
+                is PendingWriteRequest.RecordingRename ->
+                    store.applyPendingRename(pending.uri, pending.newDisplayName)
+                is PendingWriteRequest.FolderDelete ->
+                    store.applyPendingFolderDelete(pending.uris, pending.relativePath)
+                is PendingWriteRequest.RecordingDelete -> {
+                    store.applyPendingRecordingDelete(pending.uri)
+                    if (pending.folderName != null) store.keepFolderRegistered(pending.folderName)
+                }
+            }
+            refreshFolders()
+            refreshRecordings()
+        } else {
+            _uiState.value = _uiState.value.copy(message = "권한이 없어 일부 항목을 변경하지 못했습니다")
+        }
+    }
+
+    /** 저장소 읽기 권한이 새로 승인되었을 때 등, 목록을 다시 불러와야 할 때 호출한다. */
+    fun refresh() {
+        if (_uiState.value.selectedFolder != null) {
+            refreshRecordings()
+        }
+        refreshFolders()
+        // daglo 화면에서 로그인/로그아웃하고 돌아왔을 수 있다
+        _uiState.value = _uiState.value.copy(
+            serverConfigured = settings.isConfigured,
+            loggedIn = settings.isLoggedIn,
+            uploadStates = UploadLog.all(getApplication<Application>())
+        )
+    }
+
+    // ----------------------------------------------------------------------------------
+    // daglo 서버 연동 (설정 / 업로드)
+    // ----------------------------------------------------------------------------------
+
+    /** 설정 화면에서 저장을 누르면 호출된다. */
+    fun saveServerSettings(serverUrl: String, autoUpload: Boolean) {
+        val previousUrl = settings.serverUrl
+        val addressChanged = DagloSettings.normalizeUrl(serverUrl) != previousUrl
+        settings.serverUrl = serverUrl
+        settings.autoUpload = autoUpload
+        // 다른 서버를 가리키게 됐다면 예전 서버의 세션은 쓸모가 없다
+        if (addressChanged) DagloSession.clear(previousUrl)
+        _uiState.value = _uiState.value.copy(
+            serverUrl = settings.serverUrl,
+            autoUpload = settings.autoUpload,
+            serverConfigured = settings.isConfigured,
+            message = if (settings.isConfigured) "서버 설정을 저장했습니다" else "서버 주소를 비워 두면 연동이 꺼집니다"
+        )
+    }
+
+    /** 주소가 맞는지 서버에 한 번 물어본다. */
+    fun testServerConnection(serverUrl: String) {
+        if (serverUrl.isBlank()) {
+            _uiState.value = _uiState.value.copy(message = "서버 주소를 먼저 입력하세요")
+            return
+        }
+        _uiState.value = _uiState.value.copy(isTestingConnection = true)
+        viewModelScope.launch(Dispatchers.IO) {
+            // 저장하기 전 입력값 그대로 확인한다 (설정에 손대지 않는다).
+            val result = DagloApi(DagloSettings.normalizeUrl(serverUrl)).ping()
+            val message = when (result) {
+                is ApiResult.Success -> "서버에 연결됐습니다"
+                // 서버는 살아 있는데 세션이 없을 때다. 웹 화면에서 로그인하면 된다.
+                is ApiResult.Fatal -> "서버에 연결됐습니다. 웹 화면에서 로그인해 주세요."
+                is ApiResult.Retryable -> "연결 실패: ${result.message}"
+            }
+            _uiState.value = _uiState.value.copy(isTestingConnection = false, message = message)
+        }
+    }
+
+    /** 녹음 파일 하나를 수동으로 서버에 올린다 (자동 업로드가 꺼져 있거나 실패했을 때). */
+    fun uploadRecording(item: RecordingItem) {
+        if (!settings.isConfigured) {
+            _uiState.value = _uiState.value.copy(message = "먼저 설정에서 서버 주소를 입력하세요")
+            return
+        }
+        val folder = _uiState.value.selectedFolder ?: ""
+        UploadWorker.enqueue(
+            context = getApplication<Application>(),
+            contentUri = item.contentUri,
+            filePath = item.filePath,
+            displayName = item.displayName,
+            folderName = folder
+        )
+        _uiState.value = _uiState.value.copy(message = "서버로 보내는 중입니다")
+    }
+
+    override fun onCleared() {
+        super.onCleared()
+        playerManager.stop()
+    }
+}

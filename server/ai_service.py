@@ -104,6 +104,10 @@ def terminate_active_media_processes() -> int:
     return len(procs)
 
 
+# 헤더에 길이가 없어 받자마자 컨테이너를 다시 써야 하는 형식 (브라우저 녹음)
+STREAMING_AUDIO_EXTS = (".webm", ".ogg")
+
+
 def probe_duration_seconds(audio_path: str) -> float:
     """파일을 디코딩하지 않고 길이만 알아낸다."""
     code, out, err = run_tool(
@@ -122,7 +126,61 @@ def probe_duration_seconds(audio_path: str) -> float:
                 return duration
         except ValueError:
             pass
+
+    # 브라우저 녹음(MediaRecorder)은 헤더에 길이를 안 적어 두는 경우가 있다.
+    # 그럴 때는 한 번 훑어서 실제 길이를 알아낸다 (디코딩만 하고 버리므로 메모리는 안 든다).
+    scanned = scan_duration_seconds(audio_path)
+    if scanned > 0:
+        return scanned
+
     raise RuntimeError(f"오디오 길이를 읽지 못했습니다: {err or '알 수 없는 오류'}")
+
+
+def scan_duration_seconds(audio_path: str) -> float:
+    """헤더에 길이가 없는 파일을 끝까지 훑어 길이를 알아낸다."""
+    # -v error 만 주면 진행 표시가 안 나온다. -stats 를 함께 줘야 time= 줄이 stderr 로 온다.
+    code, _out, err = run_tool(
+        [ffmpeg_bin(), "-v", "error", "-stats", "-nostdin", "-i", audio_path, "-f", "null", "-"],
+        timeout=FFMPEG_TIMEOUT_SEC,
+    )
+    if code != 0:
+        return 0.0
+    # ffmpeg 은 진행 상황을 stderr 에 `time=00:12:34.56` 형식으로 남긴다. 마지막 값이 전체 길이다.
+    matches = re.findall(r"time=(\d+):(\d{2}):(\d{2}(?:\.\d+)?)", err or "")
+    if not matches:
+        return 0.0
+    hours, minutes, seconds = matches[-1]
+    return int(hours) * 3600 + int(minutes) * 60 + float(seconds)
+
+
+def rewrite_container(audio_path: str) -> bool:
+    """컨테이너만 다시 써서 길이·탐색 정보를 채워 넣는다 (재인코딩 없음).
+
+    브라우저 MediaRecorder 가 만든 webm/ogg 는 스트리밍용이라 헤더에 전체 길이가 없고
+    탐색 색인도 없다. 그대로 두면 길이가 0 으로 잡히고, 구간을 잘라 쓰는 STT 단계에서
+    `-ss` 탐색이 어긋난다. 받자마자 한 번 다시 써 두면 이후 단계가 파일 종류를 신경 쓸 필요가 없다.
+    """
+    if not os.path.exists(audio_path):
+        return False
+    # ffmpeg 은 출력 확장자로 컨테이너를 고른다. 원래 확장자를 유지해야 한다.
+    base, ext = os.path.splitext(audio_path)
+    temp_path = base + ".rewriting" + ext
+    code, _out, _err = run_tool(
+        [ffmpeg_bin(), "-v", "error", "-y", "-nostdin", "-i", audio_path, "-c", "copy", temp_path],
+        timeout=FFMPEG_TIMEOUT_SEC,
+    )
+    if code != 0 or not os.path.exists(temp_path) or os.path.getsize(temp_path) == 0:
+        if os.path.exists(temp_path):
+            try:
+                os.remove(temp_path)
+            except OSError:
+                pass
+        return False
+    try:
+        os.replace(temp_path, audio_path)
+        return True
+    except OSError:
+        return False
 
 
 def extract_chunk_to_mp3(audio_path: str, dest_path: str, start_ms: int, length_ms: int) -> None:
@@ -441,6 +499,11 @@ def process_audio_file_to_board(board_id: int, audio_path: str, db_session_facto
         prompt = STT_BASE_PROMPT + build_glossary_prompt(glossary)
         if glossary:
             print(f"[AI-GLOSSARY] Board #{board.id} 용어 {len(glossary)}개를 프롬프트에 적용합니다.", flush=True)
+
+        # 브라우저에서 바로 녹음한 파일(webm/ogg)은 헤더에 길이·탐색 색인이 없다.
+        # 청크를 잘라 쓰기 전에 컨테이너만 한 번 다시 써서 이후 단계가 신경 쓸 일을 없앤다.
+        if audio_path.lower().endswith(STREAMING_AUDIO_EXTS):
+            rewrite_container(audio_path)
 
         # 파일을 통째로 디코딩하면 긴 녹음에서 수백 MB~GB 를 먹고 서버가 OOM 으로 죽는다.
         # 길이만 먼저 재고, 실제 오디오는 청크 단위로 그때그때 잘라 쓴다.

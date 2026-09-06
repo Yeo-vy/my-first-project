@@ -144,7 +144,10 @@ TIMESTAMP_RE = re.compile(r'\[(\d{1,2}:\d{2}(?::\d{2})?)\]')
 # -----------------
 # STT 작업 큐 + 워커 (동시 실행 수를 제한해 API/메모리 폭주를 막는다)
 # -----------------
-VALID_AUDIO_EXTS = (".mp3", ".m4a", ".wav", ".mp4")
+# .webm/.ogg 는 브라우저에서 바로 녹음할 때 나오는 형식이다 (MediaRecorder 는 보통 opus 로 담는다).
+VALID_AUDIO_EXTS = (".mp3", ".m4a", ".wav", ".mp4", ".webm", ".ogg")
+# 헤더에 길이가 없어서 받자마자 컨테이너를 다시 써 주어야 하는 형식
+STREAMING_AUDIO_EXTS = (".webm", ".ogg")
 STT_WORKERS = max(1, int(os.getenv("STT_WORKERS", "2")))
 # 워커가 이 시간(초) 동안 진행 신호를 못 주면 멈춘 것으로 보고 경고를 남긴다
 STT_STALL_WARN_SEC = max(60, int(os.getenv("STT_STALL_WARN_SEC", "1800")))
