@@ -808,14 +808,27 @@ body {
     padding: 20px 28px;
 }
 
+/* 1분 묶음: 시각을 위에 한 줄 적고, 그 아래로 문단들이 이어진다 */
+.script-group {
+    margin-bottom: 26px;
+}
+
+.group-ts {
+    font-size: 12.5px;
+    font-weight: 600;
+    color: #94a3b8;
+    font-variant-numeric: tabular-nums;
+    padding: 0 10px;
+    margin-bottom: 6px;
+    user-select: none;
+}
+
 .script-block {
-    display: flex;
-    align-items: flex-start;
-    gap: 14px;
-    margin-bottom: 18px;
-    padding: 8px 12px;
+    position: relative;
+    padding: 4px 34px 4px 10px;
+    margin-bottom: 4px;
     border-radius: 8px;
-    transition: all 0.2s ease;
+    transition: background-color 0.15s ease;
 }
 
 .script-block:hover {
@@ -832,43 +845,19 @@ body {
     text-decoration-skip-ink: none;
 }
 
-.block-meta {
-    display: flex;
-    flex-direction: column;
-    gap: 4px;
-    flex-shrink: 0;
-    align-items: flex-start;
-    /* 타임스탬프는 1분에 한 번만 뜨므로, 없는 문단에서도 본문 시작선이 밀리지 않게 폭을 잡아 둔다 */
-    min-width: 62px;
-}
-
-.ts-badge {
-    color: #475569;
-    font-size: 12.5px;
-    font-weight: 600;
-    background-color: #f1f5f9;
-    padding: 3px 8px;
-    border-radius: 6px;
-    cursor: pointer;
-    user-select: none;
-}
-
-.ts-badge:hover {
-    background-color: #3b82f6;
-    color: white;
-}
-
-.script-block.active .ts-badge {
-    background-color: var(--primary-color);
-    color: white;
+/* 본문 검색에 걸린 문단 */
+.script-block.found {
+    background-color: #fef9c3;
 }
 
 .speaker-badge {
+    display: inline-block;
     font-size: 11px;
     font-weight: 600;
     color: var(--primary-color);
     cursor: pointer;
     padding: 1px 4px;
+    margin: 0 0 2px 8px;
     border-radius: 4px;
 }
 
@@ -877,14 +866,15 @@ body {
 }
 
 .text-content {
-    flex: 1;
     font-size: 15px;
-    line-height: 1.75;
+    line-height: 1.8;
     color: #1e293b;
     outline: none;
     border: 1px solid transparent;
     padding: 4px 8px;
-    border-radius: 4px;
+    border-radius: 6px;
+    /* 누르면 재생 + 그 자리에서 수정이므로 글자 커서를 그대로 쓴다 */
+    cursor: text;
 }
 
 .text-content:hover {
@@ -898,6 +888,9 @@ body {
 }
 
 .block-actions {
+    position: absolute;
+    top: 4px;
+    right: 4px;
     display: flex;
     opacity: 0;
     transition: opacity 0.15s ease;

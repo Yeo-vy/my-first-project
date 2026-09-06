@@ -744,48 +744,78 @@ function renderKeywords(keywords) {
     });
 }
 
+// 자막 묶음 헤더에 쓸 시각 문자열. 저장된 값은 "[44:36]" 처럼 대괄호가 붙어 있다.
+function stripTsBrackets(ts) {
+    return String(ts || "").replace(/^\[|\]$/g, "");
+}
+
 function renderTranscript(segments) {
     const container = document.getElementById("transcript-container");
     container.innerHTML = "";
+    currentActiveBlock = null;
 
     if (segments.length === 0) {
         container.innerHTML = `<p style="color:var(--text-subtle); padding:40px; text-align:center;">스크립트 내용이 없습니다.</p>`;
         return;
     }
 
-    // 새로 변환한 보드는 서버가 이미 1분 내외 문단으로 묶어 주지만,
-    // 예전에 촘촘하게 저장된 보드는 문단마다 타임스탬프가 붙어 읽기 힘들다.
-    // `마지막으로 띄운 배지에서 1분이 지났을 때만` 다시 띄워 둘 다 자연스럽게 만든다.
-    // (분 단위로 자르면 01:10 / 01:55 처럼 같은 분에 걸친 문단의 배지가 잘못 사라진다)
-    let lastShownMs = null;
+    // 다글로처럼 '1분 묶음 + 그 안의 문단' 2단 구조로 그린다.
+    // 시각은 묶음마다 한 번만 위에 적어 두고(버튼이 아니라 이정표다),
+    // 재생과 수정은 문단 자체를 눌러서 한다.
+    // 분 단위로 자르면 01:10 / 01:55 처럼 같은 분에 걸친 문단이 한 묶음이 되지 않으므로,
+    // `마지막으로 묶음을 연 시각에서 1분이 지났을 때` 새 묶음을 연다.
+    let group = null;
+    let groupStartMs = null;
+    let lastSpeaker = null;
 
     segments.forEach((seg, idx) => {
+        const startMs = seg.start_time_ms || 0;
+
+        if (group === null || startMs - groupStartMs >= 60000) {
+            groupStartMs = startMs;
+            lastSpeaker = null;   // 묶음이 바뀌면 화자를 한 번 다시 적어 준다
+
+            group = document.createElement("section");
+            group.className = "script-group";
+
+            const head = document.createElement("div");
+            head.className = "group-ts";
+            head.textContent = stripTsBrackets(seg.timestamp_str);
+            group.appendChild(head);
+
+            container.appendChild(group);
+        }
+
+        const speaker = seg.speaker || "화자 1";
+
         const block = document.createElement("div");
         block.className = "script-block";
-        block.dataset.ms = seg.start_time_ms;
+        block.dataset.ms = startMs;
         block.dataset.ts = seg.timestamp_str;
-        block.dataset.speaker = seg.speaker || "화자 1";
+        block.dataset.speaker = speaker;
         block.id = `seg-${seg.id || idx}`;
 
-        const startMs = seg.start_time_ms || 0;
-        const showTs = lastShownMs === null || startMs - lastShownMs >= 60000;
-        if (showTs) lastShownMs = startMs;
-
         block.innerHTML = `
-            <div class="block-meta">
-                ${showTs
-                    ? `<span class="ts-badge" onclick="playAtMs(${seg.start_time_ms})">${seg.timestamp_str}</span>`
-                    : ""}
-                <span class="speaker-badge" onclick="openSpeakerModalFor('${escapeHtml(seg.speaker || "화자 1")}')">${escapeHtml(seg.speaker || "화자 1")}</span>
-            </div>
-            <div class="text-content" contenteditable="true" spellcheck="false">${escapeHtml(seg.content)}</div>
+            ${speaker !== lastSpeaker
+                ? `<span class="speaker-badge" onclick="openSpeakerModalFor('${escapeHtml(speaker)}')">${escapeHtml(speaker)}</span>`
+                : ""}
+            <div class="text-content" contenteditable="true" spellcheck="false"
+                 title="누르면 이 부분부터 재생됩니다. 그대로 이어서 고쳐 쓸 수 있어요.">${escapeHtml(seg.content)}</div>
             <div class="block-actions">
-                <button class="icon-btn-small" onclick="addBookmarkAtMs(${seg.start_time_ms}, '${seg.timestamp_str}')" title="이 위치 북마크"><i class="fa-regular fa-bookmark"></i></button>
+                <button class="icon-btn-small" onclick="addBookmarkAtMs(${startMs}, '${seg.timestamp_str}')" title="이 위치 북마크"><i class="fa-regular fa-bookmark"></i></button>
             </div>
         `;
+        lastSpeaker = speaker;
 
         const textElem = block.querySelector(".text-content");
-        textElem.addEventListener("focus", () => { isUserEditing = true; });
+
+        // 문단을 누르면 그 자리부터 재생하고, 커서는 누른 곳에 그대로 남아 바로 고쳐 쓸 수 있다.
+        // focus 는 '처음 들어올 때' 한 번만 나므로, 이미 고치고 있는 문단 안에서
+        // 커서를 옮기려고 다시 눌러도 재생 위치가 튀지 않는다.
+        textElem.addEventListener("focus", () => {
+            isUserEditing = true;
+            playAtMs(startMs, false);
+        });
         textElem.addEventListener("input", () => { isModified = true; });
         textElem.addEventListener("blur", () => {
             isUserEditing = false;
@@ -795,7 +825,14 @@ function renderTranscript(segments) {
             }
         });
 
-        container.appendChild(block);
+        // 글자 옆 여백을 눌러도 같은 문단을 고르는 것으로 친다
+        block.addEventListener("mousedown", (e) => {
+            if (e.target.closest(".text-content, .speaker-badge, .block-actions")) return;
+            e.preventDefault();
+            textElem.focus();
+        });
+
+        group.appendChild(block);
     });
 }
 
@@ -807,8 +844,13 @@ function highlightKeywordInTranscript(kw) {
 function findInTranscript(query) {
     const q = query.trim().toLowerCase();
     const blocks = document.querySelectorAll(".script-block");
+    const groups = document.querySelectorAll(".script-group");
     if (!q) {
-        blocks.forEach(b => b.style.opacity = "1");
+        blocks.forEach(b => {
+            b.style.opacity = "1";
+            b.classList.remove("found");
+        });
+        groups.forEach(g => g.querySelector(".group-ts").style.opacity = "1");
         return;
     }
 
@@ -817,12 +859,20 @@ function findInTranscript(query) {
         const text = b.querySelector(".text-content").innerText.toLowerCase();
         if (text.includes(q)) {
             b.style.opacity = "1";
-            b.classList.add("active");
+            // 검색 결과는 'found', 재생 위치는 'active' 로 구분한다.
+            // 둘 다 active 를 쓰면 검색만 해도 온 화면에 재생 밑줄이 그어진다.
+            b.classList.add("found");
             if (!firstFound) firstFound = b;
         } else {
             b.style.opacity = "0.4";
-            b.classList.remove("active");
+            b.classList.remove("found");
         }
+    });
+
+    // 걸린 문단이 하나도 없는 묶음은 시각 표시까지 같이 흐리게 둔다
+    groups.forEach(g => {
+        const hit = g.querySelector(".script-block.found");
+        g.querySelector(".group-ts").style.opacity = hit ? "1" : "0.4";
     });
 
     if (firstFound) {
@@ -944,9 +994,17 @@ function togglePlay() {
     else audioPlayer.pause();
 }
 
-function playAtMs(ms) {
+function playAtMs(ms, scrollScript = true) {
+    // 녹음 원본이 없는 보드(파일만 지운 경우 등)에서는 자막만 고칠 수 있게 두고 재생은 넘어간다
+    if (!currentBoard || !currentBoard.audio_url) return;
     audioPlayer.currentTime = ms / 1000;
-    audioPlayer.play();
+    // 연달아 눌렀을 때 앞선 play() 가 취소되며 나는 AbortError 는 무시한다
+    const started = audioPlayer.play();
+    if (started && started.catch) started.catch(() => {});
+    // 북마크나 채팅의 시각 링크로 건너뛴 것이라면 자막도 그 자리로 데려간다.
+    // 자막 문단을 직접 눌러 재생한 경우에는 이미 그 자리를 보고 있으므로 스크롤하지 않는다
+    // (고쳐 쓰는 중에 화면이 움직이면 커서가 있던 자리가 밀려난다).
+    if (scrollScript) scrollToBlockAt(ms);
 }
 
 function seekRelative(seconds) {
