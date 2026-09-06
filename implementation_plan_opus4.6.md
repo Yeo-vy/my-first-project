@@ -72,53 +72,12 @@
 
 ---
 
-### 3. VoiceRecorder Android 앱 — 버그 수정 (우선순위: 중간)
-
-#### [MODIFY] [RecordingStore.kt](file:///c:/Users/pij19/Desktop/Codes/daglo%20구현하기/app/src/main/java/com/recorder/voicenote/RecordingStore.kt)
-
-**변경 8: `isSecurityRestricted()` 수정 (Line 627~630)**
-- 현재: `Build.VERSION.SDK_INT >= R`만 반환 → 인자(`uri`, `column`, `value`)를 전혀 사용하지 않음
-- 수정: `catch (e: RecoverableSecurityException)` 패턴으로 실제 보안 예외를 구분하도록 호출부를 리팩터링
-- 또는 최소한 실제 `SecurityException`이 발생한 경우에만 `true`를 반환하도록 변경
-
-**변경 9: `listFolders()` N+1 쿼리 최적화 (Line 127~140)**
-- 현재: 폴더마다 `listRecordings(it).size` 호출 → 폴더 수만큼 MediaStore 쿼리 반복
-- 수정: `GROUP BY RELATIVE_PATH` 한 번의 쿼리로 폴더별 녹음 개수를 한번에 취득
-
-#### [MODIFY] [RecordingService.kt](file:///c:/Users/pij19/Desktop/Codes/daglo%20구현하기/app/src/main/java/com/recorder/voicenote/RecordingService.kt)
-
-**변경 10: 타이머 드리프트 수정 (Line 148~155)**
-- `delay(1000)` 누적 → `SystemClock.elapsedRealtime()` 기준 경과 시간 계산으로 변경
-- 1~3시간 강의 녹음 시 doze/스로틀링에 의한 시간 어긋남 방지
-
-#### [MODIFY] [RecorderViewModel.kt](file:///c:/Users/pij19/Desktop/Codes/daglo%20구현하기/app/src/main/java/com/recorder/voicenote/RecorderViewModel.kt)
-
-**변경 11: init 블록 IO 디스패처 적용 (Line 66~69)**
-- `store.migrateLegacyPrivateStorageIfNeeded()` 및 `refreshFolders()`를 `viewModelScope.launch(Dispatchers.IO)`로 감싸서 ANR 방지
-
-#### [MODIFY] [RecorderManager.kt](file:///c:/Users/pij19/Desktop/Codes/daglo%20구현하기/app/src/main/java/com/recorder/voicenote/RecorderManager.kt)
-
-**변경 12: 녹음 비트레이트 하향 (Line 32~33)**
-- `setAudioEncodingBitRate(128000)` → `64000`
-- `setAudioSamplingRate(44100)` → `16000`
-- `setAudioChannelCount(1)` 추가 (모노)
-- 강의 음성에 충분한 품질이며, 파일 크기 1/4로 감소
-
----
-
 ### 4. .gitignore 보강 (우선순위: 낮음)
 
 #### [MODIFY] [.gitignore](file:///c:/Users/pij19/Desktop/Codes/daglo%20구현하기/.gitignore)
 
-**변경 13: Gradle/Android 빌드 산출물 제외 추가**
 ```gitignore
-# Android / Gradle
-.gradle/
-app/build/
 build/
-local.properties
-*.apk
-*.aab
 ```
 
 ---
@@ -126,11 +85,9 @@ local.properties
 ## Verification Plan
 
 ### Automated Tests
-- 빌드/테스트 실행은 현재 환경에서 직접 수행이 어렵습니다(네트워크 드라이브/Android 빌드 환경 필요).
 
 ### Manual Verification
 - **받아쓰기py.py**: 서버에서 짧은 테스트 오디오(5분)로 실행하여 `finish_reason` 검사 로그, HTML 이스케이프, 파일 크기 감소 확인
-- **VoiceRecorder**: Android Studio에서 빌드 후 에뮬레이터에서 30분 녹음 테스트로 타이머 정확도 확인
 - **.gitignore**: `git status`로 새로 추가된 패턴이 정상 동작하는지 확인
 
 ---

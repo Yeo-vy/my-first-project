@@ -10,7 +10,6 @@
 
 ```mermaid
 flowchart TD
-    subgraph Mobile["📱 안드로이드 앱 (VoiceRecorder)"]
         A[음성 녹음 실행] -->|Foreground Service| B[Recordings/Voice Recorder/[폴더명]/*.m4a]
     end
 
@@ -54,25 +53,6 @@ flowchart TD
 
 ---
 
-### 2.2 안드로이드 녹음 앱 (`VoiceRecorder`)
-
-> [!IMPORTANT]
-> **1. Audio Recording 비트레이트 과다 설정**
-> - 현재 [RecorderManager.kt](file:///c:/Users/pij19/Desktop/Codes/daglo%20%EA%B5%AC%ED%98%84%ED%95%98%EA%B8%B0/app/src/main/java/com/recorder/voicenote/RecorderManager.kt)에 AAC 128kbps / 44.1kHz (음악용 스펙)로 설정되어 있습니다.
-> - 강의 음성 STT 목적에는 **64kbps / 16kHz 모노**로 변경해도 인식률 차이가 없으며, **파일 용량이 1/4로 줄어들어** SFTP 전송 및 AI 업로드 시간이 크게 단축됩니다.
-
-> [!WARNING]
-> **2. 타이머 드리프트 (Timer Drift)**
-> - [RecordingService.kt](file:///c:/Users/pij19/Desktop/Codes/daglo%20%EA%B5%AC%ED%98%84%ED%95%98%EA%B8%B0/app/src/main/java/com/recorder/voicenote/RecordingService.kt)의 타이머가 `delay(1000)` 단순 누적 방식입니다.
-> - 1~3시간 장시간 녹음 시 doze 모드나 OS 스로틀링에 의해 UI 타이머와 실제 녹음 시간 간 누적 오차가 발생합니다. (`SystemClock.elapsedRealtime()` 기준 변경 필요)
-
-> [!NOTE]
-> **3. UI / 스토리지 버그**
-> - **`isSecurityRestricted()` 전달인자 미사용**: [RecordingStore.kt](file:///c:/Users/pij19/Desktop/Codes/daglo%20%EA%B5%AC%ED%98%84%ED%95%98%EA%B8%B0/app/src/main/java/com/recorder/voicenote/RecordingStore.kt)에서 인자 검사 없이 `Build.VERSION.SDK_INT >= R`을 unconditional 반환하여 불필요한 시스템 승인 팝업이 유발됩니다.
-> - **Main Thread I/O**: [RecorderViewModel.kt](file:///c:/Users/pij19/Desktop/Codes/daglo%20%EA%B5%AC%ED%98%84%ED%95%98%EA%B8%B0/app/src/main/java/com/recorder/voicenote/RecorderViewModel.kt) init 시 메인 스레드에서 파일 마이그레이션 및 목록을 동기 조회하여 파일이 많아지면 ANR 위험이 존재합니다.
-
----
-
 ### 2.3 서버 환경 (Linux 데몬)
 
 > [!WARNING]
@@ -88,11 +68,7 @@ flowchart TD
 | :---: | :--- | :--- | :--- | :--- |
 | **P0** | `finish_reason` 검증 및 청크 축소 | [받아쓰기py.py](file:///c:/Users/pij19/Desktop/Codes/daglo%20%EA%B5%AC%ED%98%84%ED%95%98%EA%B8%B0/%EB%B0%9B%EC%95%84%EC%93%B0%EA%B8%B0py.py) | 20분 청크 + `MAX_TOKENS` 검사 후 에러 처리 | 🚨 데이터 유실 방지 |
 | **P0** | HTML 이스케이프 적용 | [받아쓰기py.py](file:///c:/Users/pij19/Desktop/Codes/daglo%20%EA%B5%AC%ED%98%84%ED%95%98%EA%B8%B0/%EB%B0%9B%EC%95%84%EC%93%B0%EA%B8%B0py.py) | `html.escape()`로 스크립트 출력 보호 | 🛠 웹 UI 깨짐 방지 |
-| **P1** | 오디오 녹음 비트레이트 하향 | [RecorderManager.kt](file:///c:/Users/pij19/Desktop/Codes/daglo%20%EA%B5%AC%ED%98%84%ED%95%98%EA%B8%B0/app/src/main/java/com/recorder/voicenote/RecorderManager.kt) | 64kbps / 16kHz 모노 설정 적용 | ⚡ 용량 75% 절감 & 속도 향상 |
-| **P1** | 타이머 드리프트 수정 | [RecordingService.kt](file:///c:/Users/pij19/Desktop/Codes/daglo%20%EA%B5%AC%ED%98%84%ED%95%98%EA%B8%B0/app/src/main/java/com/recorder/voicenote/RecordingService.kt) | `SystemClock.elapsedRealtime()` 기반 경과 시간 산출 | ⏱️ 장시간 녹음 시간 정확도 보장 |
 | **P1** | systemd 로케일 추가 | Azure VM 서비스 유닛 | `Environment=LANG=C.UTF-8` 설정 추가 | 🌐 한글 파일명 오류 해결 |
-| **P2** | IO 디스패처 적용 | [RecorderViewModel.kt](file:///c:/Users/pij19/Desktop/Codes/daglo%20%EA%B5%AC%ED%98%84%ED%95%98%EA%B8%B0/app/src/main/java/com/recorder/voicenote/RecorderViewModel.kt) | `viewModelScope.launch(Dispatchers.IO)` 적용 | 📱 ANR 방지 |
-| **P2** | `.gitignore` 보강 | [.gitignore](file:///c:/Users/pij19/Desktop/Codes/daglo%20%EA%B5%AC%ED%98%84%ED%95%98%EA%B8%B0/.gitignore) | Gradle/Android 빌드 생성 파일 패턴 추가 | 🧹 레포지토리 위생 유지 |
 
 ---
 
