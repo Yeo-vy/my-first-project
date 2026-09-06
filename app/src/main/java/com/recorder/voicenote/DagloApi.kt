@@ -16,8 +16,8 @@ sealed class ApiResult {
     /** 네트워크 끊김·서버 재시작·5xx 처럼 나중에 다시 하면 될 실패 */
     data class Retryable(val message: String) : ApiResult()
 
-    /** 토큰 오류·지원하지 않는 형식처럼 다시 해도 똑같이 실패할 것 */
-    data class Fatal(val message: String) : ApiResult()
+    /** 세션 만료·지원하지 않는 형식처럼 다시 해도 똑같이 실패할 것 */
+    data class Fatal(val message: String, val authFailed: Boolean = false) : ApiResult()
 }
 
 /**
@@ -116,7 +116,10 @@ class DagloApi(private val serverUrl: String, private val sessionCookie: String)
                 code in 200..299 -> ApiResult.Success(body)
                 // 401/403 은 세션이 끊긴 것이므로 재시도해도 똑같다. 앱에서 다시 로그인해야 한다.
                 code == 401 || code == 403 ->
-                    ApiResult.Fatal("로그인이 만료되었습니다. 앱에서 다시 로그인해 주세요. (HTTP $code)")
+                    ApiResult.Fatal(
+                        "로그인이 만료되었습니다. 앱에서 다시 로그인해 주세요. (HTTP $code)",
+                        authFailed = true
+                    )
                 code == 413 -> ApiResult.Fatal("파일이 서버 허용 크기를 넘습니다. (HTTP 413)")
                 code == 400 -> ApiResult.Fatal(errorMessage(body) ?: "서버가 요청을 거부했습니다. (HTTP 400)")
                 else -> ApiResult.Retryable(errorMessage(body) ?: "서버 오류 (HTTP $code)")

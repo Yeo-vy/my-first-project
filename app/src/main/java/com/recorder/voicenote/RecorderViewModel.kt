@@ -113,13 +113,17 @@ class RecorderViewModel(application: Application) : AndroidViewModel(application
             autoUpload = settings.autoUpload,
             serverConfigured = settings.isConfigured,
             loggedIn = settings.isLoggedIn,
-            uploadStates = UploadLog.all(getApplication())
+            uploadStates = UploadLog.all(getApplication<Application>())
         )
 
         // 전송 상태가 바뀔 때마다(백그라운드 업로드 포함) 목록의 배지를 다시 그린다.
         viewModelScope.launch {
             UploadLog.version.collect {
-                _uiState.value = _uiState.value.copy(uploadStates = UploadLog.all(getApplication()))
+                // 업로드가 세션 만료로 막혔으면 여기서 로그인 상태도 같이 바뀐다 (배너가 바로 뜬다)
+                _uiState.value = _uiState.value.copy(
+                    uploadStates = UploadLog.all(getApplication<Application>()),
+                    loggedIn = settings.isLoggedIn
+                )
             }
         }
 
@@ -438,7 +442,7 @@ class RecorderViewModel(application: Application) : AndroidViewModel(application
         when (val result = store.deleteRecording(item)) {
             is DeleteRecordingResult.Success -> {
                 // 지운 파일의 전송 기록은 남겨 둘 이유가 없다 (서버 쪽 파일은 그대로다)
-                UploadLog.forget(getApplication(), item.displayName)
+                UploadLog.forget(getApplication<Application>(), item.displayName)
                 // 마지막 파일을 지워서 0개가 되어도 폴더 자체는 앱 목록에 계속 남도록 한다.
                 if (folder != null) store.keepFolderRegistered(folder)
                 refreshRecordings()
@@ -541,7 +545,7 @@ class RecorderViewModel(application: Application) : AndroidViewModel(application
         _uiState.value = _uiState.value.copy(
             serverConfigured = settings.isConfigured,
             loggedIn = settings.isLoggedIn,
-            uploadStates = UploadLog.all(getApplication())
+            uploadStates = UploadLog.all(getApplication<Application>())
         )
     }
 

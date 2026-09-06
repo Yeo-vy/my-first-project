@@ -76,6 +76,10 @@ class UploadWorker(
                 Result.success()
             }
             is ApiResult.Fatal -> {
+                // 세션이 끊겼으면 저장해 둔 쿠키를 버린다. 그래야 녹음 화면 맨 위에
+                // '다시 로그인하세요' 띠가 떠서, 전송이 조용히 멈춰 있는 상태를 모르고
+                // 계속 녹음하는 일이 없다.
+                if (result.authFailed) settings.clearSession()
                 _status.value = UploadStatus(
                     lastMessage = "업로드 실패: ${result.message}",
                     lastFailed = true
