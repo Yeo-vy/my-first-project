@@ -361,7 +361,7 @@ class RecordingService : Service() {
     private fun acquireWakeLock() {
         if (wakeLock?.isHeld == true) return
         try {
-            val power = getSystemService(POWER_SERVICE) as android.os.PowerManager
+            val power = getSystemService(android.content.Context.POWER_SERVICE) as android.os.PowerManager
             wakeLock = power.newWakeLock(
                 android.os.PowerManager.PARTIAL_WAKE_LOCK,
                 "daglo:recording"
