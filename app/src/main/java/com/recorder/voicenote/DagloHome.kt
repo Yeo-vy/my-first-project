@@ -410,7 +410,7 @@ private fun DagloDashboard(
             TextField(
                 value = state.search,
                 onValueChange = { viewModel.onSearchChange(it) },
-                modifier = Modifier.weight(1f).height(46.dp),
+                modifier = Modifier.weight(1f).height(52.dp),
                 placeholder = { Text("보드 제목 또는 자막 내용 검색...", fontSize = 13.sp) },
                 leadingIcon = { Icon(Icons.Default.Search, null, tint = DagloColors.TextSubtle, modifier = Modifier.size(18.dp)) },
                 singleLine = true,
