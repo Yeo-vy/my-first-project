@@ -41,9 +41,12 @@ import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material.icons.filled.Star
 import androidx.compose.material.icons.filled.StarBorder
 import androidx.compose.material.icons.filled.DeleteOutline
+import androidx.compose.material.icons.filled.ExpandMore
 import androidx.compose.material3.Checkbox
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.Divider
+import androidx.compose.material3.DropdownMenu
+import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
@@ -84,42 +87,60 @@ fun DagloHomeScreen(
     var folderPendingDelete by remember { mutableStateOf<DagloFolder?>(null) }
     var showUpload by remember { mutableStateOf(false) }
     var showBatchMove by remember { mutableStateOf(false) }
+    var showPasswordChange by remember { mutableStateOf(false) }
 
-    LaunchedEffect(Unit) {
-        viewModel.reloadSettings()
-        viewModel.loadBoards()
-    }
+    // 화면에 들어올 때마다 설정을 다시 읽고, 저장해 둔 세션이 아직 살아 있는지 서버에 물어본다.
+    LaunchedEffect(Unit) { viewModel.reloadSettings() }
 
     // 상세 화면에서 뒤로가기는 목록으로. 목록에서는 앱의 기본 동작(녹음 화면)으로 넘긴다.
     BackHandler(enabled = state.detail != null) { viewModel.exitDetail() }
 
     Box(modifier = Modifier.fillMaxSize().background(DagloColors.BgMain)) {
-        Row(modifier = Modifier.fillMaxSize()) {
-            DagloSidebar(
+        when {
+            !state.serverConfigured -> ServerNotConfigured(onOpenSettings)
+
+            !state.authChecked -> Box(
+                modifier = Modifier.fillMaxSize(),
+                contentAlignment = Alignment.Center
+            ) {
+                CircularProgressIndicator(color = DagloColors.Primary)
+            }
+
+            // 웹이 세션 없는 사람을 로그인 페이지로 보내는 것과 같은 자리
+            !state.loggedIn -> DagloLoginScreen(
                 state = state,
-                onHome = { viewModel.goHome() },
-                onFilter = { viewModel.changeFilter(it) },
-                onFolder = { viewModel.selectFolder(it) },
-                onNewFolder = { showNewFolder = true },
-                onDeleteFolder = { folderPendingDelete = it },
-                onUpload = { showUpload = true },
-                onOpenRecorder = onOpenRecorder,
-                onOpenSettings = onOpenSettings,
-                onOpenWeb = onOpenWeb
+                onLogin = { id, pw -> viewModel.login(id, pw) },
+                onSetup = { id, pw, name -> viewModel.setupFirstAdmin(id, pw, name) },
+                onOpenSettings = onOpenSettings
             )
 
-            Box(modifier = Modifier.weight(1f).fillMaxHeight()) {
-                if (!state.serverConfigured) {
-                    ServerNotConfigured(onOpenSettings)
-                } else if (state.detail != null) {
-                    DagloBoardDetailScreen(viewModel = viewModel, state = state)
-                } else {
-                    DagloDashboard(
-                        state = state,
-                        viewModel = viewModel,
-                        onUpload = { showUpload = true },
-                        onBatchMove = { showBatchMove = true }
-                    )
+            else -> Row(modifier = Modifier.fillMaxSize()) {
+                DagloSidebar(
+                    state = state,
+                    onHome = { viewModel.goHome() },
+                    onFilter = { viewModel.changeFilter(it) },
+                    onFolder = { viewModel.selectFolder(it) },
+                    onNewFolder = { showNewFolder = true },
+                    onDeleteFolder = { folderPendingDelete = it },
+                    onUpload = { showUpload = true },
+                    onChangePassword = { showPasswordChange = true },
+                    onLogout = { viewModel.logout() },
+                    onOpenRecorder = onOpenRecorder,
+                    onOpenSettings = onOpenSettings,
+                    onOpenWeb = onOpenWeb
+                )
+
+                Box(modifier = Modifier.weight(1f).fillMaxHeight()) {
+                    if (state.detail != null) {
+                        DagloBoardDetailScreen(viewModel = viewModel, state = state)
+                    } else {
+                        DagloDashboard(
+                            state = state,
+                            viewModel = viewModel,
+                            onUpload = { showUpload = true },
+                            onBatchMove = { showBatchMove = true }
+                        )
+                    }
                 }
             }
         }
@@ -163,6 +184,16 @@ fun DagloHomeScreen(
         )
     }
 
+    if (showPasswordChange) {
+        PasswordChangeDialog(
+            onDismiss = { showPasswordChange = false },
+            onSubmit = { current, new ->
+                viewModel.changePassword(current, new)
+                showPasswordChange = false
+            }
+        )
+    }
+
     if (showBatchMove) {
         BatchMoveDialog(
             folders = state.folders,
@@ -187,10 +218,14 @@ private fun DagloSidebar(
     onNewFolder: () -> Unit,
     onDeleteFolder: (DagloFolder) -> Unit,
     onUpload: () -> Unit,
+    onChangePassword: () -> Unit,
+    onLogout: () -> Unit,
     onOpenRecorder: () -> Unit,
     onOpenSettings: () -> Unit,
     onOpenWeb: () -> Unit
 ) {
+    var accountMenuOpen by remember { mutableStateOf(false) }
+
     Column(
         modifier = Modifier
             .width(DagloDims.SidebarWidth)
@@ -198,33 +233,65 @@ private fun DagloSidebar(
             .background(DagloColors.BgCard)
             .border(width = 1.dp, color = DagloColors.Border)
     ) {
-        // 브랜드 배지. 웹은 여기에 로그인 계정을 보여 주지만, 앱은 API 토큰으로 붙으므로
-        // 대신 접속 중인 서버 주소를 적어 둔다.
+        // 계정 배지. 웹과 같이 로고를 누르면 처음 화면으로, 화살표를 누르면 계정 메뉴가 열린다.
         Row(
-            modifier = Modifier
-                .fillMaxWidth()
-                .clickable { onHome() }
-                .padding(horizontal = 16.dp, vertical = 18.dp),
+            modifier = Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 14.dp),
             verticalAlignment = Alignment.CenterVertically
         ) {
-            Box(
+            Row(
                 modifier = Modifier
-                    .size(38.dp)
-                    .background(DagloColors.Primary, CircleShape),
-                contentAlignment = Alignment.Center
+                    .weight(1f)
+                    .clickable { onHome() }
+                    .padding(4.dp),
+                verticalAlignment = Alignment.CenterVertically
             ) {
-                Text("da", color = Color.White, fontWeight = FontWeight.Bold, fontSize = 14.sp)
+                Box(
+                    modifier = Modifier.size(38.dp).background(DagloColors.Primary, CircleShape),
+                    contentAlignment = Alignment.Center
+                ) {
+                    Text(
+                        text = state.user?.initials ?: "··",
+                        color = Color.White,
+                        fontWeight = FontWeight.Bold,
+                        fontSize = 14.sp
+                    )
+                }
+                Spacer(modifier = Modifier.width(10.dp))
+                Column(modifier = Modifier.weight(1f)) {
+                    Text("daglo AI", fontWeight = FontWeight.Bold, fontSize = 15.sp, color = DagloColors.TextMain)
+                    Text(
+                        text = state.user?.displayName ?: "불러오는 중",
+                        fontSize = 11.5.sp,
+                        color = DagloColors.TextSubtle,
+                        maxLines = 1
+                    )
+                }
             }
-            Spacer(modifier = Modifier.width(10.dp))
-            Column(modifier = Modifier.weight(1f)) {
-                Text("daglo AI", fontWeight = FontWeight.Bold, fontSize = 15.sp, color = DagloColors.TextMain)
-                Text(
-                    text = state.serverUrl.removePrefix("http://").removePrefix("https://")
-                        .ifBlank { "서버 미설정" },
-                    fontSize = 11.5.sp,
-                    color = DagloColors.TextSubtle,
-                    maxLines = 1
-                )
+            Box {
+                IconButton(onClick = { accountMenuOpen = true }, modifier = Modifier.size(30.dp)) {
+                    Icon(
+                        Icons.Default.ExpandMore,
+                        contentDescription = "계정 메뉴",
+                        tint = DagloColors.TextSubtle,
+                        modifier = Modifier.size(17.dp)
+                    )
+                }
+                DropdownMenu(expanded = accountMenuOpen, onDismissRequest = { accountMenuOpen = false }) {
+                    DropdownMenuItem(
+                        text = { Text("비밀번호 변경", fontSize = 13.sp) },
+                        onClick = {
+                            accountMenuOpen = false
+                            onChangePassword()
+                        }
+                    )
+                    DropdownMenuItem(
+                        text = { Text("로그아웃", fontSize = 13.sp, color = DagloColors.Danger) },
+                        onClick = {
+                            accountMenuOpen = false
+                            onLogout()
+                        }
+                    )
+                }
             }
         }
 
@@ -685,7 +752,7 @@ private fun ServerNotConfigured(onOpenSettings: () -> Unit) {
             Spacer(modifier = Modifier.height(12.dp))
             Text("daglo 서버 주소가 아직 설정되지 않았습니다.", color = DagloColors.TextMuted, fontSize = 14.sp)
             Spacer(modifier = Modifier.height(4.dp))
-            Text("서버 주소와 API 토큰을 넣으면 웹과 같은 화면을 씁니다.", color = DagloColors.TextSubtle, fontSize = 12.5.sp)
+            Text("주소를 넣고 웹과 같은 계정으로 로그인하면 같은 화면을 씁니다.", color = DagloColors.TextSubtle, fontSize = 12.5.sp)
             Spacer(modifier = Modifier.height(16.dp))
             DagloPrimaryButton("서버 설정 열기", Icons.Default.Settings, onOpenSettings)
         }

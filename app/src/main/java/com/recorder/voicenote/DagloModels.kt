@@ -10,6 +10,44 @@ import org.json.JSONObject
  * 고치면 되도록, 화면 코드에서는 JSONObject 를 직접 만지지 않는다.
  */
 
+/** 로그인한 사용자. 웹 사이드바의 계정 배지에 쓰는 값과 같다 (server/auth.py user_to_dict). */
+data class DagloUser(
+    val id: Int,
+    val username: String,
+    val displayName: String,
+    val isAdmin: Boolean
+) {
+    /** 배지에 쓰는 두 글자. 웹도 이름 앞 두 글자를 쓴다. */
+    val initials: String get() = displayName.take(2).ifBlank { "··" }
+
+    companion object {
+        fun from(o: JSONObject) = DagloUser(
+            id = o.optInt("id"),
+            username = o.optString("username"),
+            displayName = o.optString("display_name").ifBlank { o.optString("username") },
+            isAdmin = o.optBoolean("is_admin", false)
+        )
+    }
+}
+
+/** 로그인 화면이 '로그인'을 보여줄지 '최초 계정 만들기'를 보여줄지 판단하는 데 쓴다. */
+data class DagloAuthStatus(
+    val setupRequired: Boolean,
+    val authenticated: Boolean,
+    val user: DagloUser?
+) {
+    companion object {
+        fun from(o: JSONObject) = DagloAuthStatus(
+            setupRequired = o.optBoolean("setup_required", false),
+            authenticated = o.optBoolean("authenticated", false),
+            user = o.optJSONObject("user")?.let { DagloUser.from(it) }
+        )
+    }
+}
+
+/** 로그인 성공 결과: 누구인지 + 앞으로 실어 보낼 세션 쿠키. */
+data class DagloLoginResult(val user: DagloUser, val sessionCookie: String)
+
 data class DagloFolder(
     val id: Int,
     val name: String,

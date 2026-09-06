@@ -57,7 +57,7 @@ data class RecorderUiState(
     val playingRecordingName: String? = null,
     // ---- daglo 서버 연동 ----
     val serverUrl: String = "",
-    val apiToken: String = "",
+    val loginPath: String = DagloSettings.DEFAULT_LOGIN_PATH,
     val autoUpload: Boolean = true,
     /** 서버 주소가 채워져 있는지 (앱 안 daglo 화면·업로드 사용 가능 여부) */
     val serverConfigured: Boolean = false,
@@ -105,7 +105,7 @@ class RecorderViewModel(application: Application) : AndroidViewModel(application
 
         _uiState.value = _uiState.value.copy(
             serverUrl = settings.serverUrl,
-            apiToken = settings.apiToken,
+            loginPath = settings.loginPath,
             autoUpload = settings.autoUpload,
             serverConfigured = settings.isConfigured
         )
@@ -529,21 +529,27 @@ class RecorderViewModel(application: Application) : AndroidViewModel(application
     // ----------------------------------------------------------------------------------
 
     /** 설정 화면에서 저장을 누르면 호출된다. */
-    fun saveServerSettings(serverUrl: String, apiToken: String, autoUpload: Boolean) {
+    fun saveServerSettings(serverUrl: String, loginPath: String, autoUpload: Boolean) {
+        val addressChanged = DagloSettings.normalizeUrl(serverUrl) != settings.serverUrl
         settings.serverUrl = serverUrl
-        settings.apiToken = apiToken
+        settings.loginPath = loginPath
         settings.autoUpload = autoUpload
+        // 다른 서버를 가리키게 됐다면 예전 서버의 세션은 쓸모가 없다
+        if (addressChanged) settings.clearSession()
         _uiState.value = _uiState.value.copy(
             serverUrl = settings.serverUrl,
-            apiToken = settings.apiToken,
+            loginPath = settings.loginPath,
             autoUpload = settings.autoUpload,
             serverConfigured = settings.isConfigured,
             message = if (settings.isConfigured) "서버 설정을 저장했습니다" else "서버 주소를 비워 두면 연동이 꺼집니다"
         )
     }
 
-    /** 주소·토큰이 맞는지 서버에 한 번 물어본다. */
-    fun testServerConnection(serverUrl: String, apiToken: String) {
+    /**
+     * 주소와 로그인 주소가 맞는지 서버에 한 번 물어본다.
+     * 로그인 상태 확인 경로는 로그인 없이 열려 있어서, 로그인 전에도 주소를 확인할 수 있다.
+     */
+    fun testServerConnection(serverUrl: String, loginPath: String) {
         if (serverUrl.isBlank()) {
             _uiState.value = _uiState.value.copy(message = "서버 주소를 먼저 입력하세요")
             return
@@ -551,11 +557,19 @@ class RecorderViewModel(application: Application) : AndroidViewModel(application
         _uiState.value = _uiState.value.copy(isTestingConnection = true)
         viewModelScope.launch(Dispatchers.IO) {
             // 저장하기 전 입력값 그대로 확인한다 (설정에 손대지 않는다).
-            val result = DagloApi(DagloSettings.normalizeUrl(serverUrl), apiToken.trim()).ping()
-            val message = when (result) {
-                is ApiResult.Success -> "서버에 연결됐습니다"
-                is ApiResult.Fatal -> "연결 실패: ${result.message}"
-                is ApiResult.Retryable -> "연결 실패: ${result.message}"
+            val client = DagloClient(
+                DagloSettings.normalizeUrl(serverUrl),
+                "",
+                DagloSettings.normalizeLoginPath(loginPath)
+            )
+            val message = try {
+                val status = client.authStatus()
+                when {
+                    status.setupRequired -> "서버에 연결됐습니다 (아직 계정이 없어 첫 계정을 만들게 됩니다)"
+                    else -> "서버에 연결됐습니다"
+                }
+            } catch (e: Exception) {
+                "연결 실패: " + ((e as? DagloHttpException)?.message ?: e.message ?: "알 수 없는 오류")
             }
             _uiState.value = _uiState.value.copy(isTestingConnection = false, message = message)
         }

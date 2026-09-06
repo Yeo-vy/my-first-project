@@ -45,6 +45,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.window.DialogProperties
@@ -440,6 +441,73 @@ fun GlossaryDialog(
                 }
             }
         },
+        dismissButton = { TextButton(onClick = onDismiss) { Text("취소") } }
+    )
+}
+
+/**
+ * 비밀번호 변경. 웹의 계정 메뉴와 같은 자리이고, 서버도 같은 엔드포인트를 쓴다.
+ * 바꾸면 서버가 다른 기기의 세션을 모두 끊는다(지금 이 기기만 남는다).
+ */
+@Composable
+fun PasswordChangeDialog(onDismiss: () -> Unit, onSubmit: (String, String) -> Unit) {
+    var current by remember { mutableStateOf("") }
+    var next by remember { mutableStateOf("") }
+    var confirm by remember { mutableStateOf("") }
+    var error by remember { mutableStateOf<String?>(null) }
+
+    fun submit() {
+        when {
+            next != confirm -> error = "새 비밀번호가 서로 일치하지 않습니다."
+            next.length < 8 -> error = "비밀번호는 8자 이상이어야 합니다."
+            else -> onSubmit(current, next)
+        }
+    }
+
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("비밀번호 변경", fontWeight = FontWeight.Bold) },
+        text = {
+            Column {
+                Text(
+                    "변경하면 지금 이 기기를 뺀 다른 모든 기기의 로그인이 해제됩니다.",
+                    fontSize = 13.sp,
+                    color = DagloColors.TextMuted
+                )
+                Spacer(modifier = Modifier.height(14.dp))
+                OutlinedTextField(
+                    value = current,
+                    onValueChange = { current = it },
+                    label = { Text("현재 비밀번호") },
+                    singleLine = true,
+                    visualTransformation = PasswordVisualTransformation(),
+                    modifier = Modifier.fillMaxWidth()
+                )
+                Spacer(modifier = Modifier.height(10.dp))
+                OutlinedTextField(
+                    value = next,
+                    onValueChange = { next = it },
+                    label = { Text("새 비밀번호 (8자 이상)") },
+                    singleLine = true,
+                    visualTransformation = PasswordVisualTransformation(),
+                    modifier = Modifier.fillMaxWidth()
+                )
+                Spacer(modifier = Modifier.height(10.dp))
+                OutlinedTextField(
+                    value = confirm,
+                    onValueChange = { confirm = it },
+                    label = { Text("새 비밀번호 확인") },
+                    singleLine = true,
+                    visualTransformation = PasswordVisualTransformation(),
+                    modifier = Modifier.fillMaxWidth()
+                )
+                error?.let {
+                    Spacer(modifier = Modifier.height(10.dp))
+                    Text(it, fontSize = 12.5.sp, color = DagloColors.Danger)
+                }
+            }
+        },
+        confirmButton = { TextButton(onClick = { submit() }) { Text("변경하기") } },
         dismissButton = { TextButton(onClick = onDismiss) { Text("취소") } }
     )
 }

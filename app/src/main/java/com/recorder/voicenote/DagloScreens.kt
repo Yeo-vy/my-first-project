@@ -53,13 +53,16 @@ import androidx.compose.ui.viewinterop.AndroidView
 /**
  * daglo 서버 연결 설정 화면.
  *
- * 서버는 각자 자기 PC 에서 돌리는 개인 서버라 주소가 다르다. 여기서 주소와 토큰을 넣어 두면
- * 녹음이 끝날 때마다 자동으로 올라가고, 앱 안에서 daglo 화면도 열 수 있다.
+ * 서버는 각자 자기 PC 에서 돌리는 개인 서버라 주소가 다르다. 주소를 넣어 두면 앱에서 웹과 같은
+ * 계정으로 로그인할 수 있고, 녹음이 끝날 때마다 자동으로 올라간다.
+ *
+ * 로그인 주소는 서버 `.env` 의 `LOGIN_PATH` 다. 인터넷에 열어 둔 서버는 이 값을 임의 문자열로
+ * 바꿔 두는 경우가 있어서(봇이 로그인 화면을 찾지 못하게), 앱도 같은 값을 알아야 한다.
  */
 @Composable
 fun ServerSettingsScreen(
     initialServerUrl: String,
-    initialApiToken: String,
+    initialLoginPath: String,
     initialAutoUpload: Boolean,
     isTesting: Boolean,
     onSave: (String, String, Boolean) -> Unit,
@@ -67,7 +70,7 @@ fun ServerSettingsScreen(
     onBack: () -> Unit
 ) {
     var serverUrl by rememberSaveable { mutableStateOf(initialServerUrl) }
-    var apiToken by rememberSaveable { mutableStateOf(initialApiToken) }
+    var loginPath by rememberSaveable { mutableStateOf(initialLoginPath) }
     var autoUpload by rememberSaveable { mutableStateOf(initialAutoUpload) }
 
     Scaffold(
@@ -90,7 +93,8 @@ fun ServerSettingsScreen(
                 .padding(horizontal = 20.dp, vertical = 12.dp)
         ) {
             Text(
-                text = "녹음이 끝나면 이 서버로 파일을 보내 자동으로 받아쓰기를 시작합니다.",
+                text = "주소를 저장하면 웹과 같은 계정으로 로그인합니다. 녹음이 끝나면 이 서버로 " +
+                    "파일을 보내 자동으로 받아쓰기를 시작합니다.",
                 style = MaterialTheme.typography.bodyMedium,
                 color = MaterialTheme.colorScheme.onSurfaceVariant
             )
@@ -108,10 +112,10 @@ fun ServerSettingsScreen(
             Spacer(modifier = Modifier.height(14.dp))
 
             OutlinedTextField(
-                value = apiToken,
-                onValueChange = { apiToken = it },
-                label = { Text("API 토큰") },
-                supportingText = { Text("서버 .env 의 DAGLO_API_TOKEN 과 같은 값") },
+                value = loginPath,
+                onValueChange = { loginPath = it },
+                label = { Text("로그인 주소") },
+                supportingText = { Text("서버 .env 의 LOGIN_PATH 값 (기본값: login)") },
                 singleLine = true,
                 keyboardOptions = androidx.compose.foundation.text.KeyboardOptions(imeAction = ImeAction.Done),
                 modifier = Modifier.fillMaxWidth()
@@ -136,7 +140,7 @@ fun ServerSettingsScreen(
 
             Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
                 OutlinedButton(
-                    onClick = { onTest(serverUrl, apiToken) },
+                    onClick = { onTest(serverUrl, loginPath) },
                     enabled = !isTesting
                 ) {
                     if (isTesting) {
@@ -145,15 +149,15 @@ fun ServerSettingsScreen(
                     }
                     Text("연결 테스트")
                 }
-                Button(onClick = { onSave(serverUrl, apiToken, autoUpload) }) {
+                Button(onClick = { onSave(serverUrl, loginPath, autoUpload) }) {
                     Text("저장")
                 }
             }
 
             Spacer(modifier = Modifier.height(28.dp))
             Text(
-                text = "앱 안에서 daglo 화면을 열면 변환된 스크립트·요약·AI 채팅을 그대로 쓸 수 있습니다. " +
-                    "그 화면은 웹과 같은 계정으로 한 번 로그인하면 유지됩니다.",
+                text = "저장하고 뒤로 가면 로그인 화면이 뜹니다. 한 번 로그인하면 세션이 남아 " +
+                    "다음에는 바로 daglo 화면이 열립니다.",
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant
             )

@@ -27,12 +27,12 @@ sealed class ApiResult {
  * '연결 확인'과 '녹음 파일 업로드' 둘뿐이라 그 정도면 충분하고, 의존성이 늘지 않는다.
  * 업로드는 파일 전체를 메모리에 올리지 않고 스트리밍으로 흘려보낸다(3시간 녹음도 안전).
  */
-class DagloApi(private val serverUrl: String, private val apiToken: String) {
+class DagloApi(private val serverUrl: String, private val sessionCookie: String) {
 
     /** 저장된 설정으로 만들 때 쓰는 편의 생성자 */
-    constructor(settings: DagloSettings) : this(settings.serverUrl, settings.apiToken)
+    constructor(settings: DagloSettings) : this(settings.serverUrl, settings.sessionCookie)
 
-    /** 서버가 살아있는지, 주소가 맞는지 확인한다. (로그인 없이 열려 있는 유일한 엔드포인트) */
+    /** 서버가 살아있는지 확인한다. 로그인한 세션이어야 통과한다. */
     fun ping(): ApiResult {
         val base = serverUrl
         if (base.isBlank()) return ApiResult.Fatal("서버 주소가 비어 있습니다")
@@ -102,8 +102,11 @@ class DagloApi(private val serverUrl: String, private val apiToken: String) {
                 connectTimeout = CONNECT_TIMEOUT_MS
                 readTimeout = READ_TIMEOUT_MS
                 useCaches = false
-                val token = apiToken
-                if (token.isNotBlank()) setRequestProperty("X-API-Key", token)
+                // 웹과 같은 세션 쿠키로 인증한다 (로그인 화면에서 받아 저장해 둔 값)
+                val cookie = sessionCookie
+                if (cookie.isNotBlank()) {
+                    setRequestProperty("Cookie", "${DagloSettings.SESSION_COOKIE_NAME}=$cookie")
+                }
             }
             prepare(conn)
 
@@ -111,9 +114,9 @@ class DagloApi(private val serverUrl: String, private val apiToken: String) {
             val body = readBody(conn)
             when {
                 code in 200..299 -> ApiResult.Success(body)
-                // 401/403 은 토큰이 틀린 것이므로 재시도해도 똑같다. 사용자가 설정을 고쳐야 한다.
+                // 401/403 은 세션이 끊긴 것이므로 재시도해도 똑같다. 앱에서 다시 로그인해야 한다.
                 code == 401 || code == 403 ->
-                    ApiResult.Fatal("서버가 인증을 거부했습니다. API 토큰을 확인하세요. (HTTP $code)")
+                    ApiResult.Fatal("로그인이 만료되었습니다. 앱에서 다시 로그인해 주세요. (HTTP $code)")
                 code == 413 -> ApiResult.Fatal("파일이 서버 허용 크기를 넘습니다. (HTTP 413)")
                 code == 400 -> ApiResult.Fatal(errorMessage(body) ?: "서버가 요청을 거부했습니다. (HTTP 400)")
                 else -> ApiResult.Retryable(errorMessage(body) ?: "서버 오류 (HTTP $code)")

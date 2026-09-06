@@ -34,6 +34,14 @@ data class DagloUiState(
     val serverConfigured: Boolean = false,
     val serverUrl: String = "",
 
+    // 로그인 (웹과 같은 계정·같은 세션 쿠키)
+    val authChecked: Boolean = false,
+    val loggedIn: Boolean = false,
+    val setupRequired: Boolean = false,
+    val user: DagloUser? = null,
+    val authBusy: Boolean = false,
+    val authError: String? = null,
+
     // 목록 화면
     val filter: DagloFilter = DagloFilter.ALL,
     val folderId: Int? = null,
@@ -106,13 +114,124 @@ class DagloBoardViewModel(app: Application) : AndroidViewModel(app) {
         startPolling()
     }
 
-    /** 설정 화면에서 주소·토큰을 바꾸고 돌아왔을 때 다시 붙는다. */
+    /** 설정 화면에서 주소를 바꾸고 돌아왔을 때 다시 붙는다. */
     fun reloadSettings() {
         client = DagloClient(settings)
         _state.update {
             it.copy(serverConfigured = settings.isConfigured, serverUrl = settings.serverUrl)
         }
-        if (settings.isConfigured) loadFolders()
+        if (settings.isConfigured) checkAuth()
+    }
+
+    // ------------------------------------------------------------ 로그인
+
+    /**
+     * 저장해 둔 세션이 아직 살아 있는지 서버에 물어본다.
+     * 이 경로(`/{LOGIN_PATH}/status`)는 로그인 없이 열려 있어서 서버 주소 확인도 겸한다.
+     */
+    fun checkAuth() = viewModelScope.launch {
+        if (!settings.isConfigured) {
+            _state.update { it.copy(authChecked = true, loggedIn = false) }
+            return@launch
+        }
+        _state.update { it.copy(authBusy = true) }
+        try {
+            val status = client.authStatus()
+            val user = status.user ?: if (status.authenticated) runCatching { client.me() }.getOrNull() else null
+            _state.update {
+                it.copy(
+                    authChecked = true,
+                    loggedIn = status.authenticated,
+                    setupRequired = status.setupRequired,
+                    user = user,
+                    authBusy = false,
+                    authError = null
+                )
+            }
+            if (status.authenticated) {
+                loadFolders()
+                loadBoards()
+            } else {
+                settings.clearSession()
+            }
+        } catch (e: Exception) {
+            _state.update {
+                it.copy(
+                    authChecked = true,
+                    loggedIn = false,
+                    authBusy = false,
+                    authError = (e as? DagloHttpException)?.message ?: e.message
+                        ?: "서버에 연결할 수 없습니다"
+                )
+            }
+        }
+    }
+
+    fun login(username: String, password: String) = viewModelScope.launch {
+        if (username.isBlank() || password.isBlank()) {
+            _state.update { it.copy(authError = "아이디와 비밀번호를 입력하세요.") }
+            return@launch
+        }
+        _state.update { it.copy(authBusy = true, authError = null) }
+        try {
+            applyLogin(client.login(username, password))
+        } catch (e: Exception) {
+            _state.update {
+                it.copy(authBusy = false, authError = (e as? DagloHttpException)?.message
+                    ?: e.message ?: "로그인에 실패했습니다")
+            }
+        }
+    }
+
+    /** 서버에 계정이 하나도 없을 때 첫 관리자 계정을 만들고 그대로 로그인한다. */
+    fun setupFirstAdmin(username: String, password: String, displayName: String) =
+        viewModelScope.launch {
+            _state.update { it.copy(authBusy = true, authError = null) }
+            try {
+                applyLogin(client.setupFirstAdmin(username, password, displayName))
+            } catch (e: Exception) {
+                _state.update {
+                    it.copy(authBusy = false, authError = (e as? DagloHttpException)?.message
+                        ?: e.message ?: "계정을 만들지 못했습니다")
+                }
+            }
+        }
+
+    private fun applyLogin(result: DagloLoginResult) {
+        settings.sessionCookie = result.sessionCookie
+        client = DagloClient(settings)
+        _state.update {
+            it.copy(
+                loggedIn = true,
+                setupRequired = false,
+                user = result.user,
+                authBusy = false,
+                authError = null,
+                authChecked = true
+            )
+        }
+        loadFolders()
+        loadBoards()
+    }
+
+    fun logout() = viewModelScope.launch {
+        runCatching { client.logout() }   // 서버가 못 받아도 앱에서는 세션을 버린다
+        settings.clearSession()
+        client = DagloClient(settings)
+        _state.update {
+            DagloUiState(
+                serverConfigured = settings.isConfigured,
+                serverUrl = settings.serverUrl,
+                authChecked = true,
+                loggedIn = false,
+                toast = "로그아웃했습니다."
+            )
+        }
+    }
+
+    fun changePassword(currentPassword: String, newPassword: String) = run {
+        client.changePassword(currentPassword, newPassword)
+        toast("비밀번호를 변경했습니다.")
     }
 
     fun consumeToast() = _state.update { it.copy(toast = null) }
@@ -122,7 +241,15 @@ class DagloBoardViewModel(app: Application) : AndroidViewModel(app) {
     private fun toast(message: String) = _state.update { it.copy(toast = message) }
 
     private fun fail(e: Throwable) {
-        toast((e as? DagloHttpException)?.message ?: e.message ?: "요청에 실패했습니다")
+        val http = e as? DagloHttpException
+        if (http?.code == 401) {
+            // 세션이 만료됐다. 웹이 로그인 페이지로 되돌리는 것과 같은 자리다.
+            settings.clearSession()
+            _state.update {
+                it.copy(loggedIn = false, user = null, detail = null, authChecked = true)
+            }
+        }
+        toast(http?.message ?: e.message ?: "요청에 실패했습니다")
     }
 
     private fun run(block: suspend () -> Unit) = viewModelScope.launch {

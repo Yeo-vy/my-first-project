@@ -267,7 +267,7 @@ fun VoiceRecorderApp(viewModel: RecorderViewModel = viewModel()) {
 
                 SCREEN_SETTINGS -> ServerSettingsScreen(
                     initialServerUrl = uiState.serverUrl,
-                    initialApiToken = uiState.apiToken,
+                    initialLoginPath = uiState.loginPath,
                     initialAutoUpload = uiState.autoUpload,
                     isTesting = uiState.isTestingConnection,
                     onSave = { url, token, auto -> viewModel.saveServerSettings(url, token, auto) },

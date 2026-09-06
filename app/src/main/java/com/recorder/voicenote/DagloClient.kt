@@ -18,22 +18,78 @@ class DagloHttpException(val code: Int, message: String) : Exception(message)
 /**
  * daglo 서버의 REST API 전부를 감싼 클라이언트.
  *
- * 웹 화면이 브라우저 쿠키로 인증하는 것과 달리, 앱은 서버 `.env` 의 `DAGLO_API_TOKEN` 을
- * `X-API-Key` 헤더로 실어 보낸다(서버 auth_gate 가 이 헤더를 먼저 확인한다). 그래서 앱에서는
- * 로그인 화면 없이 바로 쓸 수 있고, 대신 계정 메뉴(비밀번호 변경·로그아웃)는 쿠키 세션 전용이라
- * 앱 화면에 두지 않았다.
+ * 인증은 웹과 같다 — 웹과 같은 계정으로 로그인해서 받은 세션 쿠키(`daglo_session`)를 요청마다
+ * 실어 보낸다. 그래서 계정 메뉴(내 정보·비밀번호 변경·로그아웃)까지 웹과 똑같이 동작한다.
  *
  * 외부 라이브러리 없이 HttpURLConnection 만 쓴다 — 기존 DagloApi 와 같은 방침이다.
  */
-class DagloClient(val baseUrl: String, private val apiToken: String) {
+class DagloClient(
+    val baseUrl: String,
+    private val sessionCookie: String,
+    private val loginPath: String = DagloSettings.DEFAULT_LOGIN_PATH
+) {
 
-    constructor(settings: DagloSettings) : this(settings.serverUrl, settings.apiToken)
+    constructor(settings: DagloSettings) :
+        this(settings.serverUrl, settings.sessionCookie, settings.loginPath)
 
     val isConfigured: Boolean get() = baseUrl.isNotBlank()
 
     /** MediaPlayer·DownloadManager 처럼 우리 request() 를 못 쓰는 곳에 넘겨줄 인증 헤더. */
     val authHeaders: Map<String, String>
-        get() = if (apiToken.isNotBlank()) mapOf("X-API-Key" to apiToken) else emptyMap()
+        get() = if (sessionCookie.isNotBlank()) {
+            mapOf("Cookie" to "${DagloSettings.SESSION_COOKIE_NAME}=$sessionCookie")
+        } else {
+            emptyMap()
+        }
+
+    // ---------------------------------------------------------------- 로그인 / 계정
+
+    /**
+     * 로그인 화면이 '최초 설정'을 보여줄지 판단하는 데 쓴다. 이 경로는 로그인 없이 열려 있어서
+     * 서버 주소가 맞는지 확인하는 용도로도 쓴다.
+     */
+    suspend fun authStatus(): DagloAuthStatus =
+        DagloAuthStatus.from(JSONObject(get("/$loginPath/status")))
+
+    /** 웹 로그인 화면과 같은 요청. 성공하면 세션 쿠키를 돌려준다. */
+    suspend fun login(username: String, password: String): DagloLoginResult {
+        val body = JSONObject().put("username", username.trim()).put("password", password)
+        val response = sendRaw("POST", "/$loginPath/submit", body)
+        return loginResultFrom(response)
+    }
+
+    /** 서버에 계정이 하나도 없을 때 첫 관리자 계정을 만든다 (웹 로그인 화면의 최초 설정). */
+    suspend fun setupFirstAdmin(
+        username: String,
+        password: String,
+        displayName: String
+    ): DagloLoginResult {
+        val body = JSONObject()
+            .put("username", username.trim())
+            .put("password", password)
+            .put("display_name", displayName.trim())
+        return loginResultFrom(sendRaw("POST", "/$loginPath/setup", body))
+    }
+
+    private fun loginResultFrom(response: HttpResponse): DagloLoginResult {
+        val user = DagloUser.from(JSONObject(response.body).optJSONObject("user") ?: JSONObject())
+        val cookie = response.sessionCookie
+            ?: throw DagloHttpException(0, "서버가 세션을 내려주지 않았습니다. 서버 주소를 확인하세요.")
+        return DagloLoginResult(user, cookie)
+    }
+
+    suspend fun me(): DagloUser = DagloUser.from(JSONObject(get("/api/auth/me")))
+
+    suspend fun logout() {
+        post("/api/auth/logout", null)
+    }
+
+    suspend fun changePassword(currentPassword: String, newPassword: String) {
+        val body = JSONObject()
+            .put("current_password", currentPassword)
+            .put("new_password", newPassword)
+        post("/api/auth/password", body)
+    }
 
     fun audioUrl(boardId: Int): String = "$baseUrl/api/audio/$boardId"
 
@@ -266,11 +322,17 @@ class DagloClient(val baseUrl: String, private val apiToken: String) {
 
     // ---------------------------------------------------------------- 내부 구현
 
+    /** 응답 본문과, 있으면 서버가 새로 내려준 세션 쿠키. */
+    private class HttpResponse(val body: String, val sessionCookie: String?)
+
     private suspend fun get(path: String): String = send("GET", path, null)
 
     private suspend fun post(path: String, body: JSONObject?): String = send("POST", path, body)
 
     private suspend fun send(method: String, path: String, body: JSONObject?): String =
+        sendRaw(method, path, body).body
+
+    private suspend fun sendRaw(method: String, path: String, body: JSONObject?): HttpResponse =
         withContext(Dispatchers.IO) {
             if (!isConfigured) throw DagloHttpException(0, "서버 주소가 설정되지 않았습니다")
             val conn = open(path)
@@ -284,7 +346,7 @@ class DagloClient(val baseUrl: String, private val apiToken: String) {
                 val code = conn.responseCode
                 val text = readBody(conn, code)
                 if (code !in 200..299) throw httpError(code, text)
-                text
+                HttpResponse(text, sessionCookieOf(conn))
             } catch (e: DagloHttpException) {
                 throw e
             } catch (e: Exception) {
@@ -293,6 +355,22 @@ class DagloClient(val baseUrl: String, private val apiToken: String) {
                 runCatching { conn.disconnect() }
             }
         }
+
+    /** `Set-Cookie: daglo_session=...; HttpOnly; ...` 에서 값만 꺼낸다. */
+    private fun sessionCookieOf(conn: HttpURLConnection): String? {
+        val prefix = DagloSettings.SESSION_COOKIE_NAME + "="
+        conn.headerFields?.forEach { (name, values) ->
+            if (name == null || !name.equals("Set-Cookie", ignoreCase = true)) return@forEach
+            values.forEach { raw ->
+                val first = raw.split(";").firstOrNull()?.trim().orEmpty()
+                if (first.startsWith(prefix)) {
+                    val value = first.removePrefix(prefix)
+                    if (value.isNotBlank()) return value
+                }
+            }
+        }
+        return null
+    }
 
     private fun open(path: String): HttpURLConnection =
         (URL(baseUrl + path).openConnection() as HttpURLConnection).apply {
@@ -316,7 +394,8 @@ class DagloClient(val baseUrl: String, private val apiToken: String) {
         val detail = runCatching { JSONObject(body).optString("detail") }.getOrNull()
         val message = when {
             !detail.isNullOrBlank() -> detail
-            code == 401 || code == 403 -> "서버가 인증을 거부했습니다. API 토큰을 확인하세요."
+            code == 401 -> "로그인이 필요합니다."
+            code == 403 -> "권한이 없습니다."
             else -> "서버 오류 (HTTP $code)"
         }
         return DagloHttpException(code, message)
