@@ -232,9 +232,13 @@
             submitBtn.textContent = "계정 만들고 시작하기";
         }
 
+        // 로그인 관련 주소는 이 페이지 주소(비밀 경로) 밑에 붙어 있다.
+        // /api/auth/... 같은 뻔한 자리에 두면 주소를 숨겨도 봇이 그쪽으로 응답을 받아 간다.
+        const AUTH_BASE = window.location.pathname.replace(/\/+$/, "");
+
         async function checkStatus() {
             try {
-                const res = await fetch("/api/auth/status");
+                const res = await fetch(AUTH_BASE + "/status");
                 const data = await res.json();
                 if (data.authenticated) {
                     window.location.replace("/");
@@ -265,7 +269,7 @@
                 }
             }
 
-            const endpoint = setupMode ? "/api/auth/setup" : "/api/auth/login";
+            const endpoint = AUTH_BASE + (setupMode ? "/setup" : "/submit");
             const payload = setupMode
                 ? { username, password, display_name: document.getElementById("display-name").value.trim() }
                 : { username, password };

@@ -66,18 +66,41 @@ if ALLOWED_ORIGINS:
 # .env 에 LOGIN_PATH=조금-긴-임의문자열 처럼 적으면 그 주소에서만 로그인 화면이 열린다.
 LOGIN_PATH = "/" + (os.getenv("LOGIN_PATH", "login").strip().strip("/") or "login")
 
-# 로그인하지 않은 브라우저가 루트(/)로 들어왔을 때 로그인 페이지로 안내할지 여부.
-# off 로 두면 루트조차 404 가 되어, 주소를 아는 사람만 로그인 화면에 닿을 수 있다.
-LOGIN_REDIRECT = os.getenv("LOGIN_REDIRECT", "on").strip().lower() not in ("0", "off", "false", "no")
+# 로그인 화면이 쓰는 세 갈래도 같은 비밀 주소 밑에 둔다.
+# /api/auth/... 처럼 뻔한 자리에 두면 주소를 숨겨 놔도 봇이 그쪽으로 200 을 받아 간다.
+LOGIN_STATUS_PATH = LOGIN_PATH + "/status"
+LOGIN_SUBMIT_PATH = LOGIN_PATH + "/submit"
+LOGIN_SETUP_PATH = LOGIN_PATH + "/setup"
 
+# 로그인하지 않은 브라우저가 루트(/)로 들어왔을 때 로그인 페이지로 안내할지 여부.
+# 기본은 off. on 으로 켜면 봇이 / 만 두드려도 302 Location 헤더에 비밀 주소가 그대로 적혀 나가서
+# 주소를 숨긴 의미가 없어진다. 켜는 건 집 안에서만 쓸 때로 한정하는 게 좋다.
+LOGIN_REDIRECT = os.getenv("LOGIN_REDIRECT", "off").strip().lower() in ("1", "on", "true", "yes")
+
+# 헬스체크용 /api/ping 은 아무나 200 을 받아 가므로 기본으로 잠가 둔다.
+# 모니터링 도구를 붙일 때만 .env 에 PING_PUBLIC=on 을 적는다.
+PING_PUBLIC = os.getenv("PING_PUBLIC", "off").strip().lower() in ("1", "on", "true", "yes")
+
+# 로그인하지 않은 사람에게 200 을 돌려주는 경로는 여기 적힌 것이 전부다.
 PUBLIC_PATHS = {
     LOGIN_PATH,
-    "/api/ping",
-    "/api/auth/status",
-    "/api/auth/login",
-    "/api/auth/setup",
-    "/favicon.ico",
+    LOGIN_STATUS_PATH,
+    LOGIN_SUBMIT_PATH,
+    LOGIN_SETUP_PATH,
 }
+if PING_PUBLIC:
+    PUBLIC_PATHS.add("/api/ping")
+
+if LOGIN_PATH == "/login":
+    print(
+        "[WARN] LOGIN_PATH 가 기본값(/login)입니다. 인터넷에 열어 둔 서버라면 스캐너 봇이 "
+        "로그인 화면을 그대로 받아 갑니다. .env 에 LOGIN_PATH=gate-임의문자열 을 적고 서버를 다시 켜세요."
+    )
+if LOGIN_REDIRECT:
+    print(
+        "[WARN] LOGIN_REDIRECT 가 켜져 있습니다. 루트(/)로 들어온 봇에게 302 응답으로 "
+        f"{LOGIN_PATH} 주소가 그대로 새어 나갑니다."
+    )
 
 
 @app.middleware("http")
@@ -1284,11 +1307,11 @@ class UserCreateRequest(BaseModel):
 
 @app.get("/api/ping")
 def ping():
-    """로그인 없이 열린 유일한 상태 확인용 엔드포인트(헬스체크/모니터링)."""
+    """헬스체크용. PING_PUBLIC=on 일 때만 로그인 없이 열린다(기본은 잠금)."""
     return {"status": "ok"}
 
 
-@app.get("/api/auth/status")
+@app.get(LOGIN_STATUS_PATH)
 def auth_status(request: Request, db: Session = Depends(get_db)):
     """로그인 페이지가 '최초 설정'을 보여줄지 판단하는 데 쓴다."""
     user = auth.resolve_session_user(db, request.cookies.get(auth.SESSION_COOKIE))
@@ -1299,7 +1322,7 @@ def auth_status(request: Request, db: Session = Depends(get_db)):
     }
 
 
-@app.post("/api/auth/setup")
+@app.post(LOGIN_SETUP_PATH)
 def auth_setup(req: SetupRequest, request: Request, response: Response, db: Session = Depends(get_db)):
     """계정이 하나도 없을 때만 첫 관리자 계정을 만든다."""
     if auth.has_any_user(db):
@@ -1310,7 +1333,7 @@ def auth_setup(req: SetupRequest, request: Request, response: Response, db: Sess
     return {"success": True, "user": auth.user_to_dict(user)}
 
 
-@app.post("/api/auth/login")
+@app.post(LOGIN_SUBMIT_PATH)
 def auth_login(req: LoginRequest, request: Request, response: Response, db: Session = Depends(get_db)):
     ip = auth.client_ip(request)
     remaining = auth.lockout_remaining(ip)
