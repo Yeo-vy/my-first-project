@@ -51,6 +51,8 @@ dependencies {
     implementation("androidx.compose.material:material-icons-extended")
     implementation("androidx.compose.material3:material3")
     implementation("androidx.lifecycle:lifecycle-viewmodel-compose:2.8.4")
+    // daglo 화면의 ViewModel 이 viewModelScope 로 서버 호출·재생 타이머를 돌린다
+    implementation("androidx.lifecycle:lifecycle-viewmodel-ktx:2.8.4")
 
     // 녹음 파일을 서버로 올리는 작업. 네트워크가 없으면 생길 때까지 기다렸다가 자동으로 재시도한다.
     implementation("androidx.work:work-runtime-ktx:2.9.0")

@@ -54,6 +54,7 @@ import java.util.Locale
 // 앱 안에서 오가는 화면들. 화면 회전에도 유지해야 해서 저장 가능한 문자열로 둔다.
 private const val SCREEN_RECORDER = "recorder"
 private const val SCREEN_DAGLO = "daglo"
+private const val SCREEN_DAGLO_WEB = "daglo_web"
 private const val SCREEN_SETTINGS = "settings"
 
 // 이 너비부터는 폴더 목록과 녹음 목록을 좌우로 함께 띄운다.
@@ -126,8 +127,13 @@ fun VoiceRecorderApp(viewModel: RecorderViewModel = viewModel()) {
     // 권한 승인 후 바로 녹음을 시작하기 위한 플래그
     var pendingRecordAfterPermission by remember { mutableStateOf(false) }
 
-    // 화면 전환 (녹음 / daglo 웹 / 서버 설정). 화면 회전에도 유지되도록 rememberSaveable 사용.
-    var currentScreen by rememberSaveable { mutableStateOf(SCREEN_RECORDER) }
+    // 화면 전환 (daglo / 녹음 / 웹 화면 / 서버 설정). 화면 회전에도 유지되도록 rememberSaveable 사용.
+    // 앱의 첫 화면은 daglo 다 — 태블릿에서는 웹 서버와 같은 화면이 이 앱의 본체이고,
+    // 녹음은 그 화면에서 필요할 때 들어가는 통로다.
+    var currentScreen by rememberSaveable { mutableStateOf(SCREEN_DAGLO) }
+    // 설정 화면에서 뒤로 갈 자리 (녹음 화면에서 열었는지 daglo 화면에서 열었는지)
+    var settingsReturn by rememberSaveable { mutableStateOf(SCREEN_DAGLO) }
+    val dagloViewModel: DagloBoardViewModel = viewModel()
 
     // 태블릿처럼 넓은 화면이면 폴더 목록과 녹음 목록을 좌우로 함께 띄운다.
     // (멀티윈도우/DeX 에서 창을 줄이면 설정도 따라 바뀌므로 화면이 아니라 창 크기 기준이 된다)
@@ -223,17 +229,14 @@ fun VoiceRecorderApp(viewModel: RecorderViewModel = viewModel()) {
                             Spacer(modifier = Modifier.width(8.dp))
                         }
                         IconButton(
-                            onClick = {
-                                if (uiState.serverConfigured) {
-                                    currentScreen = SCREEN_DAGLO
-                                } else {
-                                    currentScreen = SCREEN_SETTINGS
-                                }
-                            }
+                            onClick = { currentScreen = SCREEN_DAGLO }
                         ) {
                             Icon(Icons.Default.Language, contentDescription = "daglo 열기")
                         }
-                        IconButton(onClick = { currentScreen = SCREEN_SETTINGS }) {
+                        IconButton(onClick = {
+                            settingsReturn = SCREEN_RECORDER
+                            currentScreen = SCREEN_SETTINGS
+                        }) {
                             Icon(Icons.Default.Settings, contentDescription = "서버 설정")
                         }
                     }
@@ -247,6 +250,21 @@ fun VoiceRecorderApp(viewModel: RecorderViewModel = viewModel()) {
                 .padding(padding)
         ) {
             when (currentScreen) {
+                SCREEN_DAGLO -> DagloHomeScreen(
+                    viewModel = dagloViewModel,
+                    onOpenRecorder = { currentScreen = SCREEN_RECORDER },
+                    onOpenSettings = {
+                        settingsReturn = SCREEN_DAGLO
+                        currentScreen = SCREEN_SETTINGS
+                    },
+                    onOpenWeb = { currentScreen = SCREEN_DAGLO_WEB }
+                )
+
+                SCREEN_DAGLO_WEB -> DagloWebScreen(
+                    serverUrl = uiState.serverUrl,
+                    onBack = { currentScreen = SCREEN_DAGLO }
+                )
+
                 SCREEN_SETTINGS -> ServerSettingsScreen(
                     initialServerUrl = uiState.serverUrl,
                     initialApiToken = uiState.apiToken,
@@ -254,12 +272,7 @@ fun VoiceRecorderApp(viewModel: RecorderViewModel = viewModel()) {
                     isTesting = uiState.isTestingConnection,
                     onSave = { url, token, auto -> viewModel.saveServerSettings(url, token, auto) },
                     onTest = { url, token -> viewModel.testServerConnection(url, token) },
-                    onBack = { currentScreen = SCREEN_RECORDER }
-                )
-
-                SCREEN_DAGLO -> DagloWebScreen(
-                    serverUrl = uiState.serverUrl,
-                    onBack = { currentScreen = SCREEN_RECORDER }
+                    onBack = { currentScreen = settingsReturn }
                 )
 
                 else -> RecorderContent(

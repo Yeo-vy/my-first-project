@@ -1,4 +1,4 @@
 <resources>
-    <!-- 서버 연동 후에는 단순 녹음기가 아니라 daglo 클라이언트라서 이름도 그에 맞춘다 -->
-    <string name="app_name">daglo 녹음</string>
+    <!-- 첫 화면이 웹과 같은 daglo 화면이라 이름도 서비스 이름으로 둔다 (녹음은 그 안의 기능) -->
+    <string name="app_name">daglo</string>
 </resources>
