@@ -1541,7 +1541,7 @@ def delete_folder(folder_id: int, with_boards: bool = False, db: Session = Depen
         b.folder_id = default_folder.id
     db.flush()
 
-    # 이 폴더에서만 쓰던 용어집은 폴더와 함께 정리한다 (남으면 주인 없는 행이 된다)
+    # 이 폴더에서만 쓰던 단어장은 폴더와 함께 정리한다 (남으면 주인 없는 행이 된다)
     db.query(GlossaryTerm).filter_by(folder_id=folder.id).delete(synchronize_session=False)
 
     db.delete(folder)
@@ -1805,7 +1805,7 @@ def reprocess_board(board_id: int, db: Session = Depends(get_db)):
 
 
 # -----------------
-# 2-1. 용어집(단어장) — 받아쓰기 프롬프트에 실어 보내는 고유명사/전문용어
+# 2-1. 단어장 — 받아쓰기 프롬프트에 실어 보내는 고유명사/전문용어
 # -----------------
 @app.get("/api/glossary")
 def get_glossary(folder_id: Optional[int] = Query(None), db: Session = Depends(get_db)):

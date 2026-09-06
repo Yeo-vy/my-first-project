@@ -402,7 +402,7 @@ def load_glossary_terms(db, folder_id: Optional[int]) -> List[Dict[str, str]]:
 
 
 def build_glossary_prompt(terms: List[Dict[str, str]]) -> str:
-    """용어집을 받아쓰기 프롬프트에 덧붙일 문장으로 만든다. 용어가 없으면 빈 문자열."""
+    """단어장을 받아쓰기 프롬프트에 덧붙일 문장으로 만든다. 용어가 없으면 빈 문자열."""
     lines = []
     for t in terms[:GLOSSARY_MAX_TERMS]:
         term = (t.get("term") or "").strip()
@@ -436,7 +436,7 @@ def process_audio_file_to_board(board_id: int, audio_path: str, db_session_facto
         board.progress_percent = 5
         db.commit()
 
-        # 폴더 용어집을 프롬프트에 실어 보낸다 (고유명사·전문용어 표기 고정)
+        # 폴더 단어장을 프롬프트에 실어 보낸다 (고유명사·전문용어 표기 고정)
         glossary = load_glossary_terms(db, board.folder_id)
         prompt = STT_BASE_PROMPT + build_glossary_prompt(glossary)
         if glossary:

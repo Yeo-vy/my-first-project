@@ -1367,7 +1367,7 @@ body {
     margin-bottom: 6px;
 }
 
-/* 용어집 모달: 여러 줄 입력이라 기본 모달보다 넓게 쓴다 */
+/* 단어장 모달: 여러 줄 입력이라 기본 모달보다 넓게 쓴다 */
 .glossary-card {
     width: 520px;
     max-width: calc(100vw - 40px);

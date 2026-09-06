@@ -1480,7 +1480,7 @@ async function submitAudioUpload() {
 }
 
 // -----------------------------------------
-// 8-1. 용어집(단어장)
+// 8-1. 단어장
 // -----------------------------------------
 // 받아쓰기 프롬프트에 실어 보낼 고유명사/전문용어. 저장만으로는 기존 스크립트가 바뀌지 않고,
 // `다시 받아쓰기`를 돌려야 반영된다. 그래서 모달에서 바로 재변환까지 이어갈 수 있게 했다.
@@ -1518,7 +1518,7 @@ async function openGlossaryModal() {
 
         document.getElementById("glossary-modal").style.display = "flex";
     } catch (e) {
-        alert("용어집을 불러오지 못했습니다.");
+        alert("단어장을 불러오지 못했습니다.");
     }
 }
 
@@ -1530,7 +1530,7 @@ function termsToText(terms) {
     return terms.map(t => (t.note ? `${t.term} | ${t.note}` : t.term)).join("\n");
 }
 
-// 한 줄에 용어 하나. `용어 | 메모` 형식으로 메모를 덧붙일 수 있다.
+// 한 줄에 단어 하나. `단어 | 메모` 형식으로 메모를 덧붙일 수 있다.
 function textToTerms(text) {
     return (text || "")
         .split("\n")
@@ -1547,8 +1547,8 @@ function updateGlossaryHint() {
         textToTerms(document.getElementById("glossary-common-terms").value).length;
     document.getElementById("glossary-count-hint").textContent =
         total > glossaryMaxTerms
-            ? `용어 ${total}개 — 프롬프트에는 앞에서부터 ${glossaryMaxTerms}개까지만 들어갑니다.`
-            : `용어 ${total}개`;
+            ? `단어 ${total}개 — 프롬프트에는 앞에서부터 ${glossaryMaxTerms}개까지만 들어갑니다.`
+            : `단어 ${total}개`;
 }
 
 async function saveGlossary(thenRetranscribe) {
@@ -1560,12 +1560,12 @@ async function saveGlossary(thenRetranscribe) {
         }
         await putGlossary(null, textToTerms(document.getElementById("glossary-common-terms").value));
         closeGlossaryModal();
-        showToast("용어집을 저장했습니다.");
+        showToast("단어장을 저장했습니다.");
         if (thenRetranscribe && currentBoard) {
             retranscribeBoard(null, currentBoard.id);
         }
     } catch (e) {
-        alert("용어집 저장에 실패했습니다.");
+        alert("단어장 저장에 실패했습니다.");
     } finally {
         buttons.forEach(b => { b.disabled = false; });
     }
