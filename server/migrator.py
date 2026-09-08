@@ -9,7 +9,7 @@ BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 AUDIO_DIR = os.path.join(BASE_DIR, "녹음파일원본")
 RESULT_DIR = os.path.join(BASE_DIR, "강의 녹음 변환")
 
-TIMESTAMP_PATTERN = re.compile(r'\[(\d{2}:\d{2}(?::\d{2})?)\]')
+TIMESTAMP_PATTERN = re.compile(r'\[(\d{1,2}:\d{2}(?::\d{2})?)\]')
 
 def timestamp_to_ms(ts_str: str) -> int:
     parts = list(map(int, ts_str.split(':')))
@@ -27,6 +27,35 @@ def ms_to_timestamp(ms: int) -> str:
     if hours > 0:
         return f"{hours:02d}:{minutes:02d}:{seconds:02d}"
     return f"{minutes:02d}:{seconds:02d}"
+
+def split_timestamped_line(line: str, last_ms: int = 0) -> list:
+    """`[MM:SS] 본문` 한 줄을 (시각ms, 본문) 조각들로 끊는다.
+
+    AI 는 말이 없는 구간을 만나면 `[00:01] [00:02] [00:03] 본문` 처럼 한 줄에 타임스탬프를
+    여러 개 붙여 준다. 첫 개만 떼어내면 나머지가 본문에 남아 스크립트와 자막에 [00:02] 가
+    그대로 찍힌다. 그래서 줄 안의 타임스탬프를 전부 떼어내고 조각마다 시각을 붙인다.
+
+    본문이 빈 조각(타임스탬프만 있는 구간)도 마지막에 그대로 돌려준다. 부르는 쪽에서
+    시각만 이어받고 건너뛰면 된다.
+    """
+    pieces = []
+    pos = 0
+    current_ms = last_ms
+    for m in TIMESTAMP_PATTERN.finditer(line):
+        text = line[pos:m.start()].strip()
+        if text:
+            pieces.append((current_ms, text))
+        current_ms = timestamp_to_ms(m.group(1))
+        pos = m.end()
+    pieces.append((current_ms, line[pos:].strip()))
+    return pieces
+
+
+def strip_timestamps(text: str) -> str:
+    """본문에 섞여 들어간 타임스탬프를 걷어낸다 (이미 그렇게 저장된 예전 스크립트용)."""
+    cleaned = TIMESTAMP_PATTERN.sub(" ", text or "")
+    return re.sub(r"[ \t]{2,}", " ", cleaned).strip()
+
 
 def extract_simple_keywords(text: str, limit: int = 8) -> list:
     """간단한 명사/단어 빈도수 기반 기본 키워드 추출 (AI 호출 전 초기 표시용)"""
@@ -152,31 +181,21 @@ def sync_filesystem_to_db(db: Session):
                 line = line.strip()
                 if not line:
                     continue
-                match = TIMESTAMP_PATTERN.search(line)
-                if match:
-                    ts_str = match.group(1)
-                    t_ms = timestamp_to_ms(ts_str)
+                # 한 줄에 타임스탬프가 여러 개 붙어 있어도 조각마다 끊어 본문에 남기지 않는다
+                for t_ms, clean_text in split_timestamped_line(line, max_time_ms):
                     if t_ms > max_time_ms:
                         max_time_ms = t_ms
-                    clean_text = line.replace(f"[{ts_str}]", "").strip()
+                    if not clean_text:
+                        continue
                     segments.append({
                         "start_time_ms": t_ms,
                         "end_time_ms": t_ms + 10000,
-                        "timestamp_str": f"[{ts_str}]",
+                        "timestamp_str": f"[{ms_to_timestamp(t_ms)}]",
                         "speaker": "화자 1",
                         "content": clean_text,
                         "sequence": seq
                     })
-                else:
-                    segments.append({
-                        "start_time_ms": max_time_ms,
-                        "end_time_ms": max_time_ms + 5000,
-                        "timestamp_str": f"[{ms_to_timestamp(max_time_ms)}]",
-                        "speaker": "화자 1",
-                        "content": line,
-                        "sequence": seq
-                    })
-                seq += 1
+                    seq += 1
 
             # 오디오 길이가 없으면 마지막 세그먼트 시간 + 15초로 추정
             duration_sec = (max_time_ms // 1000) + 15.0

@@ -755,6 +755,84 @@ function stripTsBrackets(ts) {
     return String(ts || "").replace(/^\[|\]$/g, "");
 }
 
+// 밑줄(재생 위치)과 '눌러서 재생'의 단위.
+// 스크립트는 읽기 좋게 1분 문단으로 저장하지만, 1분짜리 덩어리를 누르면 최대 1분 앞으로
+// 되돌아가고 밑줄도 1분씩 통째로 그어져 답답하다. 그래서 화면에서만 20초로 쪼갠다.
+const DISPLAY_BLOCK_MS = 20000;
+const DISPLAY_BLOCK_MAX_MS = 40000;
+
+function msToStamp(ms) {
+    const total = Math.max(0, Math.floor((ms || 0) / 1000));
+    const h = Math.floor(total / 3600);
+    const m = Math.floor((total % 3600) / 60);
+    const sec = total % 60;
+    const pad = (n) => String(n).padStart(2, "0");
+    return h > 0 ? `[${pad(h)}:${pad(m)}:${pad(sec)}]` : `[${pad(m)}:${pad(sec)}]`;
+}
+
+function splitSegmentsForDisplay(segments, totalMs) {
+    const blocks = [];
+
+    segments.forEach((seg, idx) => {
+        const startMs = seg.start_time_ms || 0;
+        const next = segments[idx + 1];
+        const endMs = next
+            ? Math.max(next.start_time_ms || 0, startMs)
+            : Math.max(totalMs || 0, startMs);
+        const span = endMs - startMs;
+        const text = (seg.content || "").trim();
+
+        const push = (t, atMs) => {
+            blocks.push({
+                content: t,
+                start_time_ms: atMs,
+                timestamp_str: msToStamp(atMs),
+                speaker: seg.speaker,
+            });
+        };
+
+        // 이미 20초 안팎이면 그대로 둔다 (새로 변환한 보드는 대개 여기에 걸린다)
+        if (span <= DISPLAY_BLOCK_MAX_MS || text.length < 30) {
+            push(text, startMs);
+            return;
+        }
+
+        // 문장이 끝나는 곳에서 끊고, 시각은 글자 수에 비례해 나눈다.
+        // 문장별 실제 시각은 저장돼 있지 않지만 말 속도는 대체로 일정해서
+        // '20초 단위로 눌러 듣기'에는 충분히 맞는다.
+        const parts = text.match(/[^.!?…。]+[.!?…。]*\s*/g) || [text];
+        const msPerChar = span / text.length;
+        const targetChars = Math.max(15, Math.round(DISPLAY_BLOCK_MS / msPerChar));
+
+        let buf = "";
+        let before = 0;   // 지금 버퍼 앞에 이미 내보낸 글자 수
+        const flush = () => {
+            const t = buf.trim();
+            if (t) push(t, Math.round(startMs + before * msPerChar));
+            before += buf.length;
+            buf = "";
+        };
+
+        parts.forEach((part) => {
+            let piece = part;
+            // 마침표 없이 길게 이어지는 구간은 공백에서라도 끊는다
+            while (buf.length + piece.length > targetChars * 2) {
+                const room = Math.max(1, targetChars - buf.length);
+                let cut = piece.lastIndexOf(" ", room);
+                if (cut < room / 2) cut = Math.min(room, piece.length);
+                buf += piece.slice(0, cut);
+                flush();
+                piece = piece.slice(cut);
+            }
+            buf += piece;
+            if (buf.length >= targetChars) flush();
+        });
+        flush();
+    });
+
+    return blocks;
+}
+
 function renderTranscript(segments) {
     const container = document.getElementById("transcript-container");
     container.innerHTML = "";
@@ -774,7 +852,11 @@ function renderTranscript(segments) {
     let groupStartMs = null;
     let lastSpeaker = null;
 
-    segments.forEach((seg, idx) => {
+    // 눌러서 재생하는 단위와 재생 밑줄은 20초로 잘게 쓴다 (1분 덩어리는 되돌아가는 폭이 크다)
+    const totalMs = Math.round((currentBoard?.duration_seconds || 0) * 1000);
+    const blocks = splitSegmentsForDisplay(segments, totalMs);
+
+    blocks.forEach((seg, idx) => {
         const startMs = seg.start_time_ms || 0;
 
         if (group === null || startMs - groupStartMs >= 60000) {
@@ -799,7 +881,7 @@ function renderTranscript(segments) {
         block.dataset.ms = startMs;
         block.dataset.ts = seg.timestamp_str;
         block.dataset.speaker = speaker;
-        block.id = `seg-${seg.id || idx}`;
+        block.id = `seg-${idx}`;
 
         block.innerHTML = `
             ${speaker !== lastSpeaker

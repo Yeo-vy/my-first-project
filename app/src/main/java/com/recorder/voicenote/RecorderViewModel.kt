@@ -56,6 +56,7 @@ data class RecorderUiState(
     /** 현재 재생 중인 녹음 파일의 이름 (없으면 재생 중이 아님) */
     val playingRecordingName: String? = null,
     // ---- daglo 서버 연동 ----
+    /** 웹 화면이 열 주소 (기준 주소 + 로그인 경로). 설정 화면에도 이 형태로 보여 준다. */
     val serverUrl: String = "",
 
     /** 서버에 로그인해 둔 세션이 있는지 (없으면 자동 전송이 안 된다) */
@@ -108,7 +109,7 @@ class RecorderViewModel(application: Application) : AndroidViewModel(application
         }
 
         _uiState.value = _uiState.value.copy(
-            serverUrl = settings.serverUrl,
+            serverUrl = settings.webUrl,
             autoUpload = settings.autoUpload,
             serverConfigured = settings.isConfigured,
             loggedIn = settings.isLoggedIn,
@@ -555,13 +556,15 @@ class RecorderViewModel(application: Application) : AndroidViewModel(application
     /** 설정 화면에서 저장을 누르면 호출된다. */
     fun saveServerSettings(serverUrl: String, autoUpload: Boolean) {
         val previousUrl = settings.serverUrl
-        val addressChanged = DagloSettings.normalizeUrl(serverUrl) != previousUrl
-        settings.serverUrl = serverUrl
+        // 주소 뒤에 로그인 경로(.env 의 LOGIN_PATH)를 붙여 적을 수 있다.
+        // 그 경로는 웹 화면을 열 때만 쓰고, 업로드·연결 확인이 부르는 /api 주소에는 붙이지 않는다.
+        settings.saveAddress(serverUrl)
         settings.autoUpload = autoUpload
         // 다른 서버를 가리키게 됐다면 예전 서버의 세션은 쓸모가 없다
-        if (addressChanged) DagloSession.clear(previousUrl)
+        // (같은 서버에서 로그인 경로만 바꾼 것이라면 세션은 그대로 쓴다)
+        if (settings.serverUrl != previousUrl) DagloSession.clear(previousUrl)
         _uiState.value = _uiState.value.copy(
-            serverUrl = settings.serverUrl,
+            serverUrl = settings.webUrl,
             autoUpload = settings.autoUpload,
             serverConfigured = settings.isConfigured,
             message = if (settings.isConfigured) "서버 설정을 저장했습니다" else "서버 주소를 비워 두면 연동이 꺼집니다"

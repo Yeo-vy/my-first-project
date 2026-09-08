@@ -12,6 +12,8 @@ import android.os.PowerManager
 import android.provider.Settings
 import android.webkit.CookieManager
 import android.webkit.URLUtil
+import android.webkit.WebResourceRequest
+import android.webkit.WebResourceResponse
 import android.webkit.WebView
 import android.webkit.WebViewClient
 import androidx.activity.compose.BackHandler
@@ -69,7 +71,9 @@ import androidx.compose.ui.viewinterop.AndroidView
  * 계정으로 로그인할 수 있고, 녹음이 끝날 때마다 자동으로 올라간다.
  *
  * 로그인 주소는 서버 `.env` 의 `LOGIN_PATH` 다. 인터넷에 열어 둔 서버는 이 값을 임의 문자열로
- * 바꿔 두는 경우가 있어서(봇이 로그인 화면을 찾지 못하게), 앱도 같은 값을 알아야 한다.
+ * 바꿔 두는 경우가 많아서(봇이 로그인 화면을 찾지 못하게), 앱도 같은 값을 알아야 한다.
+ * 그래서 주소 칸에 `192.168.0.10:8000/gate-7f21c9` 처럼 경로까지 적을 수 있게 했다.
+ * 저장할 때 기준 주소와 로그인 경로로 갈라 두므로, 업로드가 부르는 `/api/...` 주소에는 섞이지 않는다.
  */
 @Composable
 fun ServerSettingsScreen(
@@ -128,8 +132,13 @@ fun ServerSettingsScreen(
                 value = serverUrl,
                 onValueChange = { serverUrl = it },
                 label = { Text("서버 주소") },
-                placeholder = { Text("192.168.0.10:8000") },
-                supportingText = { Text("http:// 를 빼고 적어도 됩니다") },
+                placeholder = { Text("192.168.0.10:8000/gate-7f21c9") },
+                supportingText = {
+                    Text(
+                        "http:// 는 빼도 됩니다. 서버 .env 에서 로그인 주소(LOGIN_PATH)를 바꿔 뒀다면 " +
+                            "그 경로까지 붙여 적으세요. 안 붙이면 로그인 화면 대신 Not Found 가 뜹니다."
+                    )
+                },
                 singleLine = true,
                 modifier = Modifier.fillMaxWidth()
             )
@@ -310,6 +319,25 @@ fun DagloWebScreen(
                             // 녹음 업로드(WorkManager)는 앱이 꺼진 뒤에도 도는데, 그때 이 쿠키를 쓴다.
                             DagloSession.persist()
                         }
+
+                        // 로그인 주소를 숨겨 둔 서버(.env 의 LOGIN_PATH)는 그 경로가 아니면 404 를 준다.
+                        // 맨 화면에 "Not Found" 만 뜨면 무엇이 잘못됐는지 알 길이 없어서 안내를 대신 띄운다.
+                        override fun onReceivedHttpError(
+                            view: WebView?,
+                            request: WebResourceRequest?,
+                            errorResponse: WebResourceResponse?
+                        ) {
+                            super.onReceivedHttpError(view, request, errorResponse)
+                            if (request?.isForMainFrame != true) return
+                            if (errorResponse?.statusCode != 404) return
+                            val target = view ?: return
+                            // 콜백 안에서 바로 다시 로드하지 않고 다음 차례로 넘긴다
+                            target.post {
+                                target.loadDataWithBaseURL(
+                                    serverUrl, loginPathHintHtml(serverUrl), "text/html", "utf-8", null
+                                )
+                            }
+                        }
                     }
 
                     CookieManager.getInstance().setAcceptCookie(true)
@@ -327,6 +355,26 @@ fun DagloWebScreen(
         )
     }
 }
+
+/**
+ * 서버가 404 를 돌려줬을 때 대신 띄우는 안내.
+ *
+ * 서버는 `.env` 의 `LOGIN_PATH` 주소에서만 로그인 화면을 연다(봇이 찾지 못하게). 그 경로를
+ * 빼고 주소를 저장하면 루트(/)도 404 라서, 앱에는 "Not Found" 한 줄만 뜬다.
+ * 로그인이 풀린 뒤 웹 화면 안쪽 주소를 열 때도 같은 404 가 온다. 그래서 설정한 로그인 주소로
+ * 되돌아갈 수 있는 링크를 함께 준다.
+ */
+private fun loginPathHintHtml(loginUrl: String): String = """
+    <html><head><meta name="viewport" content="width=device-width, initial-scale=1"></head>
+    <body style="font-family:sans-serif; padding:32px; line-height:1.7; color:#1f2937">
+      <h2 style="margin:0 0 12px">이 주소에서 화면을 열 수 없습니다 (404)</h2>
+      <p>로그인이 풀렸거나, 서버 <code>.env</code> 의 <code>LOGIN_PATH</code> 를
+      서버 주소 뒤에 붙이지 않았을 수 있습니다.</p>
+      <p><a href="LOGIN_URL_PLACEHOLDER" style="font-size:17px">로그인 화면 다시 열기</a></p>
+      <p style="color:#6b7280">설정(⚙)에서 주소를 이렇게 적으면 됩니다:
+      <code>192.168.0.10:8000/gate-7f21c9</code></p>
+    </body></html>
+""".replace("LOGIN_URL_PLACEHOLDER", loginUrl)
 
 /** 로그인 쿠키를 그대로 실어 다운로드한다. 쿠키가 없으면 서버가 로그인 페이지를 돌려주기 때문. */
 private fun downloadWithSession(

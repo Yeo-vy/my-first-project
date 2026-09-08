@@ -35,7 +35,7 @@ FFMPEG_TIMEOUT_SEC = max(60, int(os.getenv("FFMPEG_TIMEOUT_SEC", "900")))
 CHUNK_LENGTH_MS = 20 * 60 * 1000   # 20분 청크
 OVERLAP_MS = 30 * 1000             # 30초 오버랩
 CHUNK_STEP_MS = CHUNK_LENGTH_MS - OVERLAP_MS
-TIMESTAMP_PATTERN = re.compile(r'\[(\d{2}:\d{2}(?::\d{2})?)\]')
+TIMESTAMP_PATTERN = re.compile(r'\[(\d{1,2}:\d{2}(?::\d{2})?)\]')
 
 _ILLEGAL_FILENAME_CHARS = re.compile(r'[<>:"/\\|?*\x00-\x1f]')
 
@@ -439,6 +439,8 @@ STT_BASE_PROMPT = """
 1. 문단이 바뀔 때마다 맨 앞에 [MM:SS] 타임스탬프를 적어줘.
 2. 동일한 타임스탬프 연속 출력 금지, 시간은 증가해야 해.
 3. 인사말이나 부연 설명 없이 타임스탬프와 본문 텍스트만 출력해.
+4. 타임스탬프 뒤에는 반드시 받아쓴 본문이 와야 해. 말이 없는 구간에는 타임스탬프를 찍지 말고,
+   한 줄에 타임스탬프를 두 개 이상 붙이지 마.
 """
 
 
@@ -472,7 +474,7 @@ def build_glossary_prompt(terms: List[Dict[str, str]]) -> str:
         return ""
     joined = "\n".join(lines)
     return (
-        "4. 아래는 이 녹음에 자주 나오는 고유명사·전문용어 목록이야. 비슷하게 들리더라도 "
+        "5. 아래는 이 녹음에 자주 나오는 고유명사·전문용어 목록이야. 비슷하게 들리더라도 "
         "이 목록에 있는 표기를 그대로 써. 목록에 없는 말을 억지로 끼워 넣지는 마:\n"
         + joined
         + "\n"
@@ -482,6 +484,7 @@ def build_glossary_prompt(terms: List[Dict[str, str]]) -> str:
 def process_audio_file_to_board(board_id: int, audio_path: str, db_session_factory, progress_callback: Optional[Callable[[int], None]] = None):
     """오디오 파일을 청크 단위로 나누고 Gemini STT를 실행하여 Board에 저장하는 완전 자동화 파이프라인"""
     from server.models import Board, TranscriptSegment, BoardSummary, Folder
+    from server.migrator import split_timestamped_line
 
     db = db_session_factory()
     board = db.query(Board).filter_by(id=board_id).first()
@@ -560,13 +563,13 @@ def process_audio_file_to_board(board_id: int, audio_path: str, db_session_facto
             line = line.strip()
             if not line:
                 continue
-            match = TIMESTAMP_PATTERN.search(line)
-            if match:
-                ts = match.group(1)
-                last_ms = timestamp_to_seconds(ts) * 1000
-                pieces.append((last_ms, "화자 1", line.replace(f"[{ts}]", "").strip()))
-            else:
-                pieces.append((last_ms, "화자 1", line))
+            # AI 가 조용한 구간에 `[00:01] [00:02] ...` 처럼 타임스탬프만 줄줄이 붙여 주는 일이 있다.
+            # 첫 개만 떼면 나머지가 본문에 남아 스크립트/자막에 그대로 찍히므로 전부 떼어낸다.
+            for piece_ms, text in split_timestamped_line(line, last_ms):
+                last_ms = piece_ms
+                if not text:
+                    continue
+                pieces.append((piece_ms, "화자 1", text))
 
         # 1분 내외 + 문장이 끝나는 지점으로 묶어, 원본 타임스탬프 간격 자체를 넓힌다
         seq = 0

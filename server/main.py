@@ -24,7 +24,8 @@ from server import auth
 from server.migrator import (
     sync_filesystem_to_db,
     ms_to_timestamp,
-    timestamp_to_ms,
+    split_timestamped_line,
+    strip_timestamps,
     extract_simple_keywords,
     get_folder_name,
     get_or_create_folder,
@@ -139,7 +140,6 @@ AUDIO_DIR = os.path.join(BASE_DIR, "녹음파일원본")
 RESULT_DIR = os.path.join(BASE_DIR, "강의 녹음 변환")
 # 웹에서 지운 파일을 옮겨 두는 곳. 감시 폴더 밖이라 탐색기 목록에서 사라진다.
 TRASH_DIR = os.path.join(BASE_DIR, "휴지통")
-TIMESTAMP_RE = re.compile(r'\[(\d{1,2}:\d{2}(?::\d{2})?)\]')
 
 # -----------------
 # STT 작업 큐 + 워커 (동시 실행 수를 제한해 API/메모리 폭주를 막는다)
@@ -1254,22 +1254,18 @@ def parse_transcript_text(text: str) -> List[dict]:
         line = line.strip()
         if not line:
             continue
-        match = TIMESTAMP_RE.search(line)
-        if match:
-            ts_str = match.group(1)
-            last_ms = timestamp_to_ms(ts_str)
-            content = line.replace(f"[{ts_str}]", "", 1).strip()
-            stamp = f"[{ts_str}]"
-        else:
-            content = line
-            stamp = f"[{ms_to_timestamp(last_ms)}]"
-        segments.append({
-            "start_time_ms": last_ms,
-            "end_time_ms": last_ms + 10000,
-            "timestamp_str": stamp,
-            "speaker": "화자 1",
-            "content": content,
-        })
+        # `[00:01] [00:02] 본문` 처럼 한 줄에 여러 개가 붙어 와도 본문에 남기지 않는다
+        for piece_ms, content in split_timestamped_line(line, last_ms):
+            last_ms = piece_ms
+            if not content:
+                continue
+            segments.append({
+                "start_time_ms": piece_ms,
+                "end_time_ms": piece_ms + 10000,
+                "timestamp_str": f"[{ms_to_timestamp(piece_ms)}]",
+                "speaker": "화자 1",
+                "content": content,
+            })
     return segments
 
 
@@ -1662,7 +1658,7 @@ def get_board_detail(board_id: int, db: Session = Depends(get_db)):
             "end_time_ms": s.end_time_ms,
             "timestamp_str": s.timestamp_str,
             "speaker": s.speaker or "화자 1",
-            "content": s.content,
+            "content": strip_timestamps(s.content),
             "sequence": s.sequence
         })
 
@@ -1942,7 +1938,7 @@ def update_transcript(board_id: int, req: TranscriptUpdateRequest, db: Session =
             end_time_ms=ends[idx],
             timestamp_str=s.get("timestamp_str") or f"[{ms_to_timestamp(start_ms)}]",
             speaker=s.get("speaker") or "화자 1",
-            content=s.get("content", ""),
+            content=strip_timestamps(s.get("content", "")),
             sequence=idx
         )
         db.add(seg)
@@ -2175,7 +2171,7 @@ def export_board(
                 end_ms = start_ms + 1000
             speaker_prefix = f"[{s.speaker}] " if (include_speakers and s.speaker) else ""
             srt_lines.append(
-                f"{i}\n{srt_timestamp(start_ms)} --> {srt_timestamp(end_ms)}\n{speaker_prefix}{s.content}\n"
+                f"{i}\n{srt_timestamp(start_ms)} --> {srt_timestamp(end_ms)}\n{speaker_prefix}{strip_timestamps(s.content)}\n"
             )
         content = "\n".join(srt_lines)
         media_type = "text/plain; charset=utf-8"
@@ -2186,13 +2182,13 @@ def export_board(
             prefix = ""
             if include_timestamps: prefix += f"`{s.timestamp_str}` "
             if include_speakers and s.speaker: prefix += f"**{s.speaker}**: "
-            lines.append(f"{prefix}{s.content}\n")
+            lines.append(f"{prefix}{strip_timestamps(s.content)}\n")
         content = "\n".join(lines)
         media_type = "text/markdown; charset=utf-8"
         filename = f"{sanitize_filename(b.title)}.md"
     else:
         # 예전에 촘촘하게 저장된 보드도 내보낼 때는 1분 내외 문단으로 묶어 준다
-        pieces = [(s.start_time_ms or 0, s.speaker or "화자 1", s.content) for s in b.segments]
+        pieces = [(s.start_time_ms or 0, s.speaker or "화자 1", strip_timestamps(s.content)) for s in b.segments]
         lines = []
         for start_ms, speaker, text in group_by_sentence(pieces):
             prefix = ""
