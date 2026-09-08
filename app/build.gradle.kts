@@ -9,10 +9,11 @@ android {
 
     defaultConfig {
         applicationId = "com.recorder.voicenote"
-        minSdk = 24
+        // MediaRecorder.setNextOutputFile (조각 이어받기) 가 8.0 부터라 그 아래는 받지 않는다
+        minSdk = 26
         targetSdk = 34
-        versionCode = 2
-        versionName = "1.1-daglo"
+        versionCode = 3
+        versionName = "2.0-web"
     }
 
     buildTypes {
@@ -29,31 +30,13 @@ android {
     kotlinOptions {
         jvmTarget = "17"
     }
-
-    buildFeatures {
-        compose = true
-    }
-
-    composeOptions {
-        kotlinCompilerExtensionVersion = "1.5.14"
-    }
 }
 
+// 화면은 웹(WebView) 하나뿐이라 UI 라이브러리가 필요 없다.
+// 남는 의존성은 '녹음 알림'과 '앱이 꺼진 뒤에도 이어지는 업로드' 둘뿐이다.
 dependencies {
     implementation("androidx.core:core-ktx:1.13.1")
-    implementation("androidx.lifecycle:lifecycle-runtime-ktx:2.8.4")
-    implementation("androidx.activity:activity-compose:1.9.1")
-
-    implementation(platform("androidx.compose:compose-bom:2024.06.00"))
-    implementation("androidx.compose.ui:ui")
-    implementation("androidx.compose.ui:ui-graphics")
-    implementation("androidx.compose.ui:ui-tooling-preview")
-    implementation("androidx.compose.material:material-icons-extended")
-    implementation("androidx.compose.material3:material3")
-    implementation("androidx.lifecycle:lifecycle-viewmodel-compose:2.8.4")
-    // daglo 화면의 ViewModel 이 viewModelScope 로 서버 호출·재생 타이머를 돌린다
-    implementation("androidx.lifecycle:lifecycle-viewmodel-ktx:2.8.4")
-
-    // 녹음 파일을 서버로 올리는 작업. 네트워크가 없으면 생길 때까지 기다렸다가 자동으로 재시도한다.
+    implementation("androidx.activity:activity-ktx:1.9.1")
+    // 녹음이 끝난 파일을 서버로 올린다. 네트워크가 없으면 생길 때까지 기다렸다가 다시 시도한다.
     implementation("androidx.work:work-runtime-ktx:2.9.0")
 }

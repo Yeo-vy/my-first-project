@@ -5,395 +5,450 @@ import android.app.NotificationChannel
 import android.app.NotificationManager
 import android.app.PendingIntent
 import android.app.Service
+import android.content.Context
 import android.content.Intent
 import android.content.pm.ServiceInfo
 import android.os.Build
+import android.os.Handler
 import android.os.IBinder
+import android.os.Looper
+import android.os.PowerManager
 import android.os.SystemClock
 import androidx.core.app.NotificationCompat
 import androidx.core.app.ServiceCompat
-import kotlinx.coroutines.CoroutineScope
-import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.Job
-import kotlinx.coroutines.SupervisorJob
-import kotlinx.coroutines.cancel
-import kotlinx.coroutines.delay
-import kotlinx.coroutines.flow.MutableStateFlow
-import kotlinx.coroutines.flow.StateFlow
-import kotlinx.coroutines.flow.asStateFlow
-import kotlinx.coroutines.launch
+import java.io.File
+import java.text.SimpleDateFormat
 import java.util.Date
+import java.util.Locale
 
-/** 서비스가 외부(ViewModel/UI)에 노출하는 녹음 상태 */
-data class RecordingServiceState(
-    val isRecording: Boolean = false,
-    val isPaused: Boolean = false,
-    /** 녹음을 멈추고 조각을 합쳐 저장하는 중 */
-    val isSaving: Boolean = false,
-    val folderName: String? = null,
-    val elapsedSeconds: Int = 0,
-    /** 마이크 입력 세기 0.0~1.0. 소리가 실제로 들어오는지 화면에서 확인하는 용도 */
+/** 웹 화면(JS 브리지)이 들여다보는 녹음 상태 한 장. */
+data class RecordingSnapshot(
+    val recording: Boolean = false,
+    val paused: Boolean = false,
+    /** 녹음을 멈추고 조각을 합쳐 올리는 중 */
+    val saving: Boolean = false,
+    val elapsedMs: Long = 0,
     val level: Float = 0f,
-    val errorMessage: String? = null,
-    /** 저장이 끝났을 때 안내할 문구 (파일명 등) */
-    val savedMessage: String? = null
+    val folderName: String = "",
+    /** 화면에 그대로 띄울 안내/오류 문구 (없으면 빈 문자열) */
+    val message: String = ""
 )
 
 /**
- * 실제 마이크 녹음을 담당하는 포그라운드 서비스.
+ * 녹음을 맡는 포그라운드 서비스. 이 앱이 웹으로 못 하는 일은 이것 하나뿐이다.
  *
- * 화면을 끄거나 앱을 나가도 녹음이 이어지고, 녹음 자체는 [RecorderManager] 가 조각 파일로 쌓는다.
- * 정지하면 조각들을 하나의 m4a 로 합쳐 공용 저장소에 넣는다. 합치기는 3시간 녹음이라도 몇 초면
- * 끝나지만(재인코딩 없이 옮겨 담기만 한다) 그동안 알림에 '저장 중' 을 표시한다.
+ * **왜 서비스인가**: 브라우저 녹음(MediaRecorder)은 화면을 끄면 탭이 재워지거나 메모리 회수로
+ * 죽어 녹음이 통째로 사라진다. 이 앱의 주 용도가 "화면 끄고 3시간 강의 녹음"이라, 녹음만
+ * 포그라운드 서비스 + 진행 중 알림으로 앱이 맡는다. 알림이 떠 있는 동안 시스템은 이 프로세스를
+ * 함부로 죽이지 않고, 부분 웨이크 락으로 CPU 도 잠들지 않게 한다.
+ *
+ * 정지하면 조각을 하나의 m4a 로 합쳐 [UploadWorker] 에 넘긴다. 그 뒤(받아쓰기·스크립트)는
+ * 웹에서 파일을 올렸을 때와 완전히 같다.
  */
 class RecordingService : Service() {
 
-    companion object {
-        const val ACTION_START = "com.recorder.voicenote.action.START"
-        const val ACTION_STOP = "com.recorder.voicenote.action.STOP"
-        const val ACTION_CANCEL = "com.recorder.voicenote.action.CANCEL"
-        const val ACTION_PAUSE = "com.recorder.voicenote.action.PAUSE"
-        const val ACTION_RESUME = "com.recorder.voicenote.action.RESUME"
-        const val EXTRA_FOLDER_NAME = "extra_folder_name"
+    private val handler = Handler(Looper.getMainLooper())
+    private lateinit var recorder: SegmentRecorder
+    private var wakeLock: PowerManager.WakeLock? = null
 
-        private const val CHANNEL_ID = "recording_channel"
-        private const val NOTIFICATION_ID = 1001
+    private var sessionDir: File? = null
+    private var folderName: String = ""
+    private var startedAtElapsed = 0L      // 이번 구간이 시작된 시각 (SystemClock)
+    private var accumulatedMs = 0L         // 일시정지로 끊긴 구간까지 합친 길이
+    /** 녹음이 스스로 멈춘 이유. 저장이 끝난 뒤 결과 문구 앞에 붙여 화면에 알린다. */
+    private var stoppedReason = ""
 
-        // 프로세스 내에서 공유되는 녹음 상태 (Activity/ViewModel이 재생성되어도 그대로 관찰 가능)
-        private val _state = MutableStateFlow(RecordingServiceState())
-        val state: StateFlow<RecordingServiceState> = _state.asStateFlow()
-
-        fun consumeError() {
-            _state.value = _state.value.copy(errorMessage = null)
-        }
-
-        fun consumeSavedMessage() {
-            _state.value = _state.value.copy(savedMessage = null)
+    private val ticker = object : Runnable {
+        override fun run() {
+            if (!isActive()) return
+            publish()
+            updateNotification()
+            handler.postDelayed(this, 1000)
         }
     }
 
-    private lateinit var store: RecordingStore
-    private lateinit var recorderManager: RecorderManager
-    private var session: RecordingSession? = null
-
-    private val serviceScope = CoroutineScope(SupervisorJob() + Dispatchers.Main)
-    private var timerJob: Job? = null
-
-    /**
-     * 녹음하는 동안 CPU 를 깨워 두는 락.
-     *
-     * 포그라운드 서비스라도 화면을 끄면 기기가 절전으로 들어가고, 제조사(특히 삼성) 정책에
-     * 따라 녹음이 끊기거나 소리가 비는 일이 생긴다. 3시간짜리 강의를 화면 끄고 녹음하는 것이
-     * 이 앱의 주 용도라, 녹음 중에는 부분 웨이크 락을 잡는다. (화면은 켜지 않는다)
-     */
-    private var wakeLock: android.os.PowerManager.WakeLock? = null
-
-    /** 일시정지한 시간을 뺀 실제 녹음 길이를 재기 위한 값들 */
-    private var segmentStartedAt = 0L
-    private var accumulatedMillis = 0L
-
     override fun onCreate() {
         super.onCreate()
-        store = RecordingStore(applicationContext)
-        recorderManager = RecorderManager(applicationContext)
-        createNotificationChannel()
+        recorder = SegmentRecorder(applicationContext)
+        createChannel()
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         when (intent?.action) {
-            ACTION_START -> {
-                val folder = intent.getStringExtra(EXTRA_FOLDER_NAME)
-                if (folder != null) startRecording(folder)
-            }
-            ACTION_STOP -> stopRecording(save = true)
-            ACTION_CANCEL -> stopRecording(save = false)
-            ACTION_PAUSE -> pauseRecording()
-            ACTION_RESUME -> resumeRecording()
+            ACTION_START -> start(intent.getStringExtra(EXTRA_FOLDER) ?: DEFAULT_FOLDER)
+            ACTION_PAUSE -> pause()
+            ACTION_RESUME -> resume()
+            ACTION_STOP -> stop(save = true)
+            ACTION_DISCARD -> stop(save = false)
         }
+        // 녹음 중이 아닐 때 시스템이 서비스를 되살릴 이유가 없다 (되살아나면 빈 알림만 남는다)
         return START_NOT_STICKY
     }
 
     override fun onBind(intent: Intent?): IBinder? = null
 
-    private fun startRecording(folderName: String) {
-        // 저장(합치기)이 끝나기 전에 새 녹음을 받으면, 저장 완료 처리가 새 녹음 상태를 덮어써 버린다.
-        if (_state.value.isRecording || _state.value.isSaving) return
+    override fun onDestroy() {
+        handler.removeCallbacks(ticker)
+        releaseWakeLock()
+        super.onDestroy()
+    }
 
-        val fileName = store.buildFileName(folderName, Date())
-        val newSession = RecordingSession.create(applicationContext, folderName, fileName)
-        if (newSession == null) {
-            _state.value = RecordingServiceState(errorMessage = "녹음 파일을 준비할 수 없습니다")
-            stopSelf()
-            return
-        }
+    // ------------------------------------------------------------------------------
 
-        val started = recorderManager.start(newSession, object : RecorderManager.Callback {
-            override fun onSegmentStarted(index: Int) {
-                // 조각이 넘어간 것은 사용자가 알 필요 없다. 로그만 남기고 화면은 그대로 둔다.
-                android.util.Log.i("RecordingService", "다음 녹음 조각으로 이어받았습니다 (#$index)")
-            }
+    private fun start(folder: String) {
+        if (snapshot.recording || snapshot.saving) return
 
-            override fun onError(message: String) {
-                // 여기까지 녹음된 조각은 살려야 하므로, 버리지 않고 저장까지 진행한다.
-                _state.value = _state.value.copy(errorMessage = message)
-                stopRecording(save = true)
-            }
-        })
+        folderName = folder
+        accumulatedMs = 0
+        // startForegroundService() 로 불려 왔으므로 5초 안에 반드시 알림을 띄워야 한다.
+        // 마이크를 열지 못하는 경우까지 생각해서, 알림을 먼저 올리고 녹음을 시작한다.
+        startForegroundNotification()
 
+        val dir = File(sessionsDir(this), "session_${System.currentTimeMillis()}")
+        val started = recorder.start(dir) { message -> onRecorderError(message) }
         if (!started) {
-            newSession.delete()
-            _state.value = RecordingServiceState(errorMessage = "녹음을 시작할 수 없습니다")
-            stopSelf()
+            dir.deleteRecursively()
+            snapshot = RecordingSnapshot(message = "마이크를 열지 못했습니다. 다른 앱이 쓰고 있는지 확인해 주세요.")
+            stopForegroundAndSelf()
             return
         }
 
-        session = newSession
-        accumulatedMillis = 0L
-        segmentStartedAt = SystemClock.elapsedRealtime()
+        sessionDir = dir
+        startedAtElapsed = SystemClock.elapsedRealtime()
+        writeFolderName(dir, folder)
+
+        // 화면을 끈 채 몇 시간을 녹음해도 CPU 가 잠들지 않게 한다 (화면은 켜지 않는다)
         acquireWakeLock()
-        _state.value = RecordingServiceState(
-            isRecording = true,
-            folderName = folderName,
-            elapsedSeconds = 0
-        )
 
-        ServiceCompat.startForeground(
-            this,
-            NOTIFICATION_ID,
-            buildNotification(folderName, 0, paused = false),
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-                ServiceInfo.FOREGROUND_SERVICE_TYPE_MICROPHONE
-            } else {
-                0
-            }
-        )
-        startTimer(folderName)
+        publish()
+        handler.removeCallbacks(ticker)
+        handler.postDelayed(ticker, 1000)
     }
 
-    private fun pauseRecording() {
-        if (!_state.value.isRecording || _state.value.isPaused) return
-        if (!recorderManager.pause()) return
-
-        accumulatedMillis += SystemClock.elapsedRealtime() - segmentStartedAt
-        _state.value = _state.value.copy(isPaused = true, level = 0f)
-        updateNotification(_state.value.folderName ?: "", elapsedSeconds(), paused = true)
+    private fun pause() {
+        if (!snapshot.recording || snapshot.paused) return
+        if (!recorder.pause()) return
+        accumulatedMs += SystemClock.elapsedRealtime() - startedAtElapsed
+        publish()
+        updateNotification()
     }
 
-    private fun resumeRecording() {
-        if (!_state.value.isRecording || !_state.value.isPaused) return
-        if (!recorderManager.resume()) return
-
-        segmentStartedAt = SystemClock.elapsedRealtime()
-        _state.value = _state.value.copy(isPaused = false)
-        updateNotification(_state.value.folderName ?: "", elapsedSeconds(), paused = false)
+    private fun resume() {
+        if (!snapshot.recording || !snapshot.paused) return
+        if (!recorder.resume()) return
+        startedAtElapsed = SystemClock.elapsedRealtime()
+        publish()
+        updateNotification()
     }
 
-    /**
-     * 녹음을 멈춘다.
-     * @param save true 면 조각을 합쳐 저장하고, false 면 통째로 버린다(녹음 취소).
-     */
-    private fun stopRecording(save: Boolean) {
-        val current = session
-        if (current == null) {
-            _state.value = RecordingServiceState()
+    /** 녹음을 멈춘다. save=false 면 조각을 버린다. */
+    private fun stop(save: Boolean) {
+        if (!snapshot.recording) {
             stopSelf()
             return
         }
-
-        if (!_state.value.isPaused) {
-            accumulatedMillis += SystemClock.elapsedRealtime() - segmentStartedAt
+        handler.removeCallbacks(ticker)
+        if (!snapshot.paused) {
+            accumulatedMs += SystemClock.elapsedRealtime() - startedAtElapsed
         }
-        timerJob?.cancel()
+        recorder.stop()
+        releaseWakeLock()
 
-        // stop() 이 실패해도(너무 짧은 녹음, 이미 죽은 인코더) 앞서 닫힌 조각들은 살아 있다.
-        recorderManager.stop()
-        session = null
+        val dir = sessionDir
+        sessionDir = null
 
-        if (!save) {
-            current.delete()
-            releaseWakeLock()
-            _state.value = RecordingServiceState()
-            ServiceCompat.stopForeground(this, ServiceCompat.STOP_FOREGROUND_REMOVE)
-            stopSelf()
+        if (!save || dir == null) {
+            dir?.deleteRecursively()
+            snapshot = RecordingSnapshot(message = if (save) "" else "녹음을 버렸습니다")
+            stopForegroundAndSelf()
             return
         }
 
-        _state.value = _state.value.copy(isRecording = false, isPaused = false, isSaving = true, level = 0f)
-        updateSavingNotification()
+        // 합치기는 재인코딩이 없어 3시간짜리도 몇 초면 끝나지만, 그동안 알림을 '저장 중' 으로 둔다.
+        snapshot = RecordingSnapshot(saving = true, elapsedMs = accumulatedMs, folderName = folderName)
+        updateNotification()
 
-        serviceScope.launch {
-            val result = RecordingSaver.save(applicationContext, store, current)
-            val previousError = _state.value.errorMessage
-            _state.value = RecordingServiceState(
-                errorMessage = previousError ?: (result as? RecordingSaver.Result.Failed)?.message,
-                savedMessage = (result as? RecordingSaver.Result.Saved)?.let {
-                    if (it.splitCount > 1) {
-                        "녹음을 저장했습니다 (합치지 못해 ${it.splitCount}개로 나뉘어 저장됨)"
-                    } else {
-                        "녹음을 저장했습니다: ${it.displayName}"
-                    }
-                }
-            )
-            if (!_state.value.isRecording) {
-                // 저장(조각 합치기)까지 끝난 뒤에 놓는다. 합치는 중에 절전으로 들어가면 곤란하다.
-                releaseWakeLock()
-                ServiceCompat.stopForeground(this@RecordingService, ServiceCompat.STOP_FOREGROUND_REMOVE)
-                stopSelf()
+        val folder = folderName
+        val reason = stoppedReason
+        stoppedReason = ""
+        Thread {
+            val result = mergeAndQueue(applicationContext, dir, folder)
+            handler.post {
+                snapshot = RecordingSnapshot(
+                    message = if (reason.isEmpty()) result else "$reason $result"
+                )
+                stopForegroundAndSelf()
             }
+        }.start()
+    }
+
+    private fun onRecorderError(message: String) {
+        // 녹음이 스스로 멈춘 경우다. 그때까지 쌓인 조각은 살아 있으므로 그대로 저장까지 마친다.
+        handler.post {
+            stoppedReason = message
+            stop(save = true)
         }
     }
 
-    private fun elapsedSeconds(): Int {
-        val running = if (_state.value.isPaused || !_state.value.isRecording) {
-            0L
+    private fun stopForegroundAndSelf() {
+        ServiceCompat.stopForeground(this, ServiceCompat.STOP_FOREGROUND_REMOVE)
+        stopSelf()
+    }
+
+    private fun isActive(): Boolean = snapshot.recording || snapshot.saving
+
+    /** 지금 상태를 웹 화면이 볼 수 있는 곳에 적어 둔다. */
+    private fun publish() {
+        val elapsed = accumulatedMs + if (recorder.isRecording && !recorder.isPaused) {
+            SystemClock.elapsedRealtime() - startedAtElapsed
         } else {
-            SystemClock.elapsedRealtime() - segmentStartedAt
+            0L
         }
-        return ((accumulatedMillis + running) / 1000L).toInt()
+        snapshot = RecordingSnapshot(
+            recording = recorder.isRecording,
+            paused = recorder.isPaused,
+            saving = false,
+            elapsedMs = elapsed,
+            level = recorder.level,
+            folderName = folderName,
+            message = snapshot.message
+        )
     }
 
-    private fun startTimer(folderName: String) {
-        timerJob?.cancel()
-        timerJob = serviceScope.launch {
-            while (true) {
-                delay(500)
-                if (!_state.value.isRecording) break
-                val seconds = elapsedSeconds()
-                // 입력 레벨은 32767 이 최대치다. 로그 스케일이 아니라 눈에 잘 보이도록 제곱근을 쓴다.
-                val amplitude = recorderManager.maxAmplitude.coerceIn(0, 32767)
-                val level = if (amplitude <= 0) 0f else Math.sqrt(amplitude / 32767.0).toFloat()
-                val previous = _state.value
-                _state.value = previous.copy(elapsedSeconds = seconds, level = level)
-                if (seconds != previous.elapsedSeconds) {
-                    updateNotification(folderName, seconds, previous.isPaused)
-                }
-            }
+    // ---- 알림 ---------------------------------------------------------------------
+
+    private fun createChannel() {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.O) return
+        val channel = NotificationChannel(
+            CHANNEL_ID,
+            "녹음",
+            NotificationManager.IMPORTANCE_LOW      // 소리 없이 조용히 떠 있게 한다
+        ).apply {
+            description = "녹음 중에는 이 알림이 떠 있어야 화면을 꺼도 녹음이 이어집니다."
+            setShowBadge(false)
+        }
+        getSystemService(NotificationManager::class.java)?.createNotificationChannel(channel)
+    }
+
+    private fun startForegroundNotification() {
+        val type = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+            ServiceInfo.FOREGROUND_SERVICE_TYPE_MICROPHONE
+        } else {
+            0
+        }
+        ServiceCompat.startForeground(this, NOTIFICATION_ID, buildNotification(), type)
+    }
+
+    private fun updateNotification() {
+        val manager = getSystemService(NotificationManager::class.java) ?: return
+        try {
+            manager.notify(NOTIFICATION_ID, buildNotification())
+        } catch (e: Exception) {
+            // 알림 권한이 없으면(안드로이드 13+) 알림만 안 뜬다. 녹음 자체는 계속된다.
+            e.printStackTrace()
         }
     }
 
-    private fun buildNotification(
-        folderName: String,
-        elapsedSeconds: Int,
-        paused: Boolean
-    ): Notification {
+    private fun buildNotification(): Notification {
+        val state = snapshot
+        val title = when {
+            state.saving -> "녹음 저장 중..."
+            state.paused -> "녹음 일시정지"
+            else -> "녹음 중"
+        }
+        val text = buildString {
+            append(formatElapsed(state.elapsedMs))
+            if (state.folderName.isNotEmpty()) append("  ·  ").append(state.folderName)
+        }
+
+        val open = PendingIntent.getActivity(
+            this,
+            0,
+            Intent(this, MainActivity::class.java)
+                .addFlags(Intent.FLAG_ACTIVITY_SINGLE_TOP or Intent.FLAG_ACTIVITY_CLEAR_TOP),
+            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+        )
+
         val builder = NotificationCompat.Builder(this, CHANNEL_ID)
-            .setContentTitle(if (paused) "$folderName 녹음 일시정지" else "$folderName 녹음 중")
-            .setContentText(formatTime(elapsedSeconds))
             .setSmallIcon(android.R.drawable.ic_btn_speak_now)
+            .setContentTitle(title)
+            .setContentText(text)
             .setOngoing(true)
             .setOnlyAlertOnce(true)
-            .setContentIntent(openAppIntent())
+            .setSilent(true)
+            .setPriority(NotificationCompat.PRIORITY_LOW)
+            .setCategory(NotificationCompat.CATEGORY_SERVICE)
+            .setContentIntent(open)
 
-        if (paused) {
-            builder.addAction(
-                android.R.drawable.ic_media_play, "재개", serviceAction(ACTION_RESUME, 2)
-            )
-        } else {
-            builder.addAction(
-                android.R.drawable.ic_media_pause, "일시정지", serviceAction(ACTION_PAUSE, 1)
-            )
+        if (!state.saving) {
+            if (state.paused) {
+                builder.addAction(0, "이어서", actionIntent(ACTION_RESUME))
+            } else {
+                builder.addAction(0, "일시정지", actionIntent(ACTION_PAUSE))
+            }
+            builder.addAction(0, "정지 후 올리기", actionIntent(ACTION_STOP))
         }
-        builder.addAction(
-            android.R.drawable.ic_menu_save, "정지", serviceAction(ACTION_STOP, 0)
-        )
         return builder.build()
     }
 
-    private fun updateSavingNotification() {
-        val notification = NotificationCompat.Builder(this, CHANNEL_ID)
-            .setContentTitle("녹음 저장 중")
-            .setContentText("녹음 조각을 하나로 합치고 있습니다")
-            .setSmallIcon(android.R.drawable.ic_btn_speak_now)
-            .setOngoing(true)
-            .setOnlyAlertOnce(true)
-            .setProgress(0, 0, true)
-            .setContentIntent(openAppIntent())
-            .build()
-        getSystemService(NotificationManager::class.java)?.notify(NOTIFICATION_ID, notification)
-    }
-
-    private fun openAppIntent(): PendingIntent? {
-        val launchIntent = packageManager.getLaunchIntentForPackage(packageName) ?: return null
-        return PendingIntent.getActivity(
-            this, 0, launchIntent,
-            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
-        )
-    }
-
-    private fun serviceAction(action: String, requestCode: Int): PendingIntent {
-        val intent = Intent(this, RecordingService::class.java).apply { this.action = action }
+    private fun actionIntent(action: String): PendingIntent {
+        val intent = Intent(this, RecordingService::class.java).setAction(action)
         return PendingIntent.getService(
-            this, requestCode, intent,
+            this,
+            action.hashCode(),
+            intent,
             PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
         )
     }
 
-    private fun updateNotification(folderName: String, elapsedSeconds: Int, paused: Boolean) {
-        val manager = getSystemService(NotificationManager::class.java)
-        manager?.notify(NOTIFICATION_ID, buildNotification(folderName, elapsedSeconds, paused))
-    }
-
-    private fun formatTime(elapsedSeconds: Int): String {
-        val h = elapsedSeconds / 3600
-        val m = (elapsedSeconds % 3600) / 60
-        val s = elapsedSeconds % 60
-        return if (h > 0) {
-            String.format("%d:%02d:%02d", h, m, s)
-        } else {
-            String.format("%02d:%02d", m, s)
-        }
-    }
-
-    private fun createNotificationChannel() {
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-            val channel = NotificationChannel(
-                CHANNEL_ID, "녹음 진행 상태",
-                NotificationManager.IMPORTANCE_LOW
-            ).apply {
-                description = "녹음이 진행 중일 때 표시되는 알림입니다"
-                setShowBadge(false)
-            }
-            val manager = getSystemService(NotificationManager::class.java)
-            manager?.createNotificationChannel(channel)
-        }
-    }
+    // ---- 웨이크 락 -----------------------------------------------------------------
 
     private fun acquireWakeLock() {
-        if (wakeLock?.isHeld == true) return
+        if (wakeLock != null) return
         try {
-            val power = getSystemService(android.content.Context.POWER_SERVICE) as android.os.PowerManager
-            wakeLock = power.newWakeLock(
-                android.os.PowerManager.PARTIAL_WAKE_LOCK,
-                "daglo:recording"
-            ).apply {
+            val pm = getSystemService(Context.POWER_SERVICE) as PowerManager
+            wakeLock = pm.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "daglo:recording").apply {
                 setReferenceCounted(false)
-                // 시간 제한을 두지 않는다. 놓는 것은 stopRecording/onDestroy 가 책임진다
-                // (제한을 걸면 그 시각에 긴 녹음이 조용히 끊긴다).
-                acquire()
+                acquire(MAX_RECORDING_MS)
             }
         } catch (e: Exception) {
-            android.util.Log.w("RecordingService", "웨이크 락을 잡지 못했습니다: ${e.message}")
+            // 락을 못 잡아도 포그라운드 서비스만으로 대개 버틴다
+            e.printStackTrace()
         }
     }
 
     private fun releaseWakeLock() {
         try {
-            wakeLock?.takeIf { it.isHeld }?.release()
+            wakeLock?.let { if (it.isHeld) it.release() }
         } catch (e: Exception) {
-            /* 이미 풀려 있으면 무시 */
+            e.printStackTrace()
         }
         wakeLock = null
     }
 
-    override fun onDestroy() {
-        super.onDestroy()
-        timerJob?.cancel()
-        releaseWakeLock()
-        // 서비스가 시스템에 의해 죽는 경우에도 조각 파일은 지우지 않는다.
-        // 다음 실행 때 RecordingSaver 가 남은 조각을 찾아 복구한다.
-        if (recorderManager.isRecording) {
-            recorderManager.stop()
+    companion object {
+        const val ACTION_START = "com.recorder.voicenote.START"
+        const val ACTION_PAUSE = "com.recorder.voicenote.PAUSE"
+        const val ACTION_RESUME = "com.recorder.voicenote.RESUME"
+        const val ACTION_STOP = "com.recorder.voicenote.STOP"
+        const val ACTION_DISCARD = "com.recorder.voicenote.DISCARD"
+        const val EXTRA_FOLDER = "folder"
+
+        private const val CHANNEL_ID = "daglo_recording"
+        private const val NOTIFICATION_ID = 1001
+        private const val DEFAULT_FOLDER = "기본 폴더"
+        /** 웨이크 락 상한. 강의 한 타임을 훨씬 넘겨 잡아 둔다 (정지하면 그 자리에서 푼다). */
+        private const val MAX_RECORDING_MS = 6L * 60 * 60 * 1000
+
+        /** 화면(JS 브리지)이 읽는 현재 상태. 서비스가 죽어도 마지막 문구는 남는다. */
+        @Volatile
+        var snapshot = RecordingSnapshot()
+            private set
+
+        /** 웹 화면이 문구를 한 번 읽고 나면 지운다 (같은 안내를 계속 띄우지 않도록). */
+        fun clearMessage() {
+            snapshot = snapshot.copy(message = "")
         }
-        serviceScope.cancel()
+
+        fun send(context: Context, action: String, folderName: String? = null) {
+            val intent = Intent(context, RecordingService::class.java).setAction(action)
+            if (folderName != null) intent.putExtra(EXTRA_FOLDER, folderName)
+            try {
+                if (action == ACTION_START) {
+                    context.startForegroundService(intent)
+                } else {
+                    // 이미 돌고 있는 서비스에 보내는 지시다. 서비스가 이미 끝난 뒤
+                    // (오래된 알림 버튼 등) 보내면 시스템이 거부하므로 조용히 넘어간다.
+                    context.startService(intent)
+                }
+            } catch (e: Exception) {
+                e.printStackTrace()
+            }
+        }
+
+        fun formatElapsed(ms: Long): String {
+            val total = (ms / 1000).coerceAtLeast(0)
+            val h = total / 3600
+            val m = (total % 3600) / 60
+            val s = total % 60
+            return if (h > 0) {
+                String.format(Locale.US, "%d:%02d:%02d", h, m, s)
+            } else {
+                String.format(Locale.US, "%02d:%02d", m, s)
+            }
+        }
+
+        /** 녹음 조각이 쌓이는 곳 (앱 전용 저장소 — 권한이 필요 없고 앱을 지우면 함께 사라진다) */
+        fun sessionsDir(context: Context): File =
+            File(context.filesDir, "sessions").apply { mkdirs() }
+
+        /** 합쳐서 올릴 파일이 잠시 머무는 곳 */
+        fun uploadsDir(context: Context): File =
+            File(context.filesDir, "uploads").apply { mkdirs() }
+
+        /**
+         * 조각을 하나로 합쳐 업로드 큐에 넣는다. 결과 문구를 돌려준다.
+         *
+         * 앱이 녹음 도중에 죽었다면 세션 폴더가 그대로 남는데, 다음 실행 때 [recoverOrphans] 가
+         * 같은 경로로 이 함수를 불러 살려 낸다.
+         */
+        fun mergeAndQueue(context: Context, sessionDir: File, folderName: String): String {
+            val segments = SegmentRecorder.segmentsOf(sessionDir)
+            if (segments.isEmpty()) {
+                sessionDir.deleteRecursively()
+                return "녹음된 내용이 없습니다"
+            }
+
+            val stamp = SimpleDateFormat("yyyyMMdd_HHmmss", Locale.US).format(Date())
+            val safeFolder = folderName.ifBlank { DEFAULT_FOLDER }.replace(Regex("[\\\\/:*?\"<>|]"), "_")
+            val output = File(uploadsDir(context), "${safeFolder}_$stamp.m4a")
+
+            return when (val result = AudioMerger.merge(segments, output)) {
+                is AudioMerger.Result.Success -> {
+                    sessionDir.deleteRecursively()
+                    UploadWorker.enqueue(context, result.output, folderName)
+                    "녹음을 올리는 중입니다. 변환이 끝나면 목록에 나타납니다."
+                }
+                is AudioMerger.Result.Failed -> {
+                    // 합치기에 실패해도 조각은 남겨 둔다. 다음 실행 때 다시 시도한다.
+                    "녹음을 합치지 못했습니다: ${result.message}"
+                }
+            }
+        }
+
+        /**
+         * 앱이 녹음 도중 죽어 남은 세션이 있으면 합쳐서 올린다.
+         *
+         * 화면을 끄고 몇 시간을 녹음하는 앱이라, "앱이 죽어서 통째로 날렸다" 가 가장 큰 사고다.
+         * 조각은 이미 디스크에 있으므로 다음 실행 때 주워 담으면 대부분 살릴 수 있다.
+         */
+        fun recoverOrphans(context: Context) {
+            if (snapshot.recording || snapshot.saving) return
+            val dirs = sessionsDir(context).listFiles() ?: return
+            for (dir in dirs) {
+                if (!dir.isDirectory) continue
+                mergeAndQueue(context, dir, readFolderName(dir))
+            }
+        }
+
+        private fun writeFolderName(sessionDir: File, folderName: String) {
+            try {
+                File(sessionDir, FOLDER_FILE).writeText(folderName, Charsets.UTF_8)
+            } catch (e: Exception) {
+                // 못 적어도 기본 폴더로 올라간다
+                e.printStackTrace()
+            }
+        }
+
+        private fun readFolderName(sessionDir: File): String {
+            return try {
+                val file = File(sessionDir, FOLDER_FILE)
+                if (file.isFile) file.readText(Charsets.UTF_8).trim() else DEFAULT_FOLDER
+            } catch (e: Exception) {
+                DEFAULT_FOLDER
+            }
+        }
+
+        private const val FOLDER_FILE = "folder.txt"
     }
 }

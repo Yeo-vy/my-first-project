@@ -1,170 +1,164 @@
 package com.recorder.voicenote
 
+import android.app.NotificationChannel
+import android.app.NotificationManager
 import android.content.Context
-import android.net.Uri
-import androidx.work.BackoffPolicy
+import android.os.Build
+import androidx.core.app.NotificationCompat
 import androidx.work.Constraints
-import androidx.work.CoroutineWorker
 import androidx.work.Data
 import androidx.work.ExistingWorkPolicy
 import androidx.work.NetworkType
 import androidx.work.OneTimeWorkRequestBuilder
 import androidx.work.WorkManager
+import androidx.work.Worker
 import androidx.work.WorkerParameters
-import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.flow.MutableStateFlow
-import kotlinx.coroutines.flow.StateFlow
-import kotlinx.coroutines.flow.asStateFlow
-import kotlinx.coroutines.withContext
-import java.util.concurrent.TimeUnit
-
-/** 화면에 보여줄 업로드 상태 */
-data class UploadStatus(
-    /** 지금 올리고 있는 파일 이름 (없으면 올리는 중이 아님) */
-    val uploadingName: String? = null,
-    /** 마지막 결과 안내 문구 */
-    val lastMessage: String? = null,
-    val lastFailed: Boolean = false
-)
+import java.io.File
 
 /**
- * 녹음 파일을 daglo 서버로 올리는 작업.
+ * 다 합쳐진 녹음 파일 하나를 서버로 올린다.
  *
- * 강의실 와이파이가 끊겨 있거나 서버 PC 가 꺼져 있을 때가 많으므로, 그 자리에서 한 번 시도하고
- * 마는 대신 WorkManager 에 맡긴다. 네트워크가 없으면 생길 때까지 기다렸다가 알아서 올라가고,
- * 앱을 껐다 켜도 작업은 살아 있다.
+ * 앱을 나가거나 화면을 꺼도 WorkManager 가 이어서 돌리고, 와이파이가 끊겨 있으면 연결될 때까지
+ * 기다렸다가 자동으로 다시 시도한다. 강의가 끝나고 가방에 넣어 둔 사이에 올라가 있는 것이
+ * 이 앱이 노리는 그림이다.
+ *
+ * 올리기 전까지 파일은 앱 전용 저장소에 남아 있고, 성공해야 지운다. 로그인이 풀려 실패한 경우엔
+ * 파일을 그대로 두고 다음 실행 때 [retryPending] 이 다시 집어넣는다.
  */
-class UploadWorker(
-    appContext: Context,
-    params: WorkerParameters
-) : CoroutineWorker(appContext, params) {
+class UploadWorker(context: Context, params: WorkerParameters) : Worker(context, params) {
 
-    override suspend fun doWork(): Result = withContext(Dispatchers.IO) {
-        val displayName = inputData.getString(KEY_DISPLAY_NAME) ?: return@withContext Result.failure()
-        val folderName = inputData.getString(KEY_FOLDER_NAME) ?: ""
-        val uriString = inputData.getString(KEY_URI)
-        val filePath = inputData.getString(KEY_FILE_PATH)
+    override fun doWork(): Result {
+        val path = inputData.getString(KEY_FILE) ?: return Result.failure()
+        val folder = inputData.getString(KEY_FOLDER) ?: DEFAULT_FOLDER
+        val file = File(path)
+        if (!file.isFile || file.length() == 0L) {
+            cleanup(file)
+            return Result.failure()
+        }
 
         val settings = DagloSettings(applicationContext)
         if (!settings.isConfigured) {
-            // 서버 주소가 없으면 재시도해도 소용없다. 조용히 끝낸다.
-            UploadLog.mark(applicationContext, displayName, UploadState.FAILED, "서버 주소가 설정되지 않았습니다")
-            return@withContext Result.failure()
-        }
-        if (!settings.isLoggedIn) {
-            // 로그인해야 서버가 받아 준다. 다시 로그인하면 목록에서 [다시 보내기] 로 올릴 수 있다.
-            UploadLog.mark(applicationContext, displayName, UploadState.FAILED, "로그인이 필요합니다")
-            return@withContext Result.failure()
+            notify(file, "서버 주소가 없어 올리지 못했습니다", "앱에서 서버 주소를 넣어 주세요.")
+            return Result.failure()
         }
 
-        _status.value = UploadStatus(uploadingName = displayName)
-        UploadLog.mark(applicationContext, displayName, UploadState.UPLOADING, "전송 중")
-
-        val api = DagloApi(settings)
-        val result = api.uploadRecording(
-            context = applicationContext,
-            contentUri = uriString?.takeIf { it.isNotBlank() }?.let { Uri.parse(it) },
-            filePath = filePath?.takeIf { it.isNotBlank() },
-            displayName = displayName,
-            folderName = folderName
-        )
-
-        when (result) {
+        return when (val result = DagloApi(settings.serverUrl).upload(file, folder)) {
             is ApiResult.Success -> {
-                _status.value = UploadStatus(lastMessage = "서버로 보냈습니다: $displayName")
-                UploadLog.mark(applicationContext, displayName, UploadState.DONE, "서버로 보냄")
+                cleanup(file)
+                notify(file, "녹음을 올렸습니다", "$folder · 받아쓰기가 시작됩니다")
                 Result.success()
             }
-            is ApiResult.Fatal -> {
-                // 세션이 끊겼으면 저장해 둔 쿠키를 버린다. 그래야 녹음 화면 맨 위에
-                // '다시 로그인하세요' 띠가 떠서, 전송이 조용히 멈춰 있는 상태를 모르고
-                // 계속 녹음하는 일이 없다.
-                if (result.authFailed) DagloSession.clear(settings.serverUrl)
-                _status.value = UploadStatus(
-                    lastMessage = "업로드 실패: ${result.message}",
-                    lastFailed = true
-                )
-                UploadLog.mark(applicationContext, displayName, UploadState.FAILED, result.message)
-                Result.failure()
-            }
             is ApiResult.Retryable -> {
-                if (runAttemptCount >= MAX_ATTEMPTS) {
-                    _status.value = UploadStatus(
-                        lastMessage = "업로드를 여러 번 시도했지만 실패했습니다: ${result.message}",
-                        lastFailed = true
-                    )
-                    UploadLog.mark(
-                        applicationContext, displayName, UploadState.FAILED,
-                        "여러 번 시도했지만 실패: ${result.message}"
-                    )
-                    Result.failure()
-                } else {
-                    // 녹음 파일은 태블릿에 그대로 남아 있으니, 나중에 수동으로 다시 올릴 수도 있다.
-                    _status.value = UploadStatus(
-                        lastMessage = "서버에 연결하지 못해 나중에 다시 시도합니다",
-                        lastFailed = true
-                    )
-                    UploadLog.mark(
-                        applicationContext, displayName, UploadState.PENDING,
-                        "연결되면 다시 시도합니다"
-                    )
+                // 서버가 꺼져 있거나 네트워크가 불안정한 경우. WorkManager 가 시간을 두고 다시 부른다.
+                if (runAttemptCount < MAX_ATTEMPTS) {
                     Result.retry()
+                } else {
+                    notify(file, "녹음을 아직 올리지 못했습니다", "앱을 열면 다시 시도합니다. (${result.message})")
+                    Result.failure()
                 }
+            }
+            is ApiResult.Fatal -> {
+                // 로그인이 풀린 경우가 대부분이다. 파일은 지우지 않고 다음 실행 때 다시 올린다.
+                notify(file, "녹음을 올리지 못했습니다", result.message)
+                Result.failure()
             }
         }
     }
 
+    /** 올린 파일과 곁딸린 폴더 메모를 함께 지운다. */
+    private fun cleanup(file: File) {
+        try {
+            file.delete()
+            folderSidecar(file).delete()
+        } catch (e: Exception) {
+            e.printStackTrace()
+        }
+    }
+
+    private fun notify(file: File, title: String, text: String) {
+        val manager = applicationContext.getSystemService(NotificationManager::class.java) ?: return
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            manager.createNotificationChannel(
+                NotificationChannel(CHANNEL_ID, "업로드", NotificationManager.IMPORTANCE_LOW)
+            )
+        }
+        val notification = NotificationCompat.Builder(applicationContext, CHANNEL_ID)
+            .setSmallIcon(android.R.drawable.stat_sys_upload_done)
+            .setContentTitle(title)
+            .setContentText(text)
+            .setStyle(NotificationCompat.BigTextStyle().bigText(text))
+            .setAutoCancel(true)
+            .setPriority(NotificationCompat.PRIORITY_LOW)
+            .build()
+        try {
+            manager.notify(file.name.hashCode(), notification)
+        } catch (e: Exception) {
+            // 알림 권한이 없으면 조용히 넘어간다 (업로드 결과는 웹 목록에서 확인할 수 있다)
+            e.printStackTrace()
+        }
+    }
+
     companion object {
-        private const val WORK_PREFIX = "daglo-upload-"
-        private const val KEY_URI = "uri"
-        private const val KEY_FILE_PATH = "file_path"
-        private const val KEY_DISPLAY_NAME = "display_name"
-        private const val KEY_FOLDER_NAME = "folder_name"
+        private const val KEY_FILE = "file"
+        private const val KEY_FOLDER = "folder"
+        private const val CHANNEL_ID = "daglo_upload"
+        private const val DEFAULT_FOLDER = "기본 폴더"
         private const val MAX_ATTEMPTS = 5
 
-        private val _status = MutableStateFlow(UploadStatus())
-        val status: StateFlow<UploadStatus> = _status.asStateFlow()
-
-        fun consumeMessage() {
-            _status.value = _status.value.copy(lastMessage = null)
-        }
-
-        /**
-         * 업로드를 예약한다. 같은 파일을 두 번 예약해도 (자동 업로드 + 수동 업로드처럼)
-         * 이미 걸려 있는 작업이 있으면 그대로 두므로 중복 업로드가 생기지 않는다.
-         */
-        fun enqueue(
-            context: Context,
-            contentUri: Uri?,
-            filePath: String?,
-            displayName: String,
-            folderName: String
-        ) {
-            val data = Data.Builder()
-                .putString(KEY_URI, contentUri?.toString() ?: "")
-                .putString(KEY_FILE_PATH, filePath ?: "")
-                .putString(KEY_DISPLAY_NAME, displayName)
-                .putString(KEY_FOLDER_NAME, folderName)
-                .build()
+        fun enqueue(context: Context, file: File, folderName: String) {
+            writeSidecar(file, folderName)
 
             val request = OneTimeWorkRequestBuilder<UploadWorker>()
-                .setInputData(data)
+                .setInputData(
+                    Data.Builder()
+                        .putString(KEY_FILE, file.absolutePath)
+                        .putString(KEY_FOLDER, folderName)
+                        .build()
+                )
                 .setConstraints(
                     Constraints.Builder()
                         .setRequiredNetworkType(NetworkType.CONNECTED)
                         .build()
                 )
-                .setBackoffCriteria(BackoffPolicy.EXPONENTIAL, 30, TimeUnit.SECONDS)
                 .build()
 
-            // 아직 못 보낸 상태로 목록에 표시된다. 실제 전송은 네트워크가 생기면 시작된다.
-            UploadLog.mark(context, displayName, UploadState.PENDING, "전송 대기 중")
-
-            WorkManager.getInstance(context.applicationContext).enqueueUniqueWork(
-                WORK_PREFIX + displayName,
-                ExistingWorkPolicy.KEEP,
-                request
-            )
+            // 파일 경로마다 하나씩만 돌게 해서, 다시 시도할 때 같은 파일이 겹쳐 올라가지 않게 한다.
+            WorkManager.getInstance(context.applicationContext)
+                .enqueueUniqueWork("upload:${file.name}", ExistingWorkPolicy.KEEP, request)
         }
+
+        /**
+         * 아직 못 올린 녹음을 다시 집어넣는다. 앱을 열 때마다 부른다.
+         *
+         * 로그인이 풀린 채 녹음을 마쳤거나 서버가 오래 꺼져 있었다면 파일이 남아 있는데,
+         * 웹 화면에서 로그인한 뒤 앱을 다시 열면 여기서 자동으로 올라간다.
+         */
+        fun retryPending(context: Context) {
+            val files = RecordingService.uploadsDir(context).listFiles() ?: return
+            for (file in files) {
+                if (!file.isFile || !file.name.endsWith(".m4a")) continue
+                enqueue(context, file, readSidecar(file))
+            }
+        }
+
+        /** 어느 폴더로 올릴지 파일 옆에 적어 둔다 (앱이 꺼졌다 켜져도 알 수 있게). */
+        private fun writeSidecar(file: File, folderName: String) {
+            try {
+                folderSidecar(file).writeText(folderName, Charsets.UTF_8)
+            } catch (e: Exception) {
+                e.printStackTrace()
+            }
+        }
+
+        private fun readSidecar(file: File): String {
+            return try {
+                val sidecar = folderSidecar(file)
+                if (sidecar.isFile) sidecar.readText(Charsets.UTF_8).trim() else DEFAULT_FOLDER
+            } catch (e: Exception) {
+                DEFAULT_FOLDER
+            }
+        }
+
+        private fun folderSidecar(file: File): File = File(file.absolutePath + ".folder")
     }
 }

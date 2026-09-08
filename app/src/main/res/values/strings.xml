@@ -1,4 +1,6 @@
 <resources>
     <!-- 첫 화면이 웹과 같은 daglo 화면이라 이름도 서비스 이름으로 둔다 (녹음은 그 안의 기능) -->
     <string name="app_name">daglo</string>
+    <string name="shortcut_server_address">서버 주소</string>
+    <string name="shortcut_server_address_long">daglo 서버 주소 바꾸기</string>
 </resources>

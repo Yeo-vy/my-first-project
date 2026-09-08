@@ -192,6 +192,7 @@ document.addEventListener("DOMContentLoaded", async () => {
     setupAudioListeners();
     setupKeyboardShortcuts();
     startProcessingPoller();
+    startNativeRecorderPolling();   // 앱(WebView) 안에서만 동작한다
     document.addEventListener("click", closeUserMenu);
     window.addEventListener("popstate", onPopState);
     // 폴더를 먼저 받아야 `?folder=3` 으로 들어왔을 때 폴더 이름을 제목에 띄울 수 있다.
@@ -1783,8 +1784,82 @@ let recordLevelRaf = null;
 let recordWakeLock = null;
 let recordUploading = false;
 
+// ---- 태블릿 앱(WebView) 안에서 열렸을 때 -------------------------------------------
+// 앱은 이 화면을 그대로 띄우는 것이 전부이고, 녹음만 네이티브가 맡는다.
+// 브라우저 녹음은 화면을 끄면 탭이 재워져 끊기지만, 앱은 알림을 띄운 포그라운드 서비스로
+// 녹음하므로 화면을 꺼도 몇 시간이든 이어진다. 그래서 앱 안에서는 아래 버튼들이 같은 모양
+// 그대로 네이티브 녹음을 부른다 (화면은 웹과 완전히 같다).
+const nativeRecorder = (typeof window !== "undefined" && window.DagloNative) ? window.DagloNative : null;
+let nativePollId = null;
+let nativeWasBusy = false;
+
+function nativeRecorderState() {
+    if (!nativeRecorder) return null;
+    try {
+        return JSON.parse(nativeRecorder.state());
+    } catch (e) {
+        return null;
+    }
+}
+
+/** 앱 안에서는 녹음 상태를 앱에 물어 화면을 그린다 (페이지를 새로고침해도 상태가 남는다). */
+function startNativeRecorderPolling() {
+    if (!nativeRecorder || nativePollId) return;
+    nativePollId = setInterval(nativeRecorderTick, 400);
+    nativeRecorderTick();
+}
+
+function nativeRecorderTick() {
+    const state = nativeRecorderState();
+    if (!state) return;
+
+    const busy = state.recording || state.saving;
+    const timeEl = document.getElementById("record-time");
+    if (timeEl) timeEl.textContent = formatLongTime(state.elapsedMs || 0);
+    const fill = document.getElementById("record-level-fill");
+    if (fill) fill.style.width = Math.min(100, Math.round((state.level || 0) * 160)) + "%";
+
+    setRecordUiRecording(state.recording);
+    if (state.saving) {
+        setRecordState("저장하고 올리는 중...", false);
+    } else if (state.paused) {
+        setRecordState("일시정지됨", false);
+        const icon = document.getElementById("record-pause-icon");
+        const label = document.getElementById("record-pause-label");
+        if (icon) icon.className = "fa-solid fa-play";
+        if (label) label.textContent = "이어서 녹음";
+    } else if (state.recording) {
+        setRecordState("녹음 중 (화면을 꺼도 이어집니다)", true);
+    }
+
+    if (state.message) {
+        showToast(state.message);
+        nativeRecorder.clearMessage();
+    }
+
+    // 녹음이 끝나 업로드로 넘어간 순간. 목록을 다시 읽어 새 보드를 띄운다.
+    // 업로드는 앱이 백그라운드에서 하므로 보드는 몇 초 뒤에 생긴다. 그래서 한 번 더 훑는다.
+    if (nativeWasBusy && !busy) {
+        setRecordState("올렸습니다. 변환이 시작됩니다.", false);
+        if (timeEl) timeEl.textContent = "00:00:00";
+        loadBoards();
+        loadFolders();
+        setTimeout(() => { loadBoards(); loadFolders(); }, 5000);
+        setTimeout(() => { loadBoards(); }, 15000);
+    }
+    nativeWasBusy = busy;
+}
+
+function selectedRecordFolderName() {
+    const select = document.getElementById("record-folder-select");
+    if (!select || !select.options[select.selectedIndex]) return "기본 폴더";
+    return select.options[select.selectedIndex].text;
+}
+
 /** 브라우저가 녹음을 지원하고, 마이크를 열 수 있는 상태인지 */
 function recordingUnavailableReason() {
+    // 앱 안에서는 네이티브가 마이크를 열기 때문에 브라우저 제약(https·MediaRecorder)이 없다
+    if (nativeRecorder) return null;
     if (!window.isSecureContext) {
         return "이 주소(http)에서는 브라우저가 마이크를 열어 주지 않습니다. " +
             "태블릿에서는 daglo 앱의 [녹음] 을 쓰세요 — 앱은 화면을 꺼도 녹음이 이어집니다. " +
@@ -1826,6 +1901,13 @@ function openRecordModal() {
     // 지금 보고 있는 폴더가 있으면 그 폴더를 기본값으로 (그 폴더에 넣으려고 들어온 경우가 많다)
     if (currentFolderId) select.value = String(currentFolderId);
 
+    // 앱 안에서는 안내 문구도 앱 기준으로 바꾼다 (여기서는 화면을 꺼도 녹음이 이어진다)
+    const desc = document.getElementById("record-desc");
+    if (nativeRecorder && desc) {
+        desc.innerHTML = "이 태블릿의 마이크로 녹음합니다. 정지하면 선택한 폴더로 올라가고 바로 받아쓰기가 시작됩니다." +
+            "<br><b>알림이 떠 있는 동안에는 화면을 꺼도 녹음이 이어집니다.</b> 강의 내내 켜 두어도 됩니다.";
+    }
+
     const reason = recordingUnavailableReason();
     const warning = document.getElementById("record-warning");
     const mainBtn = document.getElementById("record-main-btn");
@@ -1850,6 +1932,10 @@ function closeRecordModal() {
 }
 
 function isRecordingNow() {
+    if (nativeRecorder) {
+        const state = nativeRecorderState();
+        return !!state && (state.recording || state.saving);
+    }
     return !!mediaRecorder && mediaRecorder.state !== "inactive";
 }
 
@@ -1859,6 +1945,19 @@ function toggleRecording() {
 }
 
 async function startRecording() {
+    if (nativeRecorder) {
+        const result = nativeRecorder.start(selectedRecordFolderName());
+        if (result === "NEED_PERMISSION") {
+            setRecordState("마이크 권한을 허용한 뒤 다시 눌러 주세요", false);
+        } else if (result === "BUSY") {
+            showToast("이미 녹음 중입니다.");
+        } else {
+            showToast("녹음을 시작했습니다. 화면을 꺼도 이어집니다.");
+        }
+        nativeRecorderTick();
+        return;
+    }
+
     const reason = recordingUnavailableReason();
     if (reason) {
         alert(reason);
@@ -1920,6 +2019,14 @@ async function startRecording() {
 }
 
 function togglePauseRecording() {
+    if (nativeRecorder) {
+        const state = nativeRecorderState();
+        if (!state || !state.recording) return;
+        if (state.paused) nativeRecorder.resume();
+        else nativeRecorder.pause();
+        nativeRecorderTick();
+        return;
+    }
     if (!isRecordingNow()) return;
     if (mediaRecorder.state === "recording") {
         mediaRecorder.pause();
@@ -1937,6 +2044,12 @@ function togglePauseRecording() {
 }
 
 function stopRecording() {
+    if (nativeRecorder) {
+        nativeRecorder.stop();
+        setRecordState("저장하고 올리는 중...", false);
+        nativeRecorderTick();
+        return;
+    }
     if (!isRecordingNow()) return;
     if (mediaRecorder.state === "recording") recordElapsedMs += Date.now() - recordStartedAt;
     setRecordState("마무리하는 중...", false);
