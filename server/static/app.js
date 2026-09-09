@@ -222,6 +222,7 @@ function changeFilter(filterType, record = true) {
     const navMap = {
         "all": "nav-all",
         "starred": "nav-starred",
+        "waiting": "nav-waiting",
         "processing": "nav-processing",
         "trash": "nav-trash"
     };
@@ -232,10 +233,14 @@ function changeFilter(filterType, record = true) {
     const titleMap = {
         "all": "전체 보드",
         "starred": "중요 보드",
+        "waiting": "허가 대기 녹음",
         "processing": "미완료 / 변환 중 녹음",
         "trash": "휴지통"
     };
     document.getElementById("current-folder-title").textContent = titleMap[filterType] || "보드 목록";
+
+    const approveAllBtn = document.getElementById("approve-all-btn");
+    if (approveAllBtn) approveAllBtn.style.display = filterType === "waiting" ? "" : "none";
 
     // 휴지통 버튼 텍스트 변경
     const delBtn = document.getElementById("batch-del-btn");
@@ -338,6 +343,8 @@ function exitDetailView() {
     stopPlayback();
     currentBoard = null;
     detail.style.display = "none";
+    const sidebar = document.getElementById("sidebar");
+    if (sidebar) sidebar.style.display = "";
     document.getElementById("dashboard-view").style.display = "flex";
 }
 
@@ -377,8 +384,23 @@ async function loadBoards(searchQuery = "") {
         const res = await fetch(url);
         boards = await res.json();
         renderBoardsTable();
+        refreshWaitingCount();
     } catch (e) {
         console.error("보드 목록 로드 실패:", e);
+    }
+}
+
+// 사이드바 `허가 대기` 뱃지. 지금 보고 있는 목록과 상관없이 서버 전체 기준으로 센다.
+async function refreshWaitingCount() {
+    const badge = document.getElementById("waiting-count");
+    if (!badge) return;
+    try {
+        const res = await fetch("/api/health");
+        const data = await res.json();
+        const n = data.waiting_approval || 0;
+        badge.textContent = n > 0 ? n : "";
+    } catch (e) {
+        // 개수를 못 세도 목록 자체는 그대로 쓸 수 있으니 조용히 넘어간다
     }
 }
 
@@ -406,6 +428,8 @@ function renderBoardsTable() {
             statusBadge = `<span class="status-tag processing"><i class="fa-solid fa-spinner fa-spin"></i> 변환 중 (${b.progress_percent || 0}%)</span>`;
         } else if (b.status === "PENDING") {
             statusBadge = `<span class="status-tag pending"><i class="fa-regular fa-hourglass-half"></i> 변환 대기 중</span>`;
+        } else if (b.status === "WAITING") {
+            statusBadge = `<span class="status-tag waiting" title="받아쓰기를 허가해야 변환이 시작됩니다"><i class="fa-regular fa-circle-play"></i> 허가 대기</span>`;
         } else if (b.status === "FAILED") {
             const reason = b.error_message ? escapeHtml(b.error_message) : "알 수 없는 오류";
             statusBadge = `<span class="status-tag failed" title="${reason}"><i class="fa-solid fa-circle-exclamation"></i> 실패</span>`;
@@ -420,7 +444,14 @@ function renderBoardsTable() {
         } else {
             // 실패한 보드는 곧바로 재시도, 이미 끝난 보드는 확인을 거쳐 다시 받아쓰기
             let redoBtn = "";
-            if (b.has_audio && b.status === "FAILED") {
+            if (b.status === "WAITING") {
+                // 허가해야 변환이 돈다. 원본이 없으면 시작할 수 없으니 버튼을 아예 안 준다.
+                redoBtn = b.has_audio
+                    ? `<button class="icon-btn-small approve" onclick="approveBoard(event, ${b.id})" title="받아쓰기 시작"><i class="fa-solid fa-play"></i></button>`
+                    : "";
+            } else if (b.status === "PENDING") {
+                redoBtn = `<button class="icon-btn-small" onclick="holdBoard(event, ${b.id})" title="대기열에서 빼기"><i class="fa-solid fa-stop"></i></button>`;
+            } else if (b.has_audio && b.status === "FAILED") {
                 redoBtn = `<button class="icon-btn-small" onclick="reprocessBoard(event, ${b.id})" title="변환 다시 시도"><i class="fa-solid fa-rotate-right"></i></button>`;
             } else if (b.has_audio && !IN_FLIGHT_STATUSES.includes(b.status)) {
                 redoBtn = `<button class="icon-btn-small" onclick="retranscribeBoard(event, ${b.id})" title="다시 받아쓰기"><i class="fa-solid fa-rotate-right"></i></button>`;
@@ -500,7 +531,9 @@ async function refreshBoards() {
     if (!result) {
         showToast("목록만 다시 읽었습니다. (폴더 검사에 실패했습니다)");
     } else if (result.added > 0) {
-        showToast(`새 녹음 ${result.added}개를 찾았습니다. 변환을 시작합니다.`);
+        showToast(result.auto_transcribe
+            ? `새 녹음 ${result.added}개를 찾았습니다. 변환을 시작합니다.`
+            : `새 녹음 ${result.added}개를 찾았습니다. 허가해야 받아쓰기가 시작됩니다.`);
     } else if (!result.scanned) {
         showToast("폴더를 검사하는 중입니다. 잠시 뒤 목록에 반영됩니다.");
     } else {
@@ -529,11 +562,105 @@ function toggleSelectAll(checkbox) {
 function updateBatchActionBar() {
     const bar = document.getElementById("batch-actions");
     const countSpan = document.getElementById("selected-count");
+    const approveBtn = document.getElementById("batch-approve-btn");
     if (selectedBoardIds.size > 0) {
         bar.style.display = "flex";
         countSpan.textContent = `${selectedBoardIds.size}개 선택됨`;
     } else {
         bar.style.display = "none";
+    }
+    // 허가 버튼은 고른 것 중에 허가 대기가 있을 때만 띄운다
+    if (approveBtn) {
+        const waiting = boards.filter(b => selectedBoardIds.has(b.id) && b.status === "WAITING").length;
+        approveBtn.style.display = waiting > 0 ? "" : "none";
+        approveBtn.innerHTML = `<i class="fa-solid fa-play"></i> 받아쓰기 시작 (${waiting})`;
+    }
+}
+
+// -----------------------------------------
+// 3-1. 받아쓰기 허가 — 올라온 녹음은 시작을 눌러야 변환된다
+// -----------------------------------------
+async function approveBoard(event, boardId) {
+    if (event) event.stopPropagation();
+    try {
+        const res = await fetch(`/api/boards/${boardId}/approve`, { method: "POST" });
+        const data = await res.json().catch(() => ({}));
+        if (!res.ok) {
+            alert(data.detail || "받아쓰기를 시작할 수 없습니다.");
+            return;
+        }
+        showToast("받아쓰기를 시작했습니다.");
+        // 상세 화면에서 눌렀다면 폴러가 완료를 감지하도록 상태를 바로 반영한다
+        if (currentBoard && currentBoard.id === boardId) {
+            currentBoard.status = "PENDING";
+            currentBoard.progress_percent = 0;
+            currentBoard.error_message = null;
+            renderDetailStatus(currentBoard);
+        }
+        loadBoards();
+    } catch (e) {
+        alert("허가 요청에 실패했습니다.");
+    }
+}
+
+// 아직 시작 전인 보드를 대기열에서 빼 허가 대기로 되돌린다
+async function holdBoard(event, boardId) {
+    if (event) event.stopPropagation();
+    try {
+        const res = await fetch(`/api/boards/${boardId}/hold`, { method: "POST" });
+        const data = await res.json().catch(() => ({}));
+        if (!res.ok) {
+            alert(data.detail || "대기열에서 뺄 수 없습니다.");
+            return;
+        }
+        showToast("대기열에서 뺐습니다. 허가하면 다시 시작합니다.");
+        if (currentBoard && currentBoard.id === boardId) {
+            currentBoard.status = "WAITING";
+            renderDetailStatus(currentBoard);
+        }
+        loadBoards();
+    } catch (e) {
+        alert("요청에 실패했습니다.");
+    }
+}
+
+// 고른 보드 중 허가 대기인 것들을 한 번에 시작한다
+async function batchApproveBoards() {
+    const ids = boards.filter(b => selectedBoardIds.has(b.id) && b.status === "WAITING").map(b => b.id);
+    if (ids.length === 0) return;
+    if (!confirm(`선택한 ${ids.length}개의 받아쓰기를 시작할까요? (AI 변환이 순서대로 진행됩니다)`)) return;
+    await sendBatchApprove({ board_ids: ids });
+}
+
+// 지금 보고 있는 목록의 허가 대기 녹음을 전부 시작한다
+async function approveAllWaiting() {
+    const ids = boards.filter(b => b.status === "WAITING").map(b => b.id);
+    if (ids.length === 0) {
+        showToast("허가를 기다리는 녹음이 없습니다.");
+        return;
+    }
+    if (!confirm(`허가 대기 중인 ${ids.length}개의 받아쓰기를 모두 시작할까요?`)) return;
+    await sendBatchApprove({ board_ids: ids });
+}
+
+async function sendBatchApprove(payload) {
+    try {
+        const res = await fetch("/api/boards/batch-approve", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify(payload)
+        });
+        const data = await res.json().catch(() => ({}));
+        if (!res.ok) {
+            alert(data.detail || "받아쓰기를 시작할 수 없습니다.");
+            return;
+        }
+        const skipped = data.skipped ? ` (${data.skipped}개는 건너뜀)` : "";
+        showToast(`${data.approved}개의 받아쓰기를 시작했습니다.${skipped}`);
+        selectedBoardIds.clear();
+        loadBoards();
+    } catch (e) {
+        alert("허가 요청에 실패했습니다.");
     }
 }
 
@@ -677,6 +804,9 @@ async function openBoardDetail(boardId, record = true) {
         }
         currentBoard = await res.json();
 
+        const sidebar = document.getElementById("sidebar");
+        if (sidebar) sidebar.style.display = "none";
+
         document.getElementById("dashboard-view").style.display = "none";
         document.getElementById("board-detail-view").style.display = "flex";
 
@@ -783,40 +913,40 @@ function splitSegmentsForDisplay(segments, totalMs) {
         const span = endMs - startMs;
         const text = (seg.content || "").trim();
 
-        const push = (t, atMs) => {
+        const push = (t, atMs, toMs) => {
             blocks.push({
                 content: t,
                 start_time_ms: atMs,
+                end_time_ms: toMs,
                 timestamp_str: msToStamp(atMs),
-                speaker: seg.speaker,
+                speaker: seg.speaker || "화자 1",
             });
         };
 
-        // 이미 20초 안팎이면 그대로 둔다 (새로 변환한 보드는 대개 여기에 걸린다)
-        if (span <= DISPLAY_BLOCK_MAX_MS || text.length < 30) {
-            push(text, startMs);
+        if (span <= DISPLAY_BLOCK_MAX_MS || text.length < 50) {
+            push(text, startMs, endMs);
             return;
         }
 
-        // 문장이 끝나는 곳에서 끊고, 시각은 글자 수에 비례해 나눈다.
-        // 문장별 실제 시각은 저장돼 있지 않지만 말 속도는 대체로 일정해서
-        // '20초 단위로 눌러 듣기'에는 충분히 맞는다.
         const parts = text.match(/[^.!?…。]+[.!?…。]*\s*/g) || [text];
-        const msPerChar = span / text.length;
-        const targetChars = Math.max(15, Math.round(DISPLAY_BLOCK_MS / msPerChar));
+        const msPerChar = span / (text.length || 1);
+        const targetChars = Math.max(25, Math.round(DISPLAY_BLOCK_MS / msPerChar));
 
         let buf = "";
-        let before = 0;   // 지금 버퍼 앞에 이미 내보낸 글자 수
+        let before = 0;
         const flush = () => {
             const t = buf.trim();
-            if (t) push(t, Math.round(startMs + before * msPerChar));
+            if (t) {
+                const bStart = Math.round(startMs + before * msPerChar);
+                const bEnd = Math.round(startMs + (before + buf.length) * msPerChar);
+                push(t, bStart, bEnd);
+            }
             before += buf.length;
             buf = "";
         };
 
         parts.forEach((part) => {
             let piece = part;
-            // 마침표 없이 길게 이어지는 구간은 공백에서라도 끊는다
             while (buf.length + piece.length > targetChars * 2) {
                 const room = Math.max(1, targetChars - buf.length);
                 let cut = piece.lastIndexOf(" ", room);
@@ -834,79 +964,111 @@ function splitSegmentsForDisplay(segments, totalMs) {
     return blocks;
 }
 
+let currentActiveSentence = null;
+
 function renderTranscript(segments) {
     const container = document.getElementById("transcript-container");
     container.innerHTML = "";
-    currentActiveBlock = null;
+    currentActiveSentence = null;
 
-    if (segments.length === 0) {
-        container.innerHTML = `<p style="color:var(--text-subtle); padding:40px; text-align:center;">스크립트 내용이 없습니다.</p>`;
+    if (!segments || segments.length === 0) {
+        container.innerHTML = `<p style="color:var(--color-fg-neutral-subtle); padding:60px 20px; text-align:center;">스크립트 내용이 없습니다.</p>`;
         return;
     }
 
-    // 다글로처럼 '1분 묶음 + 그 안의 문단' 2단 구조로 그린다.
-    // 시각은 묶음마다 한 번만 위에 적어 두고(버튼이 아니라 이정표다),
-    // 재생과 수정은 문단 자체를 눌러서 한다.
-    // 분 단위로 자르면 01:10 / 01:55 처럼 같은 분에 걸친 문단이 한 묶음이 되지 않으므로,
-    // `마지막으로 묶음을 연 시각에서 1분이 지났을 때` 새 묶음을 연다.
-    let group = null;
-    let groupStartMs = null;
-    let lastSpeaker = null;
-
-    // 눌러서 재생하는 단위와 재생 밑줄은 20초로 잘게 쓴다 (1분 덩어리는 되돌아가는 폭이 크다)
     const totalMs = Math.round((currentBoard?.duration_seconds || 0) * 1000);
     const blocks = splitSegmentsForDisplay(segments, totalMs);
+    const bookmarks = currentBoard?.bookmarks || [];
 
     blocks.forEach((seg, idx) => {
         const startMs = seg.start_time_ms || 0;
-
-        if (group === null || startMs - groupStartMs >= 60000) {
-            groupStartMs = startMs;
-            lastSpeaker = null;   // 묶음이 바뀌면 화자를 한 번 다시 적어 준다
-
-            group = document.createElement("section");
-            group.className = "script-group";
-
-            const head = document.createElement("div");
-            head.className = "group-ts";
-            head.textContent = stripTsBrackets(seg.timestamp_str);
-            group.appendChild(head);
-
-            container.appendChild(group);
-        }
-
+        const nextBlock = blocks[idx + 1];
+        const endMs = seg.end_time_ms || (nextBlock ? nextBlock.start_time_ms : Math.max(totalMs, startMs + 10000));
         const speaker = seg.speaker || "화자 1";
+        const startSec = startMs / 1000;
+        const endSec = endMs / 1000;
+        const spanSec = Math.max(0.5, endSec - startSec);
+        const formattedTs = formatTime(startSec);
 
-        const block = document.createElement("div");
-        block.className = "script-block";
-        block.dataset.ms = startMs;
-        block.dataset.ts = seg.timestamp_str;
-        block.dataset.speaker = speaker;
-        block.id = `seg-${idx}`;
+        const hasBookmark = bookmarks.some(bm => bm.timestamp_ms >= startMs && bm.timestamp_ms < endMs);
 
-        block.innerHTML = `
-            ${speaker !== lastSpeaker
-                ? `<span class="speaker-badge" onclick="openSpeakerModalFor('${escapeHtml(speaker)}')">${escapeHtml(speaker)}</span>`
-                : ""}
-            <div class="text-content" contenteditable="true" spellcheck="false"
-                 title="누르면 이 부분부터 재생됩니다. 그대로 이어서 고쳐 쓸 수 있어요.">${escapeHtml(seg.content)}</div>
-            <div class="block-actions">
-                <button class="icon-btn-small" onclick="addBookmarkAtMs(${startMs}, '${seg.timestamp_str}')" title="이 위치 북마크"><i class="fa-regular fa-bookmark"></i></button>
+        const rawText = (seg.content || "").trim();
+        const sentenceMatches = rawText.match(/[^.!?…。\n]+[.!?…。\n]*\s*/g) || [rawText];
+        const totalChars = rawText.length || 1;
+        let charOffset = 0;
+        let sentencesHtml = "";
+
+        sentenceMatches.forEach(sentText => {
+            const sentTrimmed = sentText.trim();
+            if (!sentTrimmed) return;
+            const sStartT = startSec + (charOffset / totalChars) * spanSec;
+            const sEndT = startSec + ((charOffset + sentText.length) / totalChars) * spanSec;
+            charOffset += sentText.length;
+
+            const words = sentTrimmed.split(/\s+/);
+            const wCount = words.length || 1;
+            const wSpan = sEndT - sStartT;
+
+            let wordsHtml = "";
+            words.forEach((w, wIdx) => {
+                const wT = (sStartT + (wIdx / wCount) * wSpan).toFixed(1);
+                wordsHtml += `<span t="${wT}" data-lexical-text="true" onclick="onLexicalWordClick(event, ${wT})">${escapeHtml(w)} </span>`;
+            });
+
+            sentencesHtml += `<span class="lexical-sentence" data-start-t="${sStartT.toFixed(2)}" data-end-t="${sEndT.toFixed(2)}">${wordsHtml}</span>`;
+        });
+
+        const p = document.createElement("p");
+        p.className = "lexical__paragraph relative text-fg-neutral text-regular15 group/paragraph touch-manipulation py-4 pr-4 pl-4 tablet:pl-[1.25rem] tablet:pr-[1.25rem] rounded-[0.625rem] hover:bg-bg-neutral text-left";
+        p.dir = "ltr";
+        p.dataset.ms = startMs;
+        p.dataset.endMs = endMs;
+        p.dataset.speaker = speaker;
+        p.id = `para-${idx}`;
+
+        p.innerHTML = `
+            <div data-lexical-speaker-block-speaker="${escapeHtml(speaker)}" data-lexical-speaker-block-time="${startSec.toFixed(1)}" data-lexical-decorator="true" contenteditable="false" style="display: flex;">
+                <div class="mb-2 flex w-full justify-between" data-sentry-component="SpeakerBlock" data-sentry-source-file="SpeakerBlockNode.tsx">
+                    <div class="min-w-0">
+                        <div class="gap-8-new flex min-w-0 items-center">
+                            <span class="text-regular12 text-fg-neutral-subtle shrink-0 whitespace-nowrap cursor-pointer hover:underline" onclick="playAtMs(${startMs})">${formattedTs}</span>
+                            <span class="speaker-name-badge text-regular12 text-fg-neutral-subtle ml-2 cursor-pointer hover:text-fg-neutral" onclick="openSpeakerModalFor('${escapeHtml(speaker)}')">${escapeHtml(speaker)}</span>
+                        </div>
+                    </div>
+                    <div class="bookmark shadow-elevation-01 border-stroke-neutral-weak bg-bg-default text-fg-neutral absolute -top-[0.75rem] right-[0.5rem] z-5 hidden grid-cols-3 gap-x-[0.0625rem] rounded-md border p-[0.1875rem] group-hover/paragraph:grid">
+                        <div class="relative" data-sentry-element="unknown" data-sentry-component="TooltipWithArrow" data-sentry-source-file="TooltipWithArrow.tsx">
+                            <button class="rounded-2 hover:bg-bg-neutral default-transition p-[0.375rem]" id="board-bookmark-button-add-bookmark" title="북마크 추가" onclick="addBookmarkFromParagraph(${startMs}, '${formattedTs}')">
+                                <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" fill="none" viewBox="0 0 20 20"><path fill="currentcolor" fill-rule="evenodd" d="M8.095 2.167h3.81c.704 0 1.285 0 1.758.036.477.037.896.113 1.258.296.578.291.948.658 1.243 1.232.186.36.263.778.3 1.252.036.47.036 1.045.036 1.743v10.541a.5.5 0 0 1-.706.456L10 15.11l-5.795 2.612a.5.5 0 0 1-.705-.456V6.726c0-.698 0-1.274.037-1.743.036-.474.113-.892.299-1.252.295-.574.665-.94 1.243-1.232.362-.183.781-.26 1.258-.296.473-.036 1.054-.036 1.758-.036M6.414 3.2c-.431.033-.696.096-.885.191a1.64 1.64 0 0 0-.804.797c-.095.185-.158.447-.191.873-.034.426-.034.963-.034 1.685v9.747l5.295-2.386a.5.5 0 0 1 .41 0l5.295 2.386V6.746c0-.722 0-1.26-.034-1.685-.033-.426-.096-.688-.191-.873a1.64 1.64 0 0 0-.804-.797c-.189-.095-.454-.158-.885-.19-.43-.034-.973-.034-1.7-.034H8.114c-.727 0-1.27 0-1.7.033M10 5.863a.5.5 0 0 1 .5.5v1.95h1.971a.5.5 0 1 1 0 1H10.5v1.95a.5.5 0 0 1-1 0v-1.95H7.529a.5.5 0 0 1 0-1H9.5v-1.95a.5.5 0 0 1 .5-.5" clip-rule="evenodd"></path></svg>
+                            </button>
+                        </div>
+                        <div class="relative" data-sentry-element="unknown" data-sentry-component="TooltipWithArrow" data-sentry-source-file="TooltipWithArrow.tsx">
+                            <button class="rounded-2 hover:bg-bg-neutral default-transition p-[0.375rem]" id="board-bookmark-button-copy-paragraph" title="단락 복사" onclick="copyParagraphText(this)">
+                                <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" fill="none" viewBox="0 0 20 20"><path fill="currentcolor" fill-rule="evenodd" d="M14.538 1.833H9.4c-.335 0-.612 0-.838.015-.235.016-.452.05-.66.137a2 2 0 0 0-1.083 1.083c-.086.209-.12.426-.137.66-.015.227-.015.503-.015.838v.017a.5.5 0 1 0 1 0c0-.356 0-.598.013-.787.012-.183.035-.279.063-.346a1 1 0 0 1 .541-.54c.067-.029.162-.051.346-.064.188-.013.43-.013.787-.013h5.1c.428 0 .72 0 .944.019.22.018.332.05.41.09a1 1 0 0 1 .437.437c.04.078.072.19.09.41.018.225.019.516.019.944V11.5c0 .356 0 .598-.013.786a1.1 1.1 0 0 1-.063.346 1 1 0 0 1-.542.542c-.066.027-.162.05-.345.063-.189.012-.43.013-.787.013a.5.5 0 1 0 0 1h.017c.335 0 .611 0 .838-.016.234-.016.451-.05.66-.137a2 2 0 0 0 1.083-1.082c.086-.209.12-.426.136-.66.016-.227.016-.503.016-.838V4.712c0-.402 0-.734-.022-1.005-.023-.28-.072-.54-.196-.782a2 2 0 0 0-.874-.874c-.243-.124-.501-.173-.782-.196-.27-.022-.603-.022-1.005-.022M10.454 5.75H5.463c-.403 0-.735 0-1.005.022-.281.023-.54.072-.782.196a2 2 0 0 0-.875.874c-.123.242-.172.5-.195.782-.023.27-.023.603-.022 1.005v6.658c0 .402 0 .735.022 1.005.023.281.072.54.195.782a2 2 0 0 0 .875.874c.242.124.5.173.782.196.27.022.602.022 1.005.022h4.991c.403 0 .735 0 1.005-.022.282-.023.54-.072.783-.196a2 2 0 0 0 .874-.874c.123-.242.172-.5.195-.782.023-.27.023-.603.023-1.005V8.629c0-.402 0-.735-.023-1.005-.023-.281-.072-.54-.195-.782a2 2 0 0 0-.874-.874c-.243-.124-.502-.173-.783-.196-.27-.022-.602-.022-1.005-.022m.924 1.018c.22.018.331.05.41.09a1 1 0 0 1 .437.438c.04.078.072.19.09.41.018.224.019.515.019.944v6.616c0 .429 0 .72-.02.945-.017.219-.05.331-.09.41a1 1 0 0 1-.437.436c-.078.04-.19.073-.409.09a13 13 0 0 1-.944.02h-4.95c-.429 0-.72-.001-.945-.02-.22-.017-.331-.05-.41-.09a1 1 0 0 1-.437-.437c-.04-.078-.072-.19-.09-.41a13 13 0 0 1-.018-.944V8.65c0-.429 0-.72.018-.945.018-.219.05-.331.09-.41a1 1 0 0 1 .438-.436c.078-.04.19-.073.409-.09.225-.019.516-.02.945-.02h4.95c.428 0 .719.001.944.02" clip-rule="evenodd"></path></svg>
+                            </button>
+                        </div>
+                        <div class="relative" data-sentry-element="unknown" data-sentry-component="TooltipWithArrow" data-sentry-source-file="TooltipWithArrow.tsx">
+                            <button class="rounded-2 hover:bg-bg-neutral default-transition p-[0.375rem]" id="board-bookmark-button-copy-all" title="전체 복사" onclick="copyAllTranscript()">
+                                <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 20 20" class="size-[1.25rem] dark:invert"><path fill="#000" fill-rule="evenodd" d="M14.538 1.834H9.4c-.335 0-.611 0-.838.015-.234.016-.451.05-.66.137A2 2 0 0 0 6.819 3.07c-.086.209-.12.426-.137.66-.015.227-.015.503-.015.838v.017a.5.5 0 1 0 1 0c0-.356 0-.598.013-.787.013-.183.035-.279.063-.346a1 1 0 0 1 .541-.54c.067-.029.163-.051.346-.064.189-.013.43-.013.787-.013h5.1c.428 0 .72 0 .944.019.22.018.332.05.41.09a1 1 0 0 1 .437.437c.04.078.072.19.09.41.019.225.019.516.019.944v6.767c0 .356 0 .598-.013.786-.013.184-.035.28-.063.346a1 1 0 0 1-.541.542 1.1 1.1 0 0 1-.346.063c-.189.012-.43.013-.787.013a.5.5 0 1 0 0 1h.017c.335 0 .612 0 .838-.016.234-.016.451-.05.66-.137a2 2 0 0 0 1.083-1.082c.086-.209.12-.426.137-.66.015-.227.015-.503.015-.838V4.713c0-.402 0-.734-.022-1.005-.023-.281-.072-.54-.196-.782a2 2 0 0 0-.874-.874c-.243-.124-.501-.173-.782-.196-.27-.022-.603-.022-1.005-.022" clip-rule="evenodd"></path><path fill="#000" d="M5.462 5.75c-.402 0-.734 0-1.005.022-.28.023-.54.072-.782.196a2 2 0 0 0-.874.874c-.124.243-.173.501-.196.782-.022.27-.022.603-.022 1.005v6.658c0 .403 0 .735.022 1.006.023.28.072.539.196.782a2 2 0 0 0 .874.874c.243.123.501.173.782.196.27.022.603.022 1.005.022h4.992c.402 0 .734 0 1.005-.022.281-.023.54-.073.782-.196a2 2 0 0 0 .874-.874c.124-.243.173-.501.196-.782.022-.271.022-.603.022-1.006V8.63c0-.402 0-.734-.022-1.005-.023-.281-.072-.54-.196-.782a2 2 0 0 0-.874-.874c-.243-.124-.501-.173-.782-.196-.27-.022-.603-.022-1.005-.022z"></path><path fill="#fff" d="M9.548 14.334a.25.25 0 0 1-.11-.02q-.039-.013-.072-.09l-.408-1.072H6.945l-.408 1.072q-.033.077-.072.09a.2.2 0 0 1-.103.02h-.628q-.105 0-.136-.039-.033-.033.006-.123L7.49 9.444q.045-.11.155-.11h.628q.084 0 .11.026a.3.3 0 0 1 .058.09l1.872 4.722q.039.097.006.13-.025.032-.136.032zm-2.3-1.98h1.406l-.7-1.838z"></path></svg>
+                            </button>
+                        </div>
+                    </div>
+                    <div class="bookmark-indicator ${hasBookmark ? '' : 'hidden'} absolute -top-2 right-6">
+                        <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" fill="none" viewBox="0 0 20 20" class="text-fg-point-cyan" data-sentry-element="BookmarkIcon" data-sentry-source-file="BookmarkWithLexical.tsx"><path fill="currentcolor" d="M11.905 2.1h-3.81c-.704 0-1.285 0-1.758.037-.477.036-.896.112-1.258.295a2.63 2.63 0 0 0-1.243 1.233c-.186.36-.263.778-.3 1.252C3.5 5.386 3.5 5.962 3.5 6.66V17.2a.5.5 0 0 0 .705.456L10 15.045l5.794 2.611a.5.5 0 0 0 .706-.455V6.66c0-.698 0-1.274-.037-1.743-.036-.474-.113-.892-.299-1.252a2.63 2.63 0 0 0-1.243-1.233c-.361-.183-.781-.259-1.258-.295-.473-.036-1.054-.036-1.758-.036"></path></svg>
+                    </div>
+                </div>
+            </div>
+            <div class="paragraph-text-body" contenteditable="true" spellcheck="false" title="누르면 이 부분부터 재생됩니다. 클릭하여 수정할 수 있습니다.">
+                ${sentencesHtml}
             </div>
         `;
-        lastSpeaker = speaker;
 
-        const textElem = block.querySelector(".text-content");
-
-        // 문단을 누르면 그 자리부터 재생하고, 커서는 누른 곳에 그대로 남아 바로 고쳐 쓸 수 있다.
-        // focus 는 '처음 들어올 때' 한 번만 나므로, 이미 고치고 있는 문단 안에서
-        // 커서를 옮기려고 다시 눌러도 재생 위치가 튀지 않는다.
-        textElem.addEventListener("focus", () => {
+        const body = p.querySelector(".paragraph-text-body");
+        body.addEventListener("focus", () => {
             isUserEditing = true;
             playAtMs(startMs, false);
         });
-        textElem.addEventListener("input", () => { isModified = true; });
-        textElem.addEventListener("blur", () => {
+        body.addEventListener("input", () => { isModified = true; });
+        body.addEventListener("blur", () => {
             isUserEditing = false;
             if (isModified) {
                 saveTranscriptChanges();
@@ -914,54 +1076,45 @@ function renderTranscript(segments) {
             }
         });
 
-        // 글자 옆 여백을 눌러도 같은 문단을 고르는 것으로 친다
-        block.addEventListener("mousedown", (e) => {
-            if (e.target.closest(".text-content, .speaker-badge, .block-actions")) return;
-            e.preventDefault();
-            textElem.focus();
-        });
-
-        group.appendChild(block);
+        container.appendChild(p);
     });
 }
 
+function onLexicalWordClick(event, timeSec) {
+    event.stopPropagation();
+    playAtMs(timeSec * 1000, false);
+}
+
 function highlightKeywordInTranscript(kw) {
-    document.getElementById("script-find-input").value = kw;
+    const searchBar = document.getElementById("script-find-bar");
+    if (searchBar) searchBar.style.display = "flex";
+    const input = document.getElementById("script-find-input");
+    if (input) input.value = kw;
     findInTranscript(kw);
 }
 
 function findInTranscript(query) {
-    const q = query.trim().toLowerCase();
-    const blocks = document.querySelectorAll(".script-block");
-    const groups = document.querySelectorAll(".script-group");
+    const q = (query || "").trim().toLowerCase();
+    const paras = document.querySelectorAll(".lexical__paragraph");
     if (!q) {
-        blocks.forEach(b => {
-            b.style.opacity = "1";
-            b.classList.remove("found");
+        paras.forEach(p => {
+            p.classList.remove("search-hit", "search-dim");
         });
-        groups.forEach(g => g.querySelector(".group-ts").style.opacity = "1");
         return;
     }
 
     let firstFound = null;
-    blocks.forEach(b => {
-        const text = b.querySelector(".text-content").innerText.toLowerCase();
+    paras.forEach(p => {
+        const body = p.querySelector(".paragraph-text-body");
+        const text = body ? body.innerText.toLowerCase() : "";
         if (text.includes(q)) {
-            b.style.opacity = "1";
-            // 검색 결과는 'found', 재생 위치는 'active' 로 구분한다.
-            // 둘 다 active 를 쓰면 검색만 해도 온 화면에 재생 밑줄이 그어진다.
-            b.classList.add("found");
-            if (!firstFound) firstFound = b;
+            p.classList.add("search-hit");
+            p.classList.remove("search-dim");
+            if (!firstFound) firstFound = p;
         } else {
-            b.style.opacity = "0.4";
-            b.classList.remove("found");
+            p.classList.remove("search-hit");
+            p.classList.add("search-dim");
         }
-    });
-
-    // 걸린 문단이 하나도 없는 묶음은 시각 표시까지 같이 흐리게 둔다
-    groups.forEach(g => {
-        const hit = g.querySelector(".script-block.found");
-        g.querySelector(".group-ts").style.opacity = hit ? "1" : "0.4";
     });
 
     if (firstFound) {
@@ -970,7 +1123,8 @@ function findInTranscript(query) {
 }
 
 function clearScriptFind() {
-    document.getElementById("script-find-input").value = "";
+    const input = document.getElementById("script-find-input");
+    if (input) input.value = "";
     findInTranscript("");
 }
 
@@ -987,15 +1141,16 @@ async function saveBoardTitle(newTitle) {
 async function saveTranscriptChanges() {
     if (!currentBoard) return;
     const segments = [];
-    document.querySelectorAll(".script-block").forEach((block, idx) => {
-        const ms = parseInt(block.dataset.ms) || 0;
-        const ts = block.dataset.ts || "[00:00]";
-        const spk = block.dataset.speaker || "화자 1";
-        const content = block.querySelector(".text-content").innerText.trim();
+    document.querySelectorAll(".lexical__paragraph").forEach((p, idx) => {
+        const ms = parseInt(p.dataset.ms) || 0;
+        const endMs = parseInt(p.dataset.endMs) || ms;
+        const spk = p.dataset.speaker || "화자 1";
+        const body = p.querySelector(".paragraph-text-body");
+        const content = body ? body.innerText.trim() : "";
         segments.push({
             start_time_ms: ms,
-            // 종료 시각은 서버가 이웃 문단을 보고 다시 계산한다 (자막 겹침 방지)
-            timestamp_str: ts,
+            end_time_ms: endMs,
+            timestamp_str: `[${formatTime(ms / 1000)}]`,
             speaker: spk,
             content: content,
             sequence: idx
@@ -1043,38 +1198,66 @@ function setupAudioListeners() {
         const currSec = audioPlayer.currentTime;
         const durSec = audioPlayer.duration || currentBoard?.duration_seconds || 0;
 
-        document.getElementById("curr-time").textContent = formatTime(currSec);
-        document.getElementById("total-time").textContent = formatTime(durSec);
+        // 시간 텍스트 업데이트
+        const currTimeElem = document.getElementById("curr-time");
+        if (currTimeElem) currTimeElem.textContent = formatTime(currSec);
+        const totalTimeElem = document.getElementById("total-time");
+        if (totalTimeElem) totalTimeElem.textContent = formatTime(durSec);
+        const playerTimeDisp = document.getElementById("player-time-display");
+        if (playerTimeDisp) playerTimeDisp.textContent = formatTime(currSec);
 
+        // 진행 바 & 툴팁 위치
         if (durSec > 0) {
-            document.getElementById("seek-bar").value = (currSec / durSec) * 100;
+            const pct = Math.min(100, Math.max(0, (currSec / durSec) * 100));
+            const fill = document.getElementById("player-progress-fill");
+            if (fill) fill.style.width = pct + "%";
+            const tooltip = document.getElementById("player-progress-tooltip");
+            if (tooltip) {
+                tooltip.style.left = pct + "%";
+                tooltip.textContent = formatTime(currSec);
+            }
+            const seekBar = document.getElementById("seek-bar");
+            if (seekBar) seekBar.value = pct;
         }
 
-        const currMs = currSec * 1000;
-        const blocks = document.querySelectorAll(".script-block[data-ms]");
-        let active = null;
-        for (let i = 0; i < blocks.length; i++) {
-            if (parseFloat(blocks[i].dataset.ms) <= currMs) {
-                active = blocks[i];
+        // 실시간 문장 단위 블루 하이라이트
+        const sentences = document.querySelectorAll(".lexical-sentence");
+        let activeSent = null;
+        for (let i = 0; i < sentences.length; i++) {
+            const startT = parseFloat(sentences[i].dataset.startT) || 0;
+            const endT = parseFloat(sentences[i].dataset.endT) || (startT + 5);
+            if (currSec >= startT && currSec < endT) {
+                activeSent = sentences[i];
+                break;
+            }
+            if (currSec >= startT) {
+                activeSent = sentences[i];
             }
         }
 
-        if (active && active !== currentActiveBlock) {
-            // 재생 중에는 밑줄로 위치만 표시한다.
-            // 여기서 스크롤까지 하면 읽고 있던 자리가 계속 밀려나서, 화면을 따라가는 게 아니라
-            // 화면에 끌려다니게 된다. 스크롤은 사용자가 재생 바로 구간을 옮겼을 때만 한다.
-            if (currentActiveBlock) currentActiveBlock.classList.remove("active");
-            active.classList.add("active");
-            currentActiveBlock = active;
+        if (activeSent && activeSent !== currentActiveSentence) {
+            if (currentActiveSentence) currentActiveSentence.classList.remove("active-sentence");
+            activeSent.classList.add("active-sentence");
+            currentActiveSentence = activeSent;
         }
     });
 
     audioPlayer.addEventListener("play", () => {
-        document.getElementById("play-icon").className = "fa-solid fa-pause";
+        const playIcon = document.getElementById("play-icon");
+        if (playIcon) playIcon.className = "fa-solid fa-pause";
+        const mainPlayBtn = document.getElementById("main-play-btn");
+        if (mainPlayBtn) {
+            mainPlayBtn.innerHTML = `<svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" fill="currentColor" viewBox="0 0 16 16"><path d="M5.5 3.5A1.5 1.5 0 0 1 7 5v6a1.5 1.5 0 0 1-3 0V5a1.5 1.5 0 0 1 1.5-1.5zm5 0A1.5 1.5 0 0 1 12 5v6a1.5 1.5 0 0 1-3 0V5a1.5 1.5 0 0 1 1.5-1.5z"/></svg>`;
+        }
     });
 
     audioPlayer.addEventListener("pause", () => {
-        document.getElementById("play-icon").className = "fa-solid fa-play";
+        const playIcon = document.getElementById("play-icon");
+        if (playIcon) playIcon.className = "fa-solid fa-play";
+        const mainPlayBtn = document.getElementById("main-play-btn");
+        if (mainPlayBtn) {
+            mainPlayBtn.innerHTML = `<svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" fill="currentColor" viewBox="0 0 16 16"><path d="m11.596 8.697-6.363 3.692c-.54.313-1.233-.066-1.233-.697V4.308c0-.63.692-1.01 1.233-.696l6.363 3.692a.802.802 0 0 1 0 1.393z"/></svg>`;
+        }
     });
 }
 
@@ -1084,15 +1267,10 @@ function togglePlay() {
 }
 
 function playAtMs(ms, scrollScript = true) {
-    // 녹음 원본이 없는 보드(파일만 지운 경우 등)에서는 자막만 고칠 수 있게 두고 재생은 넘어간다
     if (!currentBoard || !currentBoard.audio_url) return;
     audioPlayer.currentTime = ms / 1000;
-    // 연달아 눌렀을 때 앞선 play() 가 취소되며 나는 AbortError 는 무시한다
     const started = audioPlayer.play();
     if (started && started.catch) started.catch(() => {});
-    // 북마크나 채팅의 시각 링크로 건너뛴 것이라면 자막도 그 자리로 데려간다.
-    // 자막 문단을 직접 눌러 재생한 경우에는 이미 그 자리를 보고 있으므로 스크롤하지 않는다
-    // (고쳐 쓰는 중에 화면이 움직이면 커서가 있던 자리가 밀려난다).
     if (scrollScript) scrollToBlockAt(ms);
 }
 
@@ -1100,26 +1278,87 @@ function seekRelative(seconds) {
     audioPlayer.currentTime = Math.max(0, Math.min(audioPlayer.duration || 999999, audioPlayer.currentTime + seconds));
 }
 
+function onProgressTrackClick(event) {
+    const rect = event.currentTarget.getBoundingClientRect();
+    const percent = Math.max(0, Math.min(1, (event.clientX - rect.left) / rect.width));
+    const durSec = audioPlayer.duration || currentBoard?.duration_seconds || 0;
+    const targetSec = percent * durSec;
+    audioPlayer.currentTime = targetSec;
+    
+    const fill = document.getElementById("player-progress-fill");
+    if (fill) fill.style.width = (percent * 100) + "%";
+    const tooltip = document.getElementById("player-progress-tooltip");
+    if (tooltip) {
+        tooltip.style.left = (percent * 100) + "%";
+        tooltip.textContent = formatTime(targetSec);
+    }
+    scrollToBlockAt(targetSec * 1000);
+}
+
+function onProgressTrackHover(event) {
+    const rect = event.currentTarget.getBoundingClientRect();
+    const percent = Math.max(0, Math.min(1, (event.clientX - rect.left) / rect.width));
+    const durSec = audioPlayer.duration || currentBoard?.duration_seconds || 0;
+    const hoverSec = percent * durSec;
+    const tooltip = document.getElementById("player-progress-tooltip");
+    if (tooltip && audioPlayer.paused) {
+        tooltip.style.left = (percent * 100) + "%";
+        tooltip.textContent = formatTime(hoverSec);
+    }
+}
+
+const PLAYBACK_SPEEDS = [1, 1.2, 1.5, 1.8, 2, 0.8];
+function cycleSpeed() {
+    const currentRate = audioPlayer.playbackRate || 1;
+    let idx = PLAYBACK_SPEEDS.findIndex(r => Math.abs(r - currentRate) < 0.05);
+    if (idx === -1) idx = 0;
+    const nextRate = PLAYBACK_SPEEDS[(idx + 1) % PLAYBACK_SPEEDS.length];
+    audioPlayer.playbackRate = nextRate;
+    const btn = document.getElementById("playback-speed-btn");
+    if (btn) btn.textContent = nextRate + "x";
+    showToast(`재생 속도: ${nextRate}x`);
+}
+
+function toggleMute() {
+    audioPlayer.muted = !audioPlayer.muted;
+    const icon = document.getElementById("volume-icon");
+    if (icon) {
+        icon.className = audioPlayer.muted ? "fa-solid fa-volume-xmark" : "fa-solid fa-volume-high";
+    }
+}
+
+function changeVolume(val) {
+    const vol = parseFloat(val);
+    audioPlayer.volume = vol;
+    audioPlayer.muted = (vol === 0);
+    const icon = document.getElementById("volume-icon");
+    if (icon) {
+        if (vol === 0) icon.className = "fa-solid fa-volume-xmark";
+        else if (vol < 0.5) icon.className = "fa-solid fa-volume-low";
+        else icon.className = "fa-solid fa-volume-high";
+    }
+}
+
 function onSeekInput(percent) {
     const durSec = audioPlayer.duration || currentBoard?.duration_seconds || 0;
     const targetSec = (percent / 100) * durSec;
-    document.getElementById("curr-time").textContent = formatTime(targetSec);
+    const currTimeElem = document.getElementById("curr-time");
+    if (currTimeElem) currTimeElem.textContent = formatTime(targetSec);
 }
 
 function onSeekChange(percent) {
     const durSec = audioPlayer.duration || currentBoard?.duration_seconds || 0;
     const targetSec = (percent / 100) * durSec;
     audioPlayer.currentTime = targetSec;
-    scrollToBlockAt(targetSec * 1000);   // 구간을 건너뛴 것이므로 자막도 그 자리로 데려간다
+    scrollToBlockAt(targetSec * 1000);
 }
 
 function scrollToBlockAt(ms) {
-    // 해당 시각을 포함하는(= 시작 시각이 ms 를 넘지 않는 마지막) 자막 문단으로 스크롤한다.
-    // timeupdate 의 밑줄 갱신과 같은 규칙을 쓰므로 밑줄과 스크롤 위치가 어긋나지 않는다.
-    const blocks = document.querySelectorAll(".script-block[data-ms]");
+    const paras = document.querySelectorAll(".lexical__paragraph[data-ms]");
     let target = null;
-    for (let i = 0; i < blocks.length; i++) {
-        if (parseFloat(blocks[i].dataset.ms) <= ms) target = blocks[i];
+    for (let i = 0; i < paras.length; i++) {
+        const pMs = parseFloat(paras[i].dataset.ms) || 0;
+        if (pMs <= ms) target = paras[i];
     }
     if (target) target.scrollIntoView({ behavior: "smooth", block: "center" });
 }
@@ -1135,6 +1374,84 @@ function formatTime(secs) {
     return `${String(m).padStart(2, '0')}:${String(remS).padStart(2, '0')}`;
 }
 
+function copyParagraphText(btn) {
+    const p = btn.closest(".lexical__paragraph");
+    if (!p) return;
+    const body = p.querySelector(".paragraph-text-body");
+    const text = body ? body.innerText.trim() : "";
+    navigator.clipboard.writeText(text).then(() => {
+        showToast("단락이 복사되었습니다.");
+    }).catch(() => {
+        showToast("클립보드 복사에 실패했습니다.");
+    });
+}
+
+function copyAllTranscript() {
+    const bodies = Array.from(document.querySelectorAll(".lexical__paragraph .paragraph-text-body"));
+    const fullText = bodies.map(b => b.innerText.trim()).filter(Boolean).join("\n\n");
+    navigator.clipboard.writeText(fullText).then(() => {
+        showToast("전체 스크립트가 복사되었습니다.");
+    }).catch(() => {
+        showToast("클립보드 복사에 실패했습니다.");
+    });
+}
+
+async function addBookmarkFromParagraph(ms, formattedTs) {
+    await addBookmarkAtMs(ms, `[${formattedTs}]`, "북마크");
+    const paras = document.querySelectorAll(".lexical__paragraph");
+    paras.forEach(p => {
+        const pMs = parseInt(p.dataset.ms) || 0;
+        const pEndMs = parseInt(p.dataset.endMs) || (pMs + 5000);
+        if (ms >= pMs && ms < pEndMs) {
+            const ind = p.querySelector(".bookmark-indicator");
+            if (ind) ind.classList.remove("hidden");
+        }
+    });
+}
+
+function openSlideModalFromHeader() {
+    switchAiTab("template");
+    requestSummary("SLIDE");
+}
+
+function openQuizModalFromHeader() {
+    switchAiTab("template");
+    requestSummary("QUIZ");
+}
+
+function shareCurrentBoard() {
+    navigator.clipboard.writeText(window.location.href).then(() => {
+        showToast("보드 공유 링크가 복사되었습니다.");
+    }).catch(() => {
+        showToast("공유 링크 복사에 실패했습니다.");
+    });
+}
+
+function toggleDetailKebab(e) {
+    if (e) e.stopPropagation();
+    const menu = document.getElementById("detail-kebab-menu");
+    if (!menu) return;
+    menu.style.display = menu.style.display === "none" || !menu.style.display ? "block" : "none";
+}
+
+document.addEventListener("click", () => {
+    const menu = document.getElementById("detail-kebab-menu");
+    if (menu) menu.style.display = "none";
+});
+
+function toggleScriptSearch() {
+    const bar = document.getElementById("script-find-bar");
+    if (!bar) return;
+    if (bar.style.display === "none" || !bar.style.display) {
+        bar.style.display = "flex";
+        const inp = document.getElementById("script-find-input");
+        if (inp) inp.focus();
+    } else {
+        bar.style.display = "none";
+        clearScriptFind();
+    }
+}
+
 function setupKeyboardShortcuts() {
     document.addEventListener("keydown", (e) => {
         if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "s") {
@@ -1145,9 +1462,13 @@ function setupKeyboardShortcuts() {
             e.preventDefault();
             addCurrentBookmark();
         }
-        if (e.key === "F1") { e.preventDefault(); seekRelative(-5); }
+        if (e.key === " " && document.activeElement.tagName !== "INPUT" && document.activeElement.tagName !== "TEXTAREA" && !document.activeElement.isContentEditable) {
+            e.preventDefault();
+            togglePlay();
+        }
+        if (e.key === "F1") { e.preventDefault(); seekRelative(-3); }
         if (e.key === "F2") { e.preventDefault(); togglePlay(); }
-        if (e.key === "F3") { e.preventDefault(); seekRelative(5); }
+        if (e.key === "F3") { e.preventDefault(); seekRelative(3); }
         if (e.key === "Escape" && document.getElementById("board-detail-view").style.display === "flex") {
             showDashboard();
         }
@@ -1557,7 +1878,7 @@ async function submitAudioUpload() {
             body: formData
         });
         closeUploadModal();
-        showToast("파일이 업로드되었습니다. 백그라운드 AI 변환이 시작됩니다.");
+        showToast("파일이 업로드되었습니다. 허가 대기 목록에서 받아쓰기를 시작하세요.");
         loadBoards();
         loadFolders();
     } catch (e) {
@@ -1723,6 +2044,16 @@ function renderDetailStatus(board) {
             <i class="fa-solid fa-spinner fa-spin"></i>
             <span>${label}</span>
             <div class="mini-progress"><div class="mini-progress-fill" style="width:${pct}%"></div></div>
+        `;
+    } else if (board.status === "WAITING") {
+        bar.style.display = "flex";
+        bar.className = "detail-status-bar waiting";
+        bar.innerHTML = `
+            <i class="fa-regular fa-circle-play"></i>
+            <span>허가 대기 중입니다. 시작을 눌러야 받아쓰기가 진행됩니다.</span>
+            <button class="btn-sm" onclick="approveBoard(null, ${board.id})">
+                <i class="fa-solid fa-play"></i> 받아쓰기 시작
+            </button>
         `;
     } else if (board.status === "FAILED") {
         bar.style.display = "flex";
@@ -2099,8 +2430,11 @@ async function finishRecording() {
             alert(data.detail || "녹음을 올리지 못했습니다.");
             return;
         }
-        setRecordState("올렸습니다. 변환이 시작됩니다.", false);
-        showToast("녹음을 올렸습니다. 받아쓰기가 시작됩니다.");
+        const needsApproval = data.needs_approval !== false;
+        setRecordState(needsApproval ? "올렸습니다. 허가하면 변환합니다." : "올렸습니다. 변환이 시작됩니다.", false);
+        showToast(needsApproval
+            ? "녹음을 올렸습니다. 허가 대기 목록에서 받아쓰기를 시작하세요."
+            : "녹음을 올렸습니다. 받아쓰기가 시작됩니다.");
         document.getElementById("record-time").textContent = "00:00:00";
         loadBoards();
         loadFolders();

@@ -22,6 +22,8 @@ from server.database import init_db, get_db, SessionLocal
 from server.models import Folder, Board, TranscriptSegment, BoardSummary, BoardChat, Bookmark, GlossaryTerm, User
 from server import auth
 from server.migrator import (
+    AUTO_TRANSCRIBE,
+    NEW_BOARD_STATUS,
     sync_filesystem_to_db,
     ms_to_timestamp,
     split_timestamped_line,
@@ -148,6 +150,13 @@ TRASH_DIR = os.path.join(BASE_DIR, "휴지통")
 VALID_AUDIO_EXTS = (".mp3", ".m4a", ".wav", ".mp4", ".webm", ".ogg")
 # 헤더에 길이가 없어서 받자마자 컨테이너를 다시 써 주어야 하는 형식
 STREAMING_AUDIO_EXTS = (".webm", ".ogg")
+# 보드 상태
+#   WAITING    : 녹음은 들어왔지만 아직 허가를 안 받았다 (여기서는 아무 일도 일어나지 않는다)
+#   PENDING    : 사람이 허가해 큐에 들어간 상태. 워커가 곧 집어간다
+#   PROCESSING : 워커가 변환 중
+# 이 서버는 기본적으로 WAITING 에서 멈춘다. AUTO_TRANSCRIBE=on 이면 예전처럼 바로 PENDING 이다.
+
+# 동시에 돌릴 변환 워커 수
 STT_WORKERS = max(1, int(os.getenv("STT_WORKERS", "2")))
 # 워커가 이 시간(초) 동안 진행 신호를 못 주면 멈춘 것으로 보고 경고를 남긴다
 STT_STALL_WARN_SEC = max(60, int(os.getenv("STT_STALL_WARN_SEC", "1800")))
@@ -215,6 +224,12 @@ def _run_one_board(board_id: int) -> None:
     try:
         board = db.query(Board).filter_by(id=board_id).first()
         if board is None:
+            return
+        if board.status != "PENDING":
+            # 허가를 거둬들였거나(WAITING) 이미 다른 워커가 끝낸 보드다.
+            # 큐에는 같은 보드가 두 번 들어갈 수 있으므로(허가 취소 후 재허가 등)
+            # 여기서 한 번 더 확인해 같은 파일을 두 번 변환하지 않는다.
+            print(f"[STT-SKIP] Board #{board_id} 는 지금 {board.status} 라 변환하지 않습니다.", flush=True)
             return
         if board.audio_path and os.path.exists(board.audio_path):
             audio_path = board.audio_path
@@ -993,7 +1008,11 @@ def request_immediate_scan(timeout: float = 10.0) -> bool:
 
 
 def background_audio_watcher():
-    """`녹음파일원본`에 복사된 새 오디오를 감지해 PENDING 보드로 등록하고 STT 큐에 넣는다."""
+    """`녹음파일원본`에 복사된 새 오디오를 감지해 보드로 등록한다.
+
+    등록만 하고 변환은 시작하지 않는다 (허가 대기). 허가를 받아 PENDING 이 된 보드만
+    큐로 회수한다. AUTO_TRANSCRIBE=on 이면 등록과 동시에 큐에 들어간다.
+    """
     global _scan_served
 
     time.sleep(3)
@@ -1068,7 +1087,7 @@ def background_audio_watcher():
                             title=base_name,
                             audio_path=full_path,
                             audio_filename=f,
-                            status="PENDING",
+                            status=NEW_BOARD_STATUS,
                             progress_percent=0,
                             keywords_json="[]",
                             recorded_at=file_mtime,
@@ -1076,7 +1095,8 @@ def background_audio_watcher():
                         db.add(board)
                         db.commit()
                         db.refresh(board)
-                        print(f"[AUTO-DETECT] New audio found: {f} (Board #{board.id})")
+                        note = "queued" if AUTO_TRANSCRIBE else "허가 대기"
+                        print(f"[AUTO-DETECT] New audio found: {f} (Board #{board.id}, {note})")
                     elif not board.audio_path or not os.path.exists(board.audio_path):
                         # 경로가 비었거나 어긋난(폴더 이동·다른 OS 에서 만든 DB 등) 보드를
                         # 눈앞에 실제로 있는 이 파일로 다시 이어 준다. 이걸 안 하면 원본이
@@ -1157,6 +1177,17 @@ def startup_event():
         # 프로젝트 폴더 이동으로 끊긴 경로를 먼저 복구해야 삭제 동기화가 오작동하지 않는다
         repair_stale_media_paths(db)
         sync_filesystem_to_db(db)
+        # 큐에만 들어가 있던(=아직 한 글자도 변환 안 된) 보드는 허가 대기로 되돌린다.
+        # 큐는 프로세스와 함께 사라지므로, 여기서 되돌리지 않으면 사람 확인 없이 다시 돌아 버린다.
+        # 반대로 변환 중이던(PROCESSING) 보드는 이미 허가받아 돌던 작업이라 그대로 이어서 돌린다.
+        if not AUTO_TRANSCRIBE:
+            unapproved = db.query(Board).filter(Board.status == "PENDING").all()
+            for b in unapproved:
+                b.status = "WAITING"
+            if unapproved:
+                db.commit()
+                print(f"[APPROVAL] 큐에서 대기하던 보드 {len(unapproved)}개를 허가 대기로 되돌렸습니다.")
+
         # 이전 실행이 종료되며 중단된 변환 작업을 회수한다 (워커 스레드는 프로세스와 함께 죽는다)
         stuck = db.query(Board).filter(Board.status == "PROCESSING").all()
         for b in stuck:
@@ -1202,6 +1233,11 @@ class BoardUpdate(BaseModel):
 class BatchDeleteRequest(BaseModel):
     board_ids: List[int]
     permanent: bool = False
+
+class BatchApproveRequest(BaseModel):
+    """허가할 보드. board_ids 를 비워 보내면 (folder_id 안의) 허가 대기 보드를 전부 시작한다."""
+    board_ids: Optional[List[int]] = None
+    folder_id: Optional[int] = None
 
 class BatchMoveRequest(BaseModel):
     board_ids: List[int]
@@ -1426,6 +1462,10 @@ def health_check(db: Session = Depends(get_db)):
         "status": "ok",
         "boards": db.query(Board).filter_by(is_deleted=False).count(),
         "processing": db.query(Board).filter(Board.status.in_(["PROCESSING", "PENDING"])).count(),
+        "waiting_approval": db.query(Board).filter(
+            Board.status == "WAITING", Board.is_deleted == False  # noqa: E712
+        ).count(),
+        "auto_transcribe": AUTO_TRANSCRIBE,
         "queue_depth": stt_queue.qsize(),
         "workers": STT_WORKERS,
         "workers_alive": workers_alive,
@@ -1459,6 +1499,10 @@ def queue_status(db: Session = Depends(get_db)):
             Board.status == "PENDING", Board.is_deleted == False  # noqa: E712
         ).count(),
         "processing_boards": db.query(Board).filter(Board.status == "PROCESSING").count(),
+        "waiting_boards": db.query(Board).filter(
+            Board.status == "WAITING", Board.is_deleted == False  # noqa: E712
+        ).count(),
+        "auto_transcribe": AUTO_TRANSCRIBE,
         "gemini_timeout_ms": GEMINI_TIMEOUT_MS,
         "ai_ready": bool(os.getenv("GEMINI_API_KEY") or os.getenv("GEMINI_API_KEY_PAID")),
     }
@@ -1584,11 +1628,18 @@ def refresh_boards(db: Session = Depends(get_db)):
         .filter(Board.is_deleted == False, Board.status.in_(["PENDING", "PROCESSING"]))  # noqa: E712
         .count()
     )
+    waiting = (
+        db.query(Board)
+        .filter(Board.is_deleted == False, Board.status == "WAITING")  # noqa: E712
+        .count()
+    )
     return {
         "scanned": scanned,
         "added": max(0, db.query(Board).count() - before),
         "total": total,
         "in_flight": in_flight,
+        "waiting": waiting,
+        "auto_transcribe": AUTO_TRANSCRIBE,
     }
 
 
@@ -1605,8 +1656,13 @@ def get_boards(
         query = query.filter(Board.is_deleted == True)
     elif filter_type == "starred":
         query = query.filter(Board.is_deleted == False, Board.is_starred == True)
+    elif filter_type == "waiting":
+        # 허가를 기다리는 녹음만 (여기서 `받아쓰기 시작`을 누르면 그때 변환이 돈다)
+        query = query.filter(Board.is_deleted == False, Board.status == "WAITING")
     elif filter_type == "processing":
-        query = query.filter(Board.is_deleted == False, Board.status.in_(["PROCESSING", "PENDING"]))
+        query = query.filter(
+            Board.is_deleted == False, Board.status.in_(["PROCESSING", "PENDING", "WAITING"])
+        )
     else:
         query = query.filter(Board.is_deleted == False)
         if folder_id:
@@ -1799,6 +1855,103 @@ def reprocess_board(board_id: int, db: Session = Depends(get_db)):
         "board_id": b.id,
         "status": "PENDING",
         "retranscribe": had_transcript,
+        "queue_depth": stt_queue.qsize(),
+    }
+
+
+# -----------------
+# 1-1. 받아쓰기 허가 — 올라온 녹음은 허가를 받아야 변환을 시작한다
+# -----------------
+# 허가 없이는 큐에 들어가지 않으므로 AI 호출도, 요금도 발생하지 않는다.
+APPROVABLE_STATUSES = ("WAITING", "FAILED")
+
+
+def approve_boards(db: Session, boards: List[Board]) -> List[Board]:
+    """허가한 보드를 PENDING 으로 바꿔 변환 큐에 넣는다. 실제로 넣은 보드를 돌려준다."""
+    approved = []
+    for b in boards:
+        if b.status not in APPROVABLE_STATUSES:
+            continue
+        if not (b.audio_path and os.path.exists(b.audio_path)):
+            continue
+        b.status = "PENDING"
+        b.progress_percent = 0
+        b.error_message = None
+        approved.append(b)
+    if approved:
+        db.commit()
+        # 워커가 죽어 있으면 큐에 넣어도 아무도 꺼내지 않는다. 넣기 전에 확인한다.
+        ensure_workers_alive()
+        for b in approved:
+            enqueue_board(b.id)
+            print(f"[APPROVAL] Board #{b.id} ({b.title}) 받아쓰기를 허가했습니다.", flush=True)
+    return approved
+
+
+@app.post("/api/boards/{board_id}/approve")
+def approve_board(board_id: int, db: Session = Depends(get_db)):
+    """허가 대기 중인 보드 하나의 받아쓰기를 시작한다."""
+    b = db.query(Board).filter_by(id=board_id).first()
+    if not b:
+        raise HTTPException(status_code=404, detail="보드를 찾을 수 없습니다.")
+    if b.status in ("PENDING", "PROCESSING"):
+        raise HTTPException(status_code=409, detail="이미 변환 중이거나 대기 중인 보드입니다.")
+    if b.status not in APPROVABLE_STATUSES:
+        # 이미 끝난 보드를 다시 돌리는 것은 `다시 받아쓰기`(reprocess) 의 몫이다
+        raise HTTPException(status_code=409, detail="허가 대기 중인 보드가 아닙니다.")
+    if b.is_deleted:
+        restore_board_files_from_trash(b)
+        b.is_deleted = False
+        db.commit()
+    if not (b.audio_path and os.path.exists(b.audio_path)):
+        raise HTTPException(status_code=400, detail="원본 오디오 파일이 없어 변환할 수 없습니다.")
+
+    approve_boards(db, [b])
+    return {"ok": True, "board_id": b.id, "status": b.status, "queue_depth": stt_queue.qsize()}
+
+
+@app.post("/api/boards/{board_id}/hold")
+def hold_board(board_id: int, db: Session = Depends(get_db)):
+    """허가를 거둬들인다 (아직 시작 전이라면 큐에서 빠진다).
+
+    큐에서 항목을 빼낼 수는 없으므로 상태만 WAITING 으로 되돌린다. 워커는 꺼낸 보드가
+    WAITING 이면 변환하지 않고 건너뛴다. 이미 변환 중인 보드는 되돌리지 않는다.
+    """
+    b = db.query(Board).filter_by(id=board_id).first()
+    if not b:
+        raise HTTPException(status_code=404, detail="보드를 찾을 수 없습니다.")
+    if b.status == "PROCESSING":
+        raise HTTPException(status_code=409, detail="이미 변환 중이라 멈출 수 없습니다.")
+    if b.status != "PENDING":
+        raise HTTPException(status_code=409, detail="대기 중인 보드가 아닙니다.")
+
+    b.status = "WAITING"
+    b.progress_percent = 0
+    db.commit()
+    _release_board(b.id)
+    print(f"[APPROVAL] Board #{b.id} ({b.title}) 허가를 취소했습니다.", flush=True)
+    return {"ok": True, "board_id": b.id, "status": b.status}
+
+
+@app.post("/api/boards/batch-approve")
+def batch_approve_boards(req: BatchApproveRequest, db: Session = Depends(get_db)):
+    """여러 보드의 받아쓰기를 한 번에 허가한다."""
+    query = db.query(Board).filter(
+        Board.is_deleted == False,  # noqa: E712
+        Board.status.in_(APPROVABLE_STATUSES),
+    )
+    if req.board_ids:
+        query = query.filter(Board.id.in_(req.board_ids))
+    elif req.folder_id:
+        query = query.filter(Board.folder_id == req.folder_id)
+
+    targets = query.order_by(Board.created_at.asc()).all()
+    approved = approve_boards(db, targets)
+    return {
+        "ok": True,
+        "approved": len(approved),
+        "board_ids": [b.id for b in approved],
+        "skipped": len(targets) - len(approved),
         "queue_depth": stt_queue.qsize(),
     }
 
@@ -2220,7 +2373,10 @@ async def upload_audio_file(
     folder_name: Optional[str] = Form(None),
     db: Session = Depends(get_db)
 ):
-    """녹음 파일을 올려 바로 변환 큐에 넣는다.
+    """녹음 파일을 올려 허가 대기열에 넣는다.
+
+    받아쓰기는 사람이 `받아쓰기 시작`(허가)을 눌러야 돈다. 올리기만 해서는 AI 를 부르지 않는다.
+    (.env 의 AUTO_TRANSCRIBE=on 이면 예전처럼 올린 즉시 변환을 시작한다.)
 
     웹은 폴더를 골라 업로드하므로 folder_id 를 보내지만, 외부 클라이언트는 폴더 '이름'만
     알고 서버의 id 는 모르는 경우가 많다. 그래서 folder_name 으로도 받을 수 있게 하고,
@@ -2280,7 +2436,7 @@ async def upload_audio_file(
         audio_path=dest_path,
         audio_filename=filename,
         duration_seconds=0.0,
-        status="PENDING",
+        status=NEW_BOARD_STATUS,
         progress_percent=0,
         keywords_json="[]",
         recorded_at=datetime.datetime.utcnow()
@@ -2289,15 +2445,17 @@ async def upload_audio_file(
     db.commit()
     db.refresh(board)
 
-    # 워커가 죽어 있으면 큐에 넣어도 아무도 꺼내지 않는다 (올린 파일이 대기만 하는 것을 막는다)
-    ensure_workers_alive()
-    enqueue_board(board.id)
+    if AUTO_TRANSCRIBE:
+        # 워커가 죽어 있으면 큐에 넣어도 아무도 꺼내지 않는다 (올린 파일이 대기만 하는 것을 막는다)
+        ensure_workers_alive()
+        enqueue_board(board.id)
     return {
         "ok": True,
         "board_id": board.id,
         "title": board.title,
         "folder": folder.name,
-        "status": "PENDING",
+        "status": board.status,
+        "needs_approval": board.status == "WAITING",
         "queue_depth": stt_queue.qsize(),
     }
 

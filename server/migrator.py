@@ -11,6 +11,14 @@ RESULT_DIR = os.path.join(BASE_DIR, "강의 녹음 변환")
 
 TIMESTAMP_PATTERN = re.compile(r'\[(\d{1,2}:\d{2}(?::\d{2})?)\]')
 
+# 받아쓰기는 사람이 허가해야 시작한다.
+# 새로 들어온 녹음은 WAITING(허가 대기)으로만 쌓이고, 웹에서 `받아쓰기 시작`을 눌러야
+# PENDING(큐 대기)으로 바뀌어 STT 워커가 집어간다. 예전처럼 발견 즉시 자동으로 돌리고
+# 싶으면 .env 에 AUTO_TRANSCRIBE=on 을 둔다.
+AUTO_TRANSCRIBE = os.getenv("AUTO_TRANSCRIBE", "off").strip().lower() in ("on", "1", "true", "yes")
+# 새로 발견/업로드된 녹음이 처음 갖는 상태
+NEW_BOARD_STATUS = "PENDING" if AUTO_TRANSCRIBE else "WAITING"
+
 def timestamp_to_ms(ts_str: str) -> int:
     parts = list(map(int, ts_str.split(':')))
     if len(parts) == 2:
@@ -256,14 +264,15 @@ def sync_filesystem_to_db(db: Session):
             full_audio_path = os.path.join(root_dir, f)
             existing = db.query(Board).filter_by(folder_id=current_folder.id, title=base_name).first()
             if not existing:
-                # PENDING 으로 등록해야 STT 워커가 집어간다 (PROCESSING 으로 두면 영구 정체된다)
+                # 허가 대기(WAITING)로 등록한다. 사람이 `받아쓰기 시작`을 누르면 PENDING 이 되고
+                # 그때 워커가 집어간다 (PROCESSING 으로 두면 영구 정체된다)
                 board = Board(
                     folder_id=current_folder.id,
                     title=base_name,
                     audio_path=full_audio_path,
                     audio_filename=f,
                     duration_seconds=0.0,
-                    status="PENDING",
+                    status=NEW_BOARD_STATUS,
                     progress_percent=0,
                     keywords_json="[]",
                     recorded_at=datetime.datetime.fromtimestamp(os.path.getmtime(full_audio_path))

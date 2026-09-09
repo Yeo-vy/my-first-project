@@ -45,7 +45,7 @@ class UploadWorker(context: Context, params: WorkerParameters) : Worker(context,
         return when (val result = DagloApi(settings.serverUrl).upload(file, folder)) {
             is ApiResult.Success -> {
                 cleanup(file)
-                notify(file, "녹음을 올렸습니다", "$folder · 받아쓰기가 시작됩니다")
+                notify(file, "녹음을 올렸습니다", "$folder · 웹에서 받아쓰기를 시작해 주세요")
                 Result.success()
             }
             is ApiResult.Retryable -> {

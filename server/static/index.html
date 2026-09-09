@@ -5,6 +5,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>다글로 (daglo) AI - 완전 대체 웹 서비스</title>
     <link rel="stylesheet" href="/static/style.css">
+    <link rel="stylesheet" as="style" crossorigin href="https://cdn.jsdelivr.net/gh/orioncactus/pretendard@v1.3.9/dist/web/static/pretendard.min.css">
     <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.1/css/all.min.css">
     <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
 </head>
@@ -43,6 +44,11 @@
                 <a href="javascript:void(0)" class="nav-item" id="nav-starred" onclick="changeFilter('starred')">
                     <i class="fa-solid fa-star" style="color: #eab308;"></i>
                     <span>중요 보드</span>
+                </a>
+                <a href="javascript:void(0)" class="nav-item" id="nav-waiting" onclick="changeFilter('waiting')">
+                    <i class="fa-regular fa-circle-play" style="color: #10b981;"></i>
+                    <span>허가 대기</span>
+                    <span class="nav-count" id="waiting-count"></span>
                 </a>
                 <a href="javascript:void(0)" class="nav-item" id="nav-processing" onclick="changeFilter('processing')">
                     <i class="fa-solid fa-clock-rotate-left" style="color: #3b82f6;"></i>
@@ -104,8 +110,12 @@
                         <h2 id="current-folder-title">전체 보드</h2>
                         <span class="count-badge" id="boards-total-count">0</span>
                     </div>
+                    <button class="btn-sm approve" id="approve-all-btn" onclick="approveAllWaiting()" style="display: none;">
+                        <i class="fa-solid fa-play"></i> 전체 받아쓰기 시작
+                    </button>
                     <div class="batch-actions" id="batch-actions" style="display: none;">
                         <span id="selected-count">0개 선택됨</span>
+                        <button class="btn-sm approve" id="batch-approve-btn" onclick="batchApproveBoards()" style="display: none;"><i class="fa-solid fa-play"></i> 받아쓰기 시작</button>
                         <button class="btn-sm" id="batch-move-btn" onclick="batchMoveBoards()"><i class="fa-solid fa-folder-open"></i> 이동</button>
                         <button class="btn-sm danger" id="batch-del-btn" onclick="batchDeleteBoards()"><i class="fa-solid fa-trash"></i> 삭제</button>
                     </div>
@@ -139,28 +149,40 @@
             <section id="board-detail-view" class="view-panel" style="display: none;">
                 <header class="detail-header">
                     <div class="detail-left-header">
-                        <button class="icon-btn" onclick="showDashboard()" title="목록으로 (Esc)">
+                        <button class="icon-btn-ghost" onclick="showDashboard()" title="목록으로 (Esc)">
                             <i class="fa-solid fa-chevron-left"></i>
-                        </button>
-                        <button class="icon-btn star-btn" id="detail-star-btn" onclick="toggleDetailStar()" title="중요 보드">
-                            <i class="fa-regular fa-star"></i>
                         </button>
                         <span class="breadcrumb" id="detail-folder-name">기본 폴더</span>
                         <span class="divider">/</span>
-                        <h3 class="detail-title" id="detail-title" contenteditable="true" onblur="saveBoardTitle(this.innerText)">보드 제목</h3>
+                        <h3 class="detail-title" id="detail-title" contenteditable="true" spellcheck="false" onblur="saveBoardTitle(this.innerText)">보드 제목</h3>
                     </div>
                     <div class="detail-right-header">
-                        <button class="btn-secondary" onclick="openGlossaryModal()" title="이 폴더의 고유명사·전문용어를 등록하면 다시 받아쓸 때 표기가 고정됩니다">
-                            <i class="fa-solid fa-book"></i> 단어장
+                        <button class="detail-pill-btn" onclick="openSlideModalFromHeader()" title="슬라이드 만들기">
+                            <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" fill="currentColor" viewBox="0 0 16 16"><path d="M2 3a.5.5 0 0 0-.5.5v9a.5.5 0 0 0 .5.5h12a.5.5 0 0 0 .5-.5v-9a.5.5 0 0 0-.5-.5H2zm0-1h12a1.5 1.5 0 0 1 1.5 1.5v9a1.5 1.5 0 0 1-1.5 1.5H2A1.5 1.5 0 0 1 .5 12.5v-9A1.5 1.5 0 0 1 2 2z"/><path d="M4 5.5a.5.5 0 0 1 .5-.5h7a.5.5 0 0 1 0 1h-7a.5.5 0 0 1-.5-.5zm0 2.5a.5.5 0 0 1 .5-.5h4a.5.5 0 0 1 0 1h-4a.5.5 0 0 1-.5-.5z"/></svg>
+                            <span>슬라이드 만들기</span>
                         </button>
-                        <button class="btn-secondary" id="detail-retranscribe-btn" onclick="retranscribeCurrentBoard()" title="원본 녹음으로 스크립트를 처음부터 다시 만듭니다">
-                            <i class="fa-solid fa-rotate-right"></i> 다시 받아쓰기
+                        <button class="detail-pill-btn" onclick="openQuizModalFromHeader()" title="퀴즈 만들기">
+                            <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" fill="currentColor" viewBox="0 0 16 16"><path d="M8 15A7 7 0 1 1 8 1a7 7 0 0 1 0 14zm0 1A8 8 0 1 0 8 0a8 8 0 0 0 0 16z"/><path d="M5.255 5.786a.237.237 0 0 0 .241.247h.825c.138 0 .248-.113.266-.25.09-.656.54-1.134 1.342-1.134.686 0 1.314.343 1.314 1.168 0 .635-.374.927-.965 1.371-.673.489-1.206 1.06-1.168 1.987l.003.217a.25.25 0 0 0 .25.246h.811a.25.25 0 0 0 .25-.25v-.105c0-.718.273-.927 1.01-1.486.609-.463 1.244-.977 1.244-2.056 0-1.511-1.276-2.241-2.673-2.241-1.267 0-2.655.59-2.75 2.286zm1.557 5.763c0 .533.425.927 1.01.927.609 0 1.028-.394 1.028-.927 0-.552-.42-.94-1.029-.94-.584 0-1.009.388-1.009.94z"/></svg>
+                            <span>퀴즈 만들기</span>
                         </button>
-                        <button class="btn-secondary" onclick="openSpeakerModal()"><i class="fa-solid fa-user-pen"></i> 화자 이름 변경</button>
-                        <button class="btn-secondary" onclick="openExportModal()"><i class="fa-solid fa-download"></i> 내보내기</button>
-                        <button class="icon-btn danger" onclick="deleteCurrentBoard()" title="삭제">
-                            <i class="fa-regular fa-trash-can"></i>
+                        <button class="icon-btn-ghost" onclick="shareCurrentBoard()" title="공유">
+                            <svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" fill="none" stroke="currentColor" stroke-width="1.6" viewBox="0 0 24 24"><circle cx="18" cy="5" r="3"/><circle cx="6" cy="12" r="3"/><circle cx="18" cy="19" r="3"/><line x1="8.59" y1="13.51" x2="15.42" y2="17.49"/><line x1="15.41" y1="6.51" x2="8.59" y2="10.49"/></svg>
                         </button>
+                        <button class="icon-btn-ghost" onclick="openExportModal()" title="다운로드">
+                            <svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" fill="none" stroke="currentColor" stroke-width="1.6" viewBox="0 0 24 24"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
+                        </button>
+                        <div class="relative">
+                            <button class="icon-btn-ghost" id="detail-kebab-btn" onclick="toggleDetailKebab(event)" title="더보기">
+                                <svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" fill="currentColor" viewBox="0 0 16 16"><path d="M9.5 13a1.5 1.5 0 1 1-3 0 1.5 1.5 0 0 1 3 0zm0-5a1.5 1.5 0 1 1-3 0 1.5 1.5 0 0 1 3 0zm0-5a1.5 1.5 0 1 1-3 0 1.5 1.5 0 0 1 3 0z"/></svg>
+                            </button>
+                            <div class="kebab-menu" id="detail-kebab-menu" style="display: none;">
+                                <button onclick="toggleDetailStar()"><i class="fa-regular fa-star" id="kebab-star-icon"></i> <span id="kebab-star-text">중요 보드로 설정</span></button>
+                                <button onclick="openGlossaryModal()"><i class="fa-solid fa-book"></i> 단어장</button>
+                                <button onclick="openSpeakerModal()"><i class="fa-solid fa-user-pen"></i> 화자 이름 변경</button>
+                                <button onclick="retranscribeCurrentBoard()"><i class="fa-solid fa-rotate-right"></i> 다시 받아쓰기</button>
+                                <button class="danger" onclick="deleteCurrentBoard()"><i class="fa-regular fa-trash-can"></i> 보드 삭제</button>
+                            </div>
+                        </div>
                     </div>
                 </header>
 
@@ -169,23 +191,38 @@
                 <div class="board-body-grid">
                     <!-- 좌측: 스크립트 에디터 패널 -->
                     <div class="script-panel">
-                        <!-- 키워드 바 -->
-                        <div class="keywords-bar">
-                            <span class="keywords-label"><i class="fa-solid fa-tags"></i> 핵심 키워드</span>
-                            <div id="keywords-container" class="keywords-container"></div>
-                            <button class="btn-text-sm" onclick="regenerateKeywords()" title="AI로 키워드 새로 추출">
-                                <i class="fa-solid fa-rotate-right"></i>
-                            </button>
+                        <!-- 스크립트 탭 헤더 및 검색/설정 아이콘 -->
+                        <div class="script-tab-header">
+                            <div class="script-tab active">
+                                <span>스크립트</span>
+                            </div>
+                            <div class="script-tab-actions">
+                                <button class="script-header-icon-btn" onclick="toggleScriptSearch()" title="본문 검색">
+                                    <svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" fill="none" stroke="currentColor" stroke-width="1.8" viewBox="0 0 24 24"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>
+                                </button>
+                                <button class="script-header-icon-btn" onclick="openSpeakerModal()" title="화자 설정">
+                                    <svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" fill="none" stroke="currentColor" stroke-width="1.8" viewBox="0 0 24 24"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>
+                                </button>
+                            </div>
                         </div>
 
-                        <!-- 자막 본문 검색 바 -->
-                        <div class="script-search-bar" id="script-search-bar">
+                        <!-- 키워드 바 -->
+                        <div class="keywords-bar">
+                            <button class="keywords-tag-badge" onclick="regenerateKeywords()" title="AI로 키워드 새로 추출">
+                                <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1.8" viewBox="0 0 24 24"><path d="M20.59 13.41l-7.17 7.17a2 2 0 0 1-2.83 0L2 12V2h10l8.59 8.59a2 2 0 0 1 0 2.82z"/><line x1="7" y1="7" x2="7.01" y2="7"/></svg>
+                                <span>핵심 키워드</span>
+                            </button>
+                            <div id="keywords-container" class="keywords-container"></div>
+                        </div>
+
+                        <!-- 자막 본문 검색 바 (토글형) -->
+                        <div class="script-search-bar" id="script-search-bar" style="display: none;">
                             <i class="fa-solid fa-magnifying-glass"></i>
                             <input type="text" id="script-find-input" placeholder="본문 검색 (단어 찾기)" oninput="findInTranscript(this.value)">
                             <button class="icon-btn-small" onclick="clearScriptFind()"><i class="fa-solid fa-xmark"></i></button>
                         </div>
 
-                        <!-- 자막 세그먼트 박스 -->
+                        <!-- 자막 세그먼트 박스 (Lexical 구조) -->
                         <div class="transcript-container" id="transcript-container"></div>
                     </div>
 
@@ -193,47 +230,64 @@
                     <div class="ai-panel">
                         <div class="ai-tabs">
                             <button class="ai-tab active" data-tab="chat" onclick="switchAiTab('chat')">
-                                <i class="fa-solid fa-comments"></i> 보드챗
+                                보드챗
                             </button>
                             <button class="ai-tab" data-tab="summary" onclick="switchAiTab('summary')">
-                                <i class="fa-solid fa-file-lines"></i> 기본 요약
+                                기본 요약
                             </button>
                             <button class="ai-tab" data-tab="template" onclick="switchAiTab('template')">
-                                <i class="fa-solid fa-list-check"></i> 템플릿 요약
+                                템플릿 요약
                             </button>
                             <button class="ai-tab" data-tab="bookmarks" onclick="switchAiTab('bookmarks')">
-                                <i class="fa-solid fa-bookmark"></i> 북마크
+                                북마크
                             </button>
                         </div>
 
                         <!-- 탭 1: 보드챗 -->
                         <div id="ai-tab-chat" class="ai-tab-content active">
-                            <div class="quick-prompts">
-                                <button class="prompt-chip" onclick="sendQuickPrompt('이 강의/회의의 핵심 내용을 3줄로 요약해줘')">
-                                    ⭐ 핵심 요약 정리
-                                </button>
-                                <button class="prompt-chip" onclick="sendQuickPrompt('논의된 안건과 결정사항을 회의록 형태로 정리해줘')">
-                                    📝 회의록 정리
-                                </button>
-                                <button class="prompt-chip" onclick="sendQuickPrompt('해야 할 액션 아이템과 할 일을 목록으로 추출해줘')">
-                                    🎯 액션 아이템 만들기
-                                </button>
-                            </div>
-
-                            <div class="chat-messages" id="chat-messages">
-                                <div class="chat-bubble assistant welcome">
-                                    <div class="chat-avatar"><i class="fa-solid fa-robot"></i></div>
-                                    <div class="chat-text">
-                                        안녕하세요! 이 녹음의 모든 내용을 학습했습니다.<br>
-                                        궁금한 점이 있거나 요약이 필요하시면 무엇이든 물어보세요!
+                            <div class="boardchat-hero">
+                                <div class="integration-icons">
+                                    <div class="integration-icon slack-icon">
+                                        <svg viewBox="0 0 24 24" width="22" height="22"><path fill="#E01E5A" d="M6 15a2 2 0 1 0-2-2v2h2zm1-2a2 2 0 0 0 2-2V6a2 2 0 1 0-2 2v5z"/><path fill="#36C5F0" d="M9 6a2 2 0 1 0 2-2H9v2zm2 1a2 2 0 0 0 2 2h5a2 2 0 1 0-2-2h-5z"/><path fill="#2EB67D" d="M18 9a2 2 0 1 0 2 2v-2h-2zm-1 2a2 2 0 0 0-2 2v5a2 2 0 1 0 2-2v-5z"/><path fill="#ECB22E" d="M15 18a2 2 0 1 0-2 2v-2h2zm-2-1a2 2 0 0 0-2-2H6a2 2 0 1 0 2 2h5z"/></svg>
                                     </div>
+                                    <div class="integration-icon notion-icon">
+                                        <svg viewBox="0 0 24 24" width="20" height="20" fill="currentColor"><path d="M4.459 4.208c.746.606 1.026.56 2.428.466l13.215-.793c.28 0 .047-.28-.046-.326L17.86 1.83c-.466-.373-.933-.513-1.819-.466L2.92 2.39c-.42.047-.513.28-.327.466l1.866 1.352zm.98 3.5v12.457c0 .793.42 1.073 1.306.98l14.195-.84c.886-.046.98-.56.98-1.26V6.82c0-.7-.373-.98-1.073-.933l-14.475.84c-.7.047-.933.42-.933.98zm13.728.887v10.59l-10.87.653V8.875l10.87-.653v.373zm-8.818 2.053c-.327 0-.513.14-.513.373v5.88c0 .28.186.42.513.373l1.353-.093c.327-.047.466-.233.466-.513V12.18l2.986 4.713c.28.42.56.513 1.026.466l1.306-.093c.327-.047.513-.233.513-.513v-5.88c0-.28-.186-.42-.513-.373l-1.26.093c-.327.047-.466.233-.466.513v3.873l-2.94-4.526c-.28-.42-.56-.513-1.026-.467l-1.393.093z"/></svg>
+                                    </div>
+                                </div>
+                                <h4 class="hero-title">연결 한 번으로<br>Slack과 Notion에 바로 공유하세요</h4>
+                                <p class="hero-subtitle">AI가 분석한 내용을 바로 공유하거나 액션 아이템으로 정리할 수 있어요</p>
+                                <div class="quick-prompts-row">
+                                    <button class="prompt-pill" onclick="sendQuickPrompt('이 강의/회의의 핵심 내용을 3줄로 요약해줘')">
+                                        <span class="dot red"></span> 핵심 요약 정리
+                                    </button>
+                                    <button class="prompt-pill" onclick="sendQuickPrompt('논의된 안건과 결정사항을 회의록 형태로 정리해줘')">
+                                        <span class="dot brown"></span> 회의록 정리
+                                    </button>
+                                    <button class="prompt-pill" onclick="sendQuickPrompt('해야 할 액션 아이템과 할 일을 목록으로 추출해줘')">
+                                        <span class="dot red-target"></span> 액션 아이템 만들기
+                                    </button>
+                                </div>
+                                <div class="hero-buttons">
+                                    <button class="hero-action-btn" onclick="showToast('Slack 연동 기능은 준비 중입니다.')">
+                                        <span class="slack-mini-dot"></span> Slack 연결하기
+                                    </button>
+                                    <button class="hero-action-btn" onclick="showToast('Notion 연동 기능은 준비 중입니다.')">
+                                        <span class="notion-mini-dot"></span> Notion 연결하기
+                                    </button>
                                 </div>
                             </div>
 
-                            <div class="chat-input-container">
-                                <textarea id="chat-input" placeholder="궁금한 내용을 질문해 보세요 (Enter로 전송)" rows="1" onkeydown="handleChatKeyDown(event)"></textarea>
-                                <button id="send-chat-btn" onclick="sendChatMessage()">
-                                    <i class="fa-solid fa-arrow-up"></i>
+                            <div class="chat-messages" id="chat-messages">
+                                <!-- Chat bubbles -->
+                            </div>
+
+                            <div class="daglo-chat-input-bar">
+                                <button class="chat-plus-btn" title="프롬프트 옵션">
+                                    <svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
+                                </button>
+                                <input type="text" id="chat-input" placeholder="궁금한 내용을 질문해 보세요" onkeydown="handleChatKeyDown(event)">
+                                <button id="send-chat-btn" onclick="sendChatMessage()" title="전송">
+                                    <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2.2" viewBox="0 0 24 24"><line x1="12" y1="19" x2="12" y2="5"/><polyline points="5 12 12 5 19 12"/></svg>
                                 </button>
                             </div>
                         </div>
@@ -298,36 +352,39 @@
 
                 <!-- 하단 고정 오디오 플레이어 바 -->
                 <footer class="bottom-audio-bar">
-                    <div class="player-controls">
-                        <button class="player-btn" onclick="seekRelative(-5)" title="5초 이전 (F1)">
-                            <i class="fa-solid fa-rotate-left"></i> <span class="btn-sub">5s</span>
-                        </button>
-                        <button class="player-btn play-main" id="main-play-btn" onclick="togglePlay()" title="재생/일시정지 (F2)">
-                            <i class="fa-solid fa-play" id="play-icon"></i>
-                        </button>
-                        <button class="player-btn" onclick="seekRelative(5)" title="5초 이후 (F3)">
-                            <i class="fa-solid fa-rotate-right"></i> <span class="btn-sub">5s</span>
-                        </button>
+                    <!-- 상단 전체 너비 프로그레스 바 -->
+                    <div class="player-progress-container" id="player-progress-container" onclick="onProgressTrackClick(event)" onmousemove="onProgressTrackHover(event)">
+                        <div class="player-progress-track">
+                            <div class="player-progress-fill" id="player-progress-fill" style="width: 0%;"></div>
+                        </div>
+                        <div class="player-progress-tooltip" id="player-progress-tooltip" style="left: 0%;">00:00</div>
                     </div>
 
-                    <div class="player-progress-area">
-                        <span class="time-display" id="curr-time">00:00</span>
-                        <input type="range" id="seek-bar" min="0" max="100" value="0" step="0.1" oninput="onSeekInput(this.value)" onchange="onSeekChange(this.value)">
-                        <span class="time-display" id="total-time">00:00</span>
-                    </div>
+                    <div class="bottom-player-main-row">
+                        <div class="player-controls-center">
+                            <button class="player-circle-btn" onclick="seekRelative(-3)" title="3초 이전">
+                                <svg xmlns="http://www.w3.org/2000/svg" width="22" height="22" fill="currentColor" viewBox="0 0 24 24"><path d="M12 5V1L7 6l5 5V7c3.31 0 6 2.69 6 6s-2.69 6-6 6-6-2.69-6-6H4c0 4.42 3.58 8 8 8s8-3.58 8-8-3.58-8-8-8z"/><text x="12" y="15" font-size="8" font-weight="bold" text-anchor="middle" fill="currentColor">3</text></svg>
+                            </button>
+                            <button class="player-play-circle-btn" id="main-play-btn" onclick="togglePlay()" title="재생/일시정지 (Space/F2)">
+                                <svg id="play-icon-svg" xmlns="http://www.w3.org/2000/svg" width="18" height="18" fill="currentColor" viewBox="0 0 16 16"><path d="m11.596 8.697-6.363 3.692c-.54.313-1.233-.066-1.233-.697V4.308c0-.63.692-1.01 1.233-.696l6.363 3.692a.802.802 0 0 1 0 1.393z"/></svg>
+                            </button>
+                            <button class="player-circle-btn" onclick="seekRelative(3)" title="3초 이후">
+                                <svg xmlns="http://www.w3.org/2000/svg" width="22" height="22" fill="currentColor" viewBox="0 0 24 24"><path d="M12 5V1l5 5-5 5V7c-3.31 0-6 2.69-6 6s2.69 6 6 6 6-2.69 6-6h2c0 4.42-3.58 8-8 8s-8-3.58-8-8 3.58-8 8-8z"/><text x="12" y="15" font-size="8" font-weight="bold" text-anchor="middle" fill="currentColor">3</text></svg>
+                            </button>
+                        </div>
 
-                    <div class="player-extra">
-                        <select id="playback-speed" onchange="changeSpeed(this.value)">
-                            <option value="0.75">0.75x</option>
-                            <option value="1" selected>1.0x</option>
-                            <option value="1.25">1.25x</option>
-                            <option value="1.5">1.5x</option>
-                            <option value="2">2.0x</option>
-                        </select>
-                        <button class="icon-btn-small" onclick="addCurrentBookmark()" title="북마크 추가 (Ctrl+B)">
-                            <i class="fa-solid fa-bookmark"></i>
-                        </button>
-                        <span class="shortcut-tip">F1(-5s) F2(재생) F3(+5s) Ctrl+S(저장)</span>
+                        <div class="player-controls-right">
+                            <div class="volume-container">
+                                <button class="player-circle-btn" onclick="toggleMute()" title="음소거">
+                                    <i class="fa-solid fa-volume-high" id="volume-icon"></i>
+                                </button>
+                                <input type="range" id="volume-slider" min="0" max="1" step="0.05" value="1" oninput="changeVolume(this.value)">
+                            </div>
+                            <button class="player-speed-btn" id="playback-speed-btn" onclick="cycleSpeed()" title="재생 속도">
+                                1x
+                            </button>
+                            <span class="player-time-display" id="player-time-display">00:00</span>
+                        </div>
                     </div>
 
                     <audio id="global-audio-element" preload="metadata"></audio>
