@@ -22,6 +22,9 @@ load_dotenv()
 api_keys = [k for k in [os.getenv("GEMINI_API_KEY"), os.getenv("GEMINI_API_KEY_PAID")] if k]
 active_key_index = 0
 
+# 되돌릴 때는 .env 에 GEMINI_MODEL=gemini-2.5-flash
+GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-3.6-flash")
+
 # google-genai SDK 는 httpx 클라이언트에 timeout=None 을 넣는다. 즉 기본값이 '무한 대기'다.
 # 응답이 끊기면 워커 스레드가 영원히 묶여 큐가 멈추고, 나머지 보드는 계속 '변환 대기 중'이 된다.
 # 그래서 반드시 명시적으로 타임아웃을 건다. (밀리초, 기본 15분)
@@ -492,7 +495,7 @@ def transcribe_chunk_with_fallback(temp_chunk_path: str, display_name: str, prom
             )
 
             response = client.models.generate_content(
-                model="gemini-2.5-flash",
+                model=GEMINI_MODEL,
                 contents=[uploaded_file, prompt_text]
             )
 
@@ -803,7 +806,7 @@ def extract_keywords_ai(transcript: str) -> List[str]:
 """
     try:
         response = client.models.generate_content(
-            model="gemini-2.5-flash",
+            model=GEMINI_MODEL,
             contents=prompt,
             config={"response_mime_type": "application/json"}
         )
@@ -908,7 +911,7 @@ def generate_summary_ai(transcript: str, summary_type: str = "BASIC") -> str:
 
     try:
         response = client.models.generate_content(
-            model="gemini-2.5-flash",
+            model=GEMINI_MODEL,
             contents=full_prompt
         )
         return response.text or "요약을 생성하지 못했습니다."
@@ -943,7 +946,7 @@ def stream_board_chat(transcript: str, chat_history: List[Dict[str, str]], user_
 
     try:
         stream = client.models.generate_content_stream(
-            model="gemini-2.5-flash",
+            model=GEMINI_MODEL,
             contents=contents
         )
         for chunk in stream:
