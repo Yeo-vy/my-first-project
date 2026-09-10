@@ -32,9 +32,24 @@ GEMINI_MAX_ATTEMPTS = max(1, int(os.getenv("GEMINI_MAX_ATTEMPTS", "3")))
 # ffmpeg 한 번 호출이 이 시간을 넘기면 강제 종료한다 (멈춘 ffmpeg 이 워커를 묶는 것을 막는다)
 FFMPEG_TIMEOUT_SEC = max(60, int(os.getenv("FFMPEG_TIMEOUT_SEC", "900")))
 
-CHUNK_LENGTH_MS = 20 * 60 * 1000   # 20분 청크
-OVERLAP_MS = 30 * 1000             # 30초 오버랩
+# 청크 길이. 짧을수록 자막 시각이 정확해진다.
+#
+# 청크 경계 시각은 우리가 ffmpeg 로 직접 잘라 낸 값이라 확실하지만, 청크 안쪽 시각은 전부
+# 받아쓰기가 말해 준 것이라 믿을 수 없다. 20분으로 자르던 때는 106분 강의에 확실한 시각이
+# 6개뿐이었고, 받아쓰기가 한 청크에 타임스탬프를 하나만 찍어 주는 일이 잦아 19분 30초가
+# 문단 하나로 뭉쳤다. 그러면 화면은 그 덩어리를 글자 수로 나눠 시간을 지어내고,
+# 자막 하이라이트는 그 구간 내내 엉뚱한 곳을 짚는다.
+CHUNK_MINUTES = max(1, int(os.getenv("STT_CHUNK_MINUTES", "5")))
+CHUNK_LENGTH_MS = CHUNK_MINUTES * 60 * 1000
+# 청크 사이를 겹쳐 잘라, 경계에서 말이 잘려 사라지는 것을 막는다
+OVERLAP_MS = min(20 * 1000, CHUNK_LENGTH_MS // 4)
 CHUNK_STEP_MS = CHUNK_LENGTH_MS - OVERLAP_MS
+# 청크의 타임스탬프를 믿으려면, 찍힌 시각이 적어도 청크 길이의 이만큼은 덮어야 한다
+MIN_TIMESTAMP_COVERAGE = 0.5
+# 시각을 못 믿는 청크를 펼 때 조각 하나가 넘지 않을 길이
+SPREAD_PIECE_MAX_CHARS = 120
+# 덩어리를 문장으로 끊을 때 쓰는 자리 (문장부호 뒤)
+SENTENCE_SPLIT_PATTERN = re.compile(r'[^.!?…。\n]+[.!?…。]*\s*')
 TIMESTAMP_PATTERN = re.compile(r'\[\s*(\d{1,2}:\d{2}(?::\d{2})?)\s*\]')
 # 대괄호 안쪽에 공백이 끼어도(`[ 00:12]`) 같은 타임스탬프로 본다.
 # 받아쓰기가 가끔 이렇게 내주는데, 못 알아보면 본문에 그대로 남아 자막에 찍힌다.
@@ -330,36 +345,102 @@ def resolve_end_times(start_ms_list: List[int], total_ms: int = 0) -> List[int]:
     return ends
 
 
-def offset_timestamps(text: str, offset_seconds: int) -> str:
-    if offset_seconds == 0:
-        return text
+def parse_chunk_pieces(text: str, chunk_length_ms: int) -> List[tuple]:
+    """청크 하나의 받아쓰기를 `(청크 안에서의 ms, 본문)` 조각들로 만든다.
 
-    def repl(match):
-        secs = timestamp_to_seconds(match.group(1))
-        total_secs = secs + offset_seconds
-        h = total_secs // 3600
-        m = (total_secs % 3600) // 60
-        s = total_secs % 60
-        if h > 0:
-            return f"[{h:02d}:{m:02d}:{s:02d}]"
-        else:
-            return f"[{m:02d}:{s:02d}]"
+    받아쓰기가 주는 시각은 이 청크 기준(00:00 부터)이다. 청크 길이를 넘는 값은 받아쓰기가
+    지어낸 것이므로 청크 끝으로 자르고, 뒤로 돌아가는 값은 앞 시각에 맞춘다. 시간이 되감기면
+    문단 묶기(`group_by_sentence`)와 종료 시각 계산(`resolve_end_times`)이 통째로 어긋난다.
+    """
+    from server.migrator import split_timestamped_line
 
-    return re.sub(TIMESTAMP_PATTERN, repl, text)
-
-def strip_overlap(text: str, boundary_seconds: int) -> str:
-    kept_lines = []
-    keep = False
+    limit = max(0, chunk_length_ms)
+    pieces = []
+    last_ms = 0
     for raw_line in text.splitlines():
         line = raw_line.strip()
         if not line:
             continue
-        match = TIMESTAMP_PATTERN.search(line)
-        if match:
-            keep = timestamp_to_seconds(match.group(1)) >= boundary_seconds
-        if keep:
-            kept_lines.append(line)
-    return "\n".join(kept_lines)
+        for piece_ms, piece_text in split_timestamped_line(line, last_ms):
+            piece_ms = min(max(piece_ms, last_ms), limit)
+            last_ms = piece_ms
+            if piece_text:
+                pieces.append((piece_ms, piece_text))
+    return pieces
+
+
+def chunk_timestamps_are_usable(pieces: List[tuple], chunk_length_ms: int) -> bool:
+    """이 청크의 타임스탬프가 청크를 실제로 설명하고 있는지.
+
+    받아쓰기는 [00:00] 하나만 찍고 몇 분치를 이어 붙이는 일이 잦다. 그대로 두면 그 몇 분이
+    문단 하나가 되고, 화면은 그 덩어리를 글자 수로 갈라 시간을 지어낸다. 그럴 바에는 청크
+    안에 고르게 펴는 편이 낫다 — 적어도 청크 밖으로는 새지 않는다.
+    """
+    if chunk_length_ms <= 0 or len(pieces) < 2:
+        return False
+    stamps = {ms for ms, _ in pieces}
+    if len(stamps) < 3:
+        return False
+    return (max(stamps) - min(stamps)) >= chunk_length_ms * MIN_TIMESTAMP_COVERAGE
+
+
+def split_text_for_spreading(text: str) -> List[str]:
+    """긴 덩어리를 문장 단위로 쪼갠다 (마침표가 없으면 글자 수로라도 끊는다).
+
+    시각을 못 믿는 청크는 대개 `[00:00]` 하나에 몇 분치 말이 통째로 붙어 온다. 덩어리인 채로는
+    어디에 펴 놓아도 한 점에 뭉치므로, 펴기 전에 먼저 쪼갠다.
+    """
+    parts = [p.strip() for p in SENTENCE_SPLIT_PATTERN.findall(text)]
+    parts = [p for p in parts if p]
+    if not parts:
+        stripped = text.strip()
+        parts = [stripped] if stripped else []
+
+    out = []
+    for part in parts:
+        # 받아쓰기가 마침표를 거의 안 찍어 준 구간이 있다. 그때는 띄어쓰기에서 끊는다.
+        while len(part) > SPREAD_PIECE_MAX_CHARS:
+            cut = part.rfind(" ", 0, SPREAD_PIECE_MAX_CHARS)
+            if cut <= 0:
+                cut = SPREAD_PIECE_MAX_CHARS
+            head, part = part[:cut].strip(), part[cut:].strip()
+            if head:
+                out.append(head)
+        if part:
+            out.append(part)
+    return out
+
+
+def spread_pieces(pieces: List[tuple], span_ms: int) -> List[tuple]:
+    """조각들을 `[0, span_ms)` 안에 글자 수에 비례해 고르게 편다.
+
+    말하는 속도가 일정하다고 치는 셈이라 정확하지는 않지만, 청크 하나(몇 분) 안에서의
+    어림이라 오차도 그 안에 갇힌다. 몇 분치가 한 시각에 뭉쳐 있는 것보다는 훨씬 낫다.
+    """
+    fragments = []
+    for _ms, text in pieces:
+        fragments.extend(split_text_for_spreading(text))
+
+    total_chars = sum(len(t) for t in fragments)
+    if not fragments or total_chars <= 0 or span_ms <= 0:
+        return pieces
+
+    spread = []
+    before = 0
+    for text in fragments:
+        spread.append((int(span_ms * before / total_chars), text))
+        before += len(text)
+    return spread
+
+
+def drop_overlap_pieces(pieces: List[tuple], overlap_ms: int) -> List[tuple]:
+    """두 번째 청크부터 앞의 겹친 구간을 버린다 (이전 청크가 이미 받아쓴 부분이다).
+
+    예전에는 시각을 절대 시각으로 바꾼 뒤에 `청크 시작 이상만 남긴다`로 걸렀는데, 옮기고 나면
+    모든 줄이 그 조건을 만족해서 한 줄도 걸러지지 않았다. 겹친 30초가 매 경계마다 두 번씩
+    들어가 문단과 시각이 그만큼 밀렸다. 그래서 청크 안 시각으로 거른다.
+    """
+    return [(ms, text) for ms, text in pieces if ms >= overlap_ms]
 
 def transcribe_chunk_with_fallback(temp_chunk_path: str, display_name: str, prompt_text: str) -> str:
     """청크 하나를 STT 한다.
@@ -437,8 +518,10 @@ GLOSSARY_MAX_TERMS = 200
 
 STT_BASE_PROMPT = """
 이 오디오 파일을 처음부터 끝까지 빠짐없이 텍스트로 받아쓰기(Transcription) 해줘.
+이 파일은 긴 녹음에서 잘라 낸 몇 분짜리 조각이고, 파일이 시작하는 순간이 00:00 이야.
 작성할 때 아래 규칙을 엄격하게 지켜:
-1. 문단이 바뀔 때마다 맨 앞에 [MM:SS] 타임스탬프를 적어줘.
+1. 20~30초마다, 그리고 문단이 바뀔 때마다 맨 앞에 [MM:SS] 타임스탬프를 적어줘.
+   시각은 이 조각의 시작을 00:00 으로 센 값이어야 해 (원본 녹음에서의 시각이 아니야).
 2. 동일한 타임스탬프 연속 출력 금지, 시간은 증가해야 해.
 3. 인사말이나 부연 설명 없이 타임스탬프와 본문 텍스트만 출력해.
 4. 타임스탬프 뒤에는 반드시 받아쓴 본문이 와야 해. 말이 없는 구간에는 타임스탬프를 찍지 말고,
@@ -486,7 +569,6 @@ def build_glossary_prompt(terms: List[Dict[str, str]]) -> str:
 def process_audio_file_to_board(board_id: int, audio_path: str, db_session_factory, progress_callback: Optional[Callable[[int], None]] = None):
     """오디오 파일을 청크 단위로 나누고 Gemini STT를 실행하여 Board에 저장하는 완전 자동화 파이프라인"""
     from server.models import Board, TranscriptSegment, BoardSummary, Folder
-    from server.migrator import split_timestamped_line
 
     db = db_session_factory()
     board = db.query(Board).filter_by(id=board_id).first()
@@ -520,7 +602,8 @@ def process_audio_file_to_board(board_id: int, audio_path: str, db_session_facto
         chunk_starts = list(range(0, max(total_ms - OVERLAP_MS, 1), CHUNK_STEP_MS))
         total_chunks = len(chunk_starts)
 
-        full_transcript = ""
+        # (절대 ms, 본문) 조각들. 청크마다 시각을 바로잡아 여기에 쌓는다.
+        all_pieces: List[tuple] = []
         for i, start_ms in enumerate(chunk_starts):
             # 청크 하나가 오래 걸려도 '정체'로 오인되지 않도록 시작 시점에 살아있음을 알린다
             if progress_callback:
@@ -535,12 +618,25 @@ def process_audio_file_to_board(board_id: int, audio_path: str, db_session_facto
                     temp_chunk_path, f"board_{board_id}_chunk_{i+1}", prompt
                 )
 
-                chunk_start_seconds = start_ms // 1000
-                adjusted = offset_timestamps(transcript_text, chunk_start_seconds)
-                if i > 0:
-                    adjusted = strip_overlap(adjusted, chunk_start_seconds)
+                # 이 청크가 실제로 덮는 길이 (마지막 청크는 요청한 길이보다 짧다)
+                span_ms = max(0, min(CHUNK_LENGTH_MS, total_ms - start_ms))
+                pieces = parse_chunk_pieces(transcript_text, span_ms)
 
-                full_transcript += adjusted + "\n\n"
+                if chunk_timestamps_are_usable(pieces, span_ms):
+                    if i > 0:
+                        pieces = drop_overlap_pieces(pieces, OVERLAP_MS)
+                else:
+                    # 시각을 못 믿는 청크다. 청크 안에 고르게 펴서 최소한 청크 밖으로는 새지
+                    # 않게 한다. 겹친 구간은 어디까지가 겹침인지 알 수 없으므로 버리지 않는다
+                    # (조금 겹쳐 나오는 편이 말이 통째로 사라지는 것보다 낫다).
+                    print(
+                        f"[AI-TIME] Board #{board.id} chunk {i+1}/{total_chunks}: "
+                        f"타임스탬프를 믿을 수 없어 {span_ms // 1000}초 안에 고르게 폅니다",
+                        flush=True,
+                    )
+                    pieces = spread_pieces(pieces, span_ms)
+
+                all_pieces.extend((start_ms + rel_ms, text) for rel_ms, text in pieces)
 
                 # 진행률 업데이트
                 progress = int(10 + (i + 1) / total_chunks * 70)
@@ -554,24 +650,14 @@ def process_audio_file_to_board(board_id: int, audio_path: str, db_session_facto
                     os.remove(temp_chunk_path)
 
         # 세그먼트 파싱 & 저장
-        lines = full_transcript.strip().split('\n')
         db.query(TranscriptSegment).filter_by(board_id=board.id).delete()
 
-        # 먼저 (시각, 화자, 문장) 조각으로 훑는다. AI 는 한 문장씩 끊어 주기 때문에
-        # 이대로 저장하면 타임스탬프가 몇 초 간격으로 촘촘히 박혀 읽기 나쁘다.
-        pieces = []
-        last_ms = 0
-        for line in lines:
-            line = line.strip()
-            if not line:
-                continue
-            # AI 가 조용한 구간에 `[00:01] [00:02] ...` 처럼 타임스탬프만 줄줄이 붙여 주는 일이 있다.
-            # 첫 개만 떼면 나머지가 본문에 남아 스크립트/자막에 그대로 찍히므로 전부 떼어낸다.
-            for piece_ms, text in split_timestamped_line(line, last_ms):
-                last_ms = piece_ms
-                if not text:
-                    continue
-                pieces.append((piece_ms, "화자 1", text))
+        # 겹친 구간을 남겨 둔 청크가 있으면 앞뒤가 살짝 섞일 수 있다. 시간순으로 세워 둔다
+        # (같은 시각은 받아쓴 순서를 지킨다).
+        all_pieces.sort(key=lambda p: p[0])
+        pieces = [(ms, "화자 1", text) for ms, text in all_pieces]
+        # 키워드·요약에 넘길 전체 원고 (시각 + 본문)
+        full_transcript = "\n".join(f"{ms_to_timestamp_str(ms)} {text}" for ms, text in all_pieces)
 
         # 1분 내외 + 문장이 끝나는 지점으로 묶어, 원본 타임스탬프 간격 자체를 넓힌다
         seq = 0
