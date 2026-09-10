@@ -1365,11 +1365,17 @@ function changeSpeed(val) {
     audioPlayer.playbackRate = parseFloat(val);
 }
 
+// 시각 표기는 서버(`ms_to_timestamp_str`)와 같은 규칙을 쓴다: 한 시간이 넘으면 시를 붙인다.
+// 붙이지 않으면 106분짜리 강의가 "106:24" 로 나오는데, 보기 나쁠 뿐 아니라 스크립트를 고쳐
+// 저장할 때 그 문자열이 timestamp_str 로 들어가고, 서버의 타임스탬프 정규식(시:분:초 두 자리)
+// 에 걸리지 않아 다시 읽을 때 시각을 잃는다.
 function formatTime(secs) {
-    const s = Math.floor(secs || 0);
-    const m = Math.floor(s / 60);
-    const remS = s % 60;
-    return `${String(m).padStart(2, '0')}:${String(remS).padStart(2, '0')}`;
+    const total = Math.max(0, Math.floor(secs || 0));
+    const h = Math.floor(total / 3600);
+    const m = Math.floor((total % 3600) / 60);
+    const s = total % 60;
+    const pad = (n) => String(n).padStart(2, '0');
+    return h > 0 ? `${pad(h)}:${pad(m)}:${pad(s)}` : `${pad(m)}:${pad(s)}`;
 }
 
 function copyParagraphText(btn) {
