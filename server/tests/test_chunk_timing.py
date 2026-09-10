@@ -91,6 +91,29 @@ def test_healthy_chunk_is_usable():
     check("청크를 고루 덮으면 믿는다", chunk_timestamps_are_usable(pieces, FIVE_MIN))
 
 
+def test_compressed_stamps_are_unusable():
+    """실제로 받은 응답: 20분치 받아쓰기에 시각이 [00:00] [00:02] [00:04] ... 로 찍혀 왔다.
+
+    그대로 믿으면 초당 13자를 말한 셈이 된다(실제는 4~6자). 청크의 절반을 덮더라도 이런
+    시각은 못 쓴다 — 앞쪽 몇 분에 20분치가 몰려 하이라이트가 통째로 앞서 나간다.
+    """
+    # 실제로 받은 응답의 생김새: 시각 간격 평균 10초에 한 줄 평균 137자 (초당 13자꼴)
+    line = "여기에 한 문장 분량의 말이 들어 있습니다. " * 6      # 대략 138자
+    text = "\n".join("[%02d:%02d] %s" % (t // 60, t % 60, line) for t in range(0, 360, 10))
+    pieces = parse_chunk_pieces(text, 10 * 60 * 1000)
+    check("눌린 시각은 못 믿는다",
+          not chunk_timestamps_are_usable(pieces, 10 * 60 * 1000))
+
+
+def test_plausible_pace_stays_usable():
+    """같은 구간을 덮더라도 말하기 속도가 사람의 것이면 그대로 쓴다."""
+    line = "짧은 문장입니다."                                    # 대략 9자
+    text = "\n".join("[%02d:%02d] %s" % (t // 60, t % 60, line) for t in range(0, 540, 12))
+    pieces = parse_chunk_pieces(text, 10 * 60 * 1000)
+    check("말이 될 만한 속도면 믿는다",
+          chunk_timestamps_are_usable(pieces, 10 * 60 * 1000))
+
+
 # ---- spread_pieces --------------------------------------------------------------
 
 def test_spread_covers_whole_chunk():

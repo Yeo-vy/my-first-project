@@ -46,6 +46,13 @@ OVERLAP_MS = min(20 * 1000, CHUNK_LENGTH_MS // 4)
 CHUNK_STEP_MS = CHUNK_LENGTH_MS - OVERLAP_MS
 # 청크의 타임스탬프를 믿으려면, 찍힌 시각이 적어도 청크 길이의 이만큼은 덮어야 한다
 MIN_TIMESTAMP_COVERAGE = 0.5
+# 받아쓰기 시각을 그대로 믿었을 때 나오는 말하기 속도의 상한(초당 글자).
+#
+# 한국어 강의는 초당 4~6자쯤이다. 실제로 받아 본 응답 중에는 20분치 받아쓰기에 시각을
+# [00:00] [00:02] [00:04] ... 처럼 찍어, 그대로 믿으면 초당 13자를 말한 셈이 되는 것이 있었다
+# (시각 간격과 글자 수의 상관계수는 -0.11 로, 간격 자체에 아무 정보가 없었다).
+# 이렇게 눌린 시각은 청크의 절반을 덮더라도 믿으면 안 된다.
+MAX_PLAUSIBLE_CHARS_PER_SEC = 9.0
 # 시각을 못 믿는 청크를 펼 때 조각 하나가 넘지 않을 길이
 SPREAD_PIECE_MAX_CHARS = 120
 # 덩어리를 문장으로 끊을 때 쓰는 자리 (문장부호 뒤)
@@ -372,16 +379,30 @@ def parse_chunk_pieces(text: str, chunk_length_ms: int) -> List[tuple]:
 def chunk_timestamps_are_usable(pieces: List[tuple], chunk_length_ms: int) -> bool:
     """이 청크의 타임스탬프가 청크를 실제로 설명하고 있는지.
 
-    받아쓰기는 [00:00] 하나만 찍고 몇 분치를 이어 붙이는 일이 잦다. 그대로 두면 그 몇 분이
-    문단 하나가 되고, 화면은 그 덩어리를 글자 수로 갈라 시간을 지어낸다. 그럴 바에는 청크
-    안에 고르게 펴는 편이 낫다 — 적어도 청크 밖으로는 새지 않는다.
+    두 가지를 본다.
+     - 찍힌 시각이 청크를 얼마나 덮는가. 받아쓰기는 앞부분만 찍고 나머지를 이어 붙이곤 한다.
+     - 그 시각대로면 초당 몇 글자를 말한 셈이 되는가. 20분치에 시각을 2초 간격으로 찍어 주는
+       경우가 있는데, 그러면 초당 13자를 말한 것이 된다 (실제는 4~6자).
+
+    둘 중 하나라도 걸리면 그 시각은 버리고 청크 안에 고르게 편다. 어림이지만 오차가 청크
+    안에 갇히고, 무엇보다 몇 분치가 한 점에 뭉치지 않는다.
     """
     if chunk_length_ms <= 0 or len(pieces) < 2:
         return False
     stamps = {ms for ms, _ in pieces}
     if len(stamps) < 3:
         return False
-    return (max(stamps) - min(stamps)) >= chunk_length_ms * MIN_TIMESTAMP_COVERAGE
+
+    span_ms = max(stamps) - min(stamps)
+    if span_ms < chunk_length_ms * MIN_TIMESTAMP_COVERAGE:
+        return False
+
+    # 청크의 절반을 덮더라도, 그 시각대로면 사람이 낼 수 없는 속도로 말한 셈이 되는 경우가 있다
+    # (시각을 고르게 눌러 찍는 버릇). 그때도 못 믿는다.
+    chars = sum(len(text) for _, text in pieces)
+    if chars / (span_ms / 1000) > MAX_PLAUSIBLE_CHARS_PER_SEC:
+        return False
+    return True
 
 
 def split_text_for_spreading(text: str) -> List[str]:
