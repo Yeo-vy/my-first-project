@@ -813,15 +813,8 @@ async function openBoardDetail(boardId, record = true) {
         document.getElementById("detail-folder-name").textContent = currentBoard.folder_name;
         document.getElementById("detail-title").textContent = currentBoard.title;
 
-        // 스타 버튼 상태
-        const starBtn = document.getElementById("detail-star-btn");
-        if (currentBoard.is_starred) {
-            starBtn.classList.add("starred");
-            starBtn.innerHTML = `<i class="fa-solid fa-star"></i>`;
-        } else {
-            starBtn.classList.remove("starred");
-            starBtn.innerHTML = `<i class="fa-regular fa-star"></i>`;
-        }
+        // 스타 상태 (상세 화면에서는 더보기 메뉴 안에 있다)
+        renderDetailStarState(currentBoard.is_starred);
 
         renderDetailStatus(currentBoard);
         renderKeywords(currentBoard.keywords || []);
@@ -848,21 +841,23 @@ async function openBoardDetail(boardId, record = true) {
     }
 }
 
+// 상세 화면의 스타 표시는 더보기 메뉴 항목 하나뿐이다.
+// 예전에는 헤더에 별도 버튼(detail-star-btn)이 있었는데, 그 버튼이 사라진 뒤에도
+// 여기서 계속 찾는 바람에 보드를 열 때마다 예외가 나서 스크립트가 그려지지 않았다.
+function renderDetailStarState(isStarred) {
+    const icon = document.getElementById("kebab-star-icon");
+    const text = document.getElementById("kebab-star-text");
+    if (icon) icon.className = isStarred ? "fa-solid fa-star" : "fa-regular fa-star";
+    if (text) text.textContent = isStarred ? "중요 보드 해제" : "중요 보드로 설정";
+}
+
 async function toggleDetailStar() {
     if (!currentBoard) return;
     const res = await fetch(`/api/boards/${currentBoard.id}/star`, { method: "POST" });
     const data = await res.json();
     currentBoard.is_starred = data.is_starred;
-    const starBtn = document.getElementById("detail-star-btn");
-    if (data.is_starred) {
-        starBtn.classList.add("starred");
-        starBtn.innerHTML = `<i class="fa-solid fa-star"></i>`;
-        showToast("중요 보드로 설정되었습니다.");
-    } else {
-        starBtn.classList.remove("starred");
-        starBtn.innerHTML = `<i class="fa-regular fa-star"></i>`;
-        showToast("중요 보드가 해제되었습니다.");
-    }
+    renderDetailStarState(data.is_starred);
+    showToast(data.is_starred ? "중요 보드로 설정되었습니다." : "중요 보드가 해제되었습니다.");
 }
 
 function renderKeywords(keywords) {
@@ -1060,7 +1055,10 @@ function renderTranscript(segments) {
             <div class="paragraph-text-body" contenteditable="true" spellcheck="false" title="누르면 이 부분부터 재생됩니다. 클릭하여 수정할 수 있습니다.">
                 ${sentencesHtml}
             </div>
-        `;
+        `
+            // 뼈대 markup 의 줄바꿈과 들여쓰기가 그대로 공백으로 그려지면
+            // 시각 줄과 본문 사이에 빈 줄이 생기고 본문 첫 줄이 밀려난다.
+            .replace(/>\n\s*</g, "><");
 
         const body = p.querySelector(".paragraph-text-body");
         body.addEventListener("focus", () => {

@@ -1042,7 +1042,10 @@ body {
 .lexical__paragraph {
     cursor: text;
     user-select: text;
-    white-space: pre-wrap;
+    /* 문단 뼈대에는 줄바꿈을 그대로 두지 않는다. 뼈대 markup 의 들여쓰기와 줄바꿈까지
+       공백으로 그려져서 문단마다 큰 빈 칸이 생기기 때문이다.
+       실제 본문(.paragraph-text-body)에서만 pre-wrap 을 되살린다. */
+    white-space: normal;
     word-break: break-word;
     direction: ltr;
     box-sizing: border-box;
@@ -1127,6 +1130,60 @@ body {
 
 .default-transition {
     transition: all 0.15s ease;
+}
+
+/* 스크립트 문단의 머리글과 도구 모음 배치.
+   이 markup 은 원본 사이트의 Tailwind 클래스 이름을 그대로 쓰는데 이 프로젝트에는
+   Tailwind 가 없다. 그래서 문단 안에서만 쓰이는 규칙을 여기에 직접 적어 둔다.
+   (이 규칙이 없으면 시각·화자·도구 모음이 세로로 쌓여서 문단마다 1000px 넘는
+    빈 공간이 생기고, 본문이 화면 밖으로 밀려나 자막이 없는 것처럼 보인다.) */
+.lexical__paragraph .flex { display: flex; }
+.lexical__paragraph .w-full { width: 100%; }
+.lexical__paragraph .justify-between { justify-content: space-between; }
+.lexical__paragraph .items-center { align-items: center; }
+.lexical__paragraph .gap-8-new { gap: 8px; }
+.lexical__paragraph .min-w-0 { min-width: 0; }
+.lexical__paragraph .shrink-0 { flex-shrink: 0; }
+.lexical__paragraph .mb-2 { margin-bottom: 0.5rem; }
+.lexical__paragraph .ml-2 { margin-left: 0.5rem; }
+.lexical__paragraph .whitespace-nowrap { white-space: nowrap; }
+.lexical__paragraph .cursor-pointer { cursor: pointer; }
+.lexical__paragraph .relative { position: relative; }
+.lexical__paragraph .absolute { position: absolute; }
+.lexical__paragraph .hidden { display: none; }
+.lexical__paragraph .hover\:underline:hover { text-decoration: underline; }
+.lexical__paragraph .hover\:text-fg-neutral:hover { color: var(--color-fg-neutral); }
+
+/* 문단 오른쪽 위에 떠 있는 도구 모음. 평소에는 감춰 두고,
+   문단에 마우스를 올렸을 때 위의 group-hover 규칙이 grid 로 펼친다. */
+.lexical__paragraph .bookmark {
+    position: absolute;
+    top: -0.75rem;
+    right: 0.5rem;
+    z-index: 5;
+    display: none;
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+    column-gap: 0.0625rem;
+    padding: 0.1875rem;
+    border: 1px solid var(--color-stroke-neutral-weak);
+    border-radius: 6px;
+    background-color: var(--color-bg-default);
+    color: var(--color-fg-neutral);
+}
+.lexical__paragraph .bookmark svg { width: 1.25rem; height: 1.25rem; }
+/* 어두운 화면 전용이므로 검은색으로 그려진 아이콘은 뒤집어서 쓴다. */
+.lexical__paragraph .dark\:invert { filter: invert(1); }
+
+/* 북마크가 걸린 문단에 표시하는 깃발 */
+.lexical__paragraph .bookmark-indicator {
+    position: absolute;
+    top: -0.5rem;
+    right: 1.5rem;
+}
+
+/* 본문은 직접 고칠 수 있는 영역이라 사용자가 넣은 줄바꿈을 그대로 보여 준다. */
+.lexical__paragraph .paragraph-text-body {
+    white-space: pre-wrap;
 }
 
 /* 개별 단어/음절 토큰 */

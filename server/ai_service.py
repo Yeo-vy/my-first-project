@@ -35,7 +35,9 @@ FFMPEG_TIMEOUT_SEC = max(60, int(os.getenv("FFMPEG_TIMEOUT_SEC", "900")))
 CHUNK_LENGTH_MS = 20 * 60 * 1000   # 20분 청크
 OVERLAP_MS = 30 * 1000             # 30초 오버랩
 CHUNK_STEP_MS = CHUNK_LENGTH_MS - OVERLAP_MS
-TIMESTAMP_PATTERN = re.compile(r'\[(\d{1,2}:\d{2}(?::\d{2})?)\]')
+TIMESTAMP_PATTERN = re.compile(r'\[\s*(\d{1,2}:\d{2}(?::\d{2})?)\s*\]')
+# 대괄호 안쪽에 공백이 끼어도(`[ 00:12]`) 같은 타임스탬프로 본다.
+# 받아쓰기가 가끔 이렇게 내주는데, 못 알아보면 본문에 그대로 남아 자막에 찍힌다.
 
 _ILLEGAL_FILENAME_CHARS = re.compile(r'[<>:"/\\|?*\x00-\x1f]')
 
