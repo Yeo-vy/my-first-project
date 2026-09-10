@@ -7,7 +7,7 @@ import threading
 import time
 import uuid
 import datetime
-from typing import AsyncGenerator, List, Dict, Optional, Callable
+from typing import AsyncGenerator, List, Dict, Optional, Callable, TypeVar
 from dotenv import load_dotenv
 from google import genai
 from sqlalchemy.orm import Session
@@ -19,8 +19,28 @@ except ImportError:
 
 load_dotenv()
 
-api_keys = [k for k in [os.getenv("GEMINI_API_KEY"), os.getenv("GEMINI_API_KEY_PAID")] if k]
-active_key_index = 0
+# API 키는 12칸까지: GEMINI_API_KEY, GEMINI_API_KEY_2 ... GEMINI_API_KEY_12.
+# GEMINI_API_KEY_PAID 는 예전 이름이라 계속 읽되, 돈이 나가는 키라서 항상 맨 마지막에 쓴다.
+MAX_API_KEYS = 12
+API_KEY_ENV_NAMES = (
+    ["GEMINI_API_KEY"]
+    + [f"GEMINI_API_KEY_{n}" for n in range(2, MAX_API_KEYS + 1)]
+    + ["GEMINI_API_KEY_PAID"]
+)
+
+
+def load_api_keys() -> List[str]:
+    keys = []
+    for name in API_KEY_ENV_NAMES:
+        value = (os.getenv(name) or "").strip()
+        if value and value not in keys:
+            keys.append(value)
+    return keys
+
+
+api_keys = load_api_keys()
+
+T = TypeVar("T")
 
 # 되돌릴 때는 .env 에 GEMINI_MODEL=gemini-2.5-flash
 GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-3.6-flash")
@@ -233,7 +253,12 @@ def make_client(api_key: str) -> genai.Client:
             api_key=api_key,
             http_options={
                 "timeout": GEMINI_TIMEOUT_MS,
-                "retry_options": {"attempts": 3, "initial_delay": 2.0, "max_delay": 30.0},
+                # SDK 기본값은 429 도 같은 키로 세 번 다시 두드린다. 한도에 걸린 키는
+                # 기다려도 안 풀리는 경우가 많으니 곧장 올려 보내 ApiKeyPool 이 다음 키로 넘기게 한다.
+                "retry_options": {
+                    "attempts": 3, "initial_delay": 2.0, "max_delay": 30.0,
+                    "http_status_codes": [408, 500, 502, 503, 504],
+                },
             },
         )
     except Exception:
@@ -242,11 +267,6 @@ def make_client(api_key: str) -> genai.Client:
             return genai.Client(api_key=api_key, http_options={"timeout": GEMINI_TIMEOUT_MS})
         except Exception:
             return genai.Client(api_key=api_key)
-
-def get_client() -> Optional[genai.Client]:
-    if not api_keys:
-        return None
-    return make_client(api_keys[active_key_index])
 
 def is_quota_error(err: Exception) -> bool:
     msg = str(err).upper()
@@ -262,6 +282,110 @@ def is_transient_error(err: Exception) -> bool:
     """다시 시도하면 될 법한 일시적 오류인지 판별한다."""
     msg = f"{type(err).__name__} {err}".upper()
     return any(m in msg for m in _TRANSIENT_MARKERS)
+
+# 한도(429)에 걸린 키를 쉬게 하는 시간(초). 분당 한도는 금방 풀리지만 하루 한도는 태평양 시간
+# 자정에야 풀리므로, 그동안 같은 키를 요청마다 먼저 두드리지 않도록 길게 쉬게 한다.
+# 쉬는 키도 버리지는 않는다. 쉬지 않는 키를 다 써 본 뒤에는 빨리 풀리는 순으로 다시 시도한다.
+KEY_REST_SEC = 60
+KEY_REST_DAILY_SEC = 3600
+
+# 429 응답에 실려 오는 대기 시간. `'retryDelay': '37s'` 또는 `Please retry in 37.1s`
+_RETRY_DELAY_RE = re.compile(r"retry(?:Delay['\"]?\s*:\s*['\"]?|\s+in\s+)(\d+(?:\.\d+)?)s", re.IGNORECASE)
+
+def quota_rest_seconds(err: Exception) -> float:
+    msg = str(err)
+    # 하루 한도 응답에도 retryDelay 가 몇십 초로 찍혀 오므로 이것부터 본다.
+    if "PERDAY" in msg.upper():
+        return KEY_REST_DAILY_SEC
+    match = _RETRY_DELAY_RE.search(msg)
+    if match:
+        return min(KEY_REST_DAILY_SEC, max(10.0, float(match.group(1))))
+    return KEY_REST_SEC
+
+class ApiKeyPool:
+    """API 키 여러 개를 나눠 쓴다.
+
+    항상 앞 칸 키부터 쓰고, 한도(429)에 걸린 키는 잠시 쉬게 한 뒤 다음 칸으로 넘어간다.
+    쉬는 시간이 끝나면 다시 앞 칸부터 쓰므로, 무료 키가 풀리면 맨 뒤의 유료 키에서 저절로 돌아온다.
+    STT 워커 여러 개가 함께 쓰므로 상태는 잠금 안에서만 바꾼다.
+    """
+
+    def __init__(self, keys: List[str]):
+        self.keys = keys
+        self._lock = threading.Lock()
+        self._resting_until = [0.0] * len(keys)
+        self._last_used: Optional[int] = None
+
+    def order(self) -> List[int]:
+        """이번 요청에서 시도할 키 순서: 쉬지 않는 키를 앞 칸부터, 그다음 쉬는 키를 빨리 풀리는 순으로."""
+        now = time.monotonic()
+        with self._lock:
+            ready = [i for i in range(len(self.keys)) if self._resting_until[i] <= now]
+            resting = sorted(
+                (i for i in range(len(self.keys)) if self._resting_until[i] > now),
+                key=lambda i: self._resting_until[i],
+            )
+        return ready + resting
+
+    def rest(self, index: int, err: Exception) -> None:
+        seconds = quota_rest_seconds(err)
+        with self._lock:
+            self._resting_until[index] = time.monotonic() + seconds
+        print(
+            f"[AI-KEY] API 키 {index + 1}/{len(self.keys)} 한도 초과 → {int(seconds)}초 쉬게 하고 다음 키로 넘어갑니다.",
+            flush=True,
+        )
+
+    def mark_used(self, index: int) -> None:
+        with self._lock:
+            changed = self._last_used != index
+            self._last_used = index
+        if changed and len(self.keys) > 1:
+            print(f"[AI-KEY] API 키 {index + 1}/{len(self.keys)} 로 응답을 받았습니다.", flush=True)
+
+api_key_pool = ApiKeyPool(api_keys)
+
+def all_keys_exhausted_message(last_error: Optional[Exception]) -> str:
+    return f"API 키 {len(api_keys)}개가 모두 한도에 걸렸습니다. 잠시 뒤 다시 시도하세요. ({last_error})"
+
+def run_with_api_keys(label: str, work: Callable[[genai.Client], T]) -> T:
+    """work(client) 를 부르고, 키가 한도에 걸리면 다음 키로 자동으로 넘어간다.
+
+    - 429/할당량 오류 → 그 키를 쉬게 하고 다음 키로 넘어간다
+    - 5xx·타임아웃·연결 끊김 같은 일시적 오류 → 같은 키로 백오프 재시도한다
+      (한 번 삐끗했다고 보드 전체를 실패시키지 않는다)
+    - 그 밖의 오류 → 키를 바꿔도 결과가 같으므로 그대로 올린다
+    """
+    if not api_keys:
+        raise RuntimeError("GEMINI_API_KEY가 설정되지 않았습니다.")
+
+    last_error = None
+    for key_idx in api_key_pool.order():
+        client = make_client(api_keys[key_idx])
+        attempt = 0
+        while True:
+            try:
+                result = work(client)
+                api_key_pool.mark_used(key_idx)
+                return result
+            except Exception as err:
+                last_error = err
+                if is_quota_error(err):
+                    api_key_pool.rest(key_idx, err)
+                    break
+                attempt += 1
+                if attempt < GEMINI_MAX_ATTEMPTS and is_transient_error(err):
+                    delay = min(30, 2 ** attempt)
+                    print(
+                        f"[AI-RETRY] {label} 일시적 오류로 {delay}초 뒤 재시도 "
+                        f"({attempt}/{GEMINI_MAX_ATTEMPTS - 1}): {err}",
+                        flush=True,
+                    )
+                    time.sleep(delay)
+                    continue
+                raise
+
+    raise RuntimeError(all_keys_exhausted_message(last_error)) from last_error
 
 def timestamp_to_seconds(ts_str: str) -> int:
     parts = list(map(int, ts_str.split(':')))
@@ -467,33 +591,16 @@ def drop_overlap_pieces(pieces: List[tuple], overlap_ms: int) -> List[tuple]:
     return [(ms, text) for ms, text in pieces if ms >= overlap_ms]
 
 def transcribe_chunk_with_fallback(temp_chunk_path: str, display_name: str, prompt_text: str) -> str:
-    """청크 하나를 STT 한다.
+    """청크 하나를 STT 한다. 키 전환과 재시도는 run_with_api_keys 가 맡는다.
 
-    - 429/할당량 오류 → 다음 API 키로 넘어간다
-    - 5xx·타임아웃·연결 끊김 같은 일시적 오류 → 같은 키로 백오프 재시도한다
-      (한 번 삐끗했다고 보드 전체를 실패시키지 않는다)
+    올린 파일은 그 키의 프로젝트에만 보이므로, 키를 바꾸면 업로드부터 다시 한다.
     """
-    global active_key_index
-    if not api_keys:
-        raise RuntimeError("GEMINI_API_KEY가 설정되지 않았습니다.")
-
-    last_error = None
-    key_idx = active_key_index
-    attempt = 0
-
-    while key_idx < len(api_keys):
-        if key_idx != active_key_index:
-            active_key_index = key_idx
-            print(f"[AI-KEY] Switching to API key ({key_idx + 1}/{len(api_keys)})...", flush=True)
-
-        client = make_client(api_keys[key_idx])
-        uploaded_file = None
+    def work(client: genai.Client) -> str:
+        uploaded_file = client.files.upload(
+            file=temp_chunk_path,
+            config={"display_name": display_name}
+        )
         try:
-            uploaded_file = client.files.upload(
-                file=temp_chunk_path,
-                config={"display_name": display_name}
-            )
-
             response = client.models.generate_content(
                 model=GEMINI_MODEL,
                 contents=[uploaded_file, prompt_text]
@@ -511,31 +618,13 @@ def transcribe_chunk_with_fallback(temp_chunk_path: str, display_name: str, prom
                 raise RuntimeError(f"응답이 비정상 종료되었습니다 (finish_reason={finish_reason})")
 
             return transcript_text
-        except Exception as err:
-            last_error = err
-            if is_quota_error(err):
-                key_idx += 1
-                attempt = 0
-                continue
-            attempt += 1
-            if attempt < GEMINI_MAX_ATTEMPTS and is_transient_error(err):
-                delay = min(30, 2 ** attempt)
-                print(
-                    f"[AI-RETRY] {display_name} 일시적 오류로 {delay}초 뒤 재시도 "
-                    f"({attempt}/{GEMINI_MAX_ATTEMPTS - 1}): {err}",
-                    flush=True,
-                )
-                time.sleep(delay)
-                continue
-            raise
         finally:
-            if uploaded_file is not None:
-                try:
-                    client.files.delete(name=uploaded_file.name)
-                except Exception:
-                    pass
+            try:
+                client.files.delete(name=uploaded_file.name)
+            except Exception:
+                pass
 
-    raise last_error
+    return run_with_api_keys(display_name, work)
 
 # 프롬프트에 넣는 용어 개수 상한. 너무 많이 넣으면 정작 본문 받아쓰기 품질이 떨어진다.
 GLOSSARY_MAX_TERMS = 200
@@ -786,8 +875,7 @@ def process_audio_file_to_board(board_id: int, audio_path: str, db_session_facto
         db.close()
 
 def extract_keywords_ai(transcript: str) -> List[str]:
-    client = get_client()
-    if not client or not transcript.strip():
+    if not api_keys or not transcript.strip():
         # 간단한 빈도 기반 fallback
         words = re.findall(r'[가-힣a-zA-Z0-9_]{2,}', transcript)
         stopwords = {'그래서', '우리가', '여기서', '이런', '저런', '어떤', '때문에', '그리고', '하지만', '이렇게', '그냥', '이제', '있는', '없는'}
@@ -805,11 +893,11 @@ def extract_keywords_ai(transcript: str) -> List[str]:
 {transcript[:5000]}
 """
     try:
-        response = client.models.generate_content(
+        response = run_with_api_keys("키워드 추출", lambda client: client.models.generate_content(
             model=GEMINI_MODEL,
             contents=prompt,
             config={"response_mime_type": "application/json"}
-        )
+        ))
         data = json.loads(response.text.strip())
         if isinstance(data, list):
             return [str(w) for w in data[:10]]
@@ -821,8 +909,7 @@ def extract_keywords_ai(transcript: str) -> List[str]:
         return []
 
 def generate_summary_ai(transcript: str, summary_type: str = "BASIC") -> str:
-    client = get_client()
-    if not client or not transcript.strip():
+    if not api_keys or not transcript.strip():
         return "Gemini API 키가 설정되지 않았거나 스크립트가 비어 있습니다."
 
     prompts = {
@@ -910,17 +997,16 @@ def generate_summary_ai(transcript: str, summary_type: str = "BASIC") -> str:
     full_prompt = f"{selected_prompt}\n\n[스크립트 원본]:\n{transcript[:18000]}"
 
     try:
-        response = client.models.generate_content(
+        response = run_with_api_keys("요약", lambda client: client.models.generate_content(
             model=GEMINI_MODEL,
             contents=full_prompt
-        )
+        ))
         return response.text or "요약을 생성하지 못했습니다."
     except Exception as e:
         return f"요약 생성 중 오류가 발생했습니다: {str(e)}"
 
 def stream_board_chat(transcript: str, chat_history: List[Dict[str, str]], user_message: str):
-    client = get_client()
-    if not client:
+    if not api_keys:
         yield "data: " + json.dumps({"text": "⚠️ Gemini API 키가 설정되지 않았습니다. .env 파일을 확인해주세요."}) + "\n\n"
         return
 
@@ -944,13 +1030,29 @@ def stream_board_chat(transcript: str, chat_history: List[Dict[str, str]], user_
 
     contents.append({"role": "user", "parts": [{"text": f"{system_instruction}\n\n[사용자 질문]:\n{user_message}"}]})
 
-    try:
-        stream = client.models.generate_content_stream(
-            model=GEMINI_MODEL,
-            contents=contents
-        )
-        for chunk in stream:
-            if chunk.text:
-                yield f"data: {json.dumps({'text': chunk.text})}\n\n"
-    except Exception as e:
-        yield f"data: {json.dumps({'error': str(e)})}\n\n"
+    # 스트리밍은 run_with_api_keys 에 맡길 수 없어 여기서 직접 키를 돌린다.
+    # 답이 이미 흘러나가기 시작한 뒤라면 키를 바꿔 처음부터 다시 보낼 수 없으니 오류로 끝낸다.
+    last_error = None
+    for key_idx in api_key_pool.order():
+        client = make_client(api_keys[key_idx])
+        sent_any = False
+        try:
+            stream = client.models.generate_content_stream(
+                model=GEMINI_MODEL,
+                contents=contents
+            )
+            for chunk in stream:
+                if chunk.text:
+                    sent_any = True
+                    yield f"data: {json.dumps({'text': chunk.text})}\n\n"
+            api_key_pool.mark_used(key_idx)
+            return
+        except Exception as e:
+            last_error = e
+            if is_quota_error(e) and not sent_any:
+                api_key_pool.rest(key_idx, e)
+                continue
+            yield f"data: {json.dumps({'error': str(e)})}\n\n"
+            return
+
+    yield f"data: {json.dumps({'error': all_keys_exhausted_message(last_error)})}\n\n"

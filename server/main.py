@@ -34,6 +34,7 @@ from server.migrator import (
 )
 from server.ai_service import (
     GEMINI_TIMEOUT_MS,
+    api_keys,
     group_by_sentence,
     GLOSSARY_MAX_TERMS,
     load_glossary_terms,
@@ -521,7 +522,7 @@ def write_trash_meta(board_id: int, meta: dict) -> None:
         json.dump(meta, f, ensure_ascii=False, indent=2)
 
 
-# 변환 텍스트 옆에 같이 만들어지는 동반 파일들 (받아쓰기py.py / 자막저장서버.py 산출물).
+# 변환 텍스트 옆에 같이 만들어지는 동반 파일들 (지금은 안 쓰는 legacy/받아쓰기py.py 가 만들던 것).
 # 보드를 지웠는데 이것만 탐색기에 남아 있으면 '지운 것 같지 않으므로' 함께 정리한다.
 TRANSCRIPT_COMPANION_SUFFIXES = ("_강의스크립트.html", "_수정본.txt")
 
@@ -1469,7 +1470,8 @@ def health_check(db: Session = Depends(get_db)):
         "queue_depth": stt_queue.qsize(),
         "workers": STT_WORKERS,
         "workers_alive": workers_alive,
-        "ai_ready": bool(os.getenv("GEMINI_API_KEY") or os.getenv("GEMINI_API_KEY_PAID")),
+        "ai_ready": bool(api_keys),
+        "api_keys": len(api_keys),
     }
 
 
@@ -1504,7 +1506,8 @@ def queue_status(db: Session = Depends(get_db)):
         ).count(),
         "auto_transcribe": AUTO_TRANSCRIBE,
         "gemini_timeout_ms": GEMINI_TIMEOUT_MS,
-        "ai_ready": bool(os.getenv("GEMINI_API_KEY") or os.getenv("GEMINI_API_KEY_PAID")),
+        "ai_ready": bool(api_keys),
+        "api_keys": len(api_keys),
     }
 
 
