@@ -39,7 +39,7 @@ FFMPEG_TIMEOUT_SEC = max(60, int(os.getenv("FFMPEG_TIMEOUT_SEC", "900")))
 # 6개뿐이었고, 받아쓰기가 한 청크에 타임스탬프를 하나만 찍어 주는 일이 잦아 19분 30초가
 # 문단 하나로 뭉쳤다. 그러면 화면은 그 덩어리를 글자 수로 나눠 시간을 지어내고,
 # 자막 하이라이트는 그 구간 내내 엉뚱한 곳을 짚는다.
-CHUNK_MINUTES = max(1, int(os.getenv("STT_CHUNK_MINUTES", "5")))
+CHUNK_MINUTES = max(1, int(os.getenv("STT_CHUNK_MINUTES", "10")))
 CHUNK_LENGTH_MS = CHUNK_MINUTES * 60 * 1000
 # 청크 사이를 겹쳐 잘라, 경계에서 말이 잘려 사라지는 것을 막는다
 OVERLAP_MS = min(20 * 1000, CHUNK_LENGTH_MS // 4)
@@ -659,25 +659,34 @@ def process_audio_file_to_board(board_id: int, audio_path: str, db_session_facto
         # 키워드·요약에 넘길 전체 원고 (시각 + 본문)
         full_transcript = "\n".join(f"{ms_to_timestamp_str(ms)} {text}" for ms, text in all_pieces)
 
-        # 1분 내외 + 문장이 끝나는 지점으로 묶어, 원본 타임스탬프 간격 자체를 넓힌다
+        # 받아쓰기가 찍어 준 시각을 하나도 버리지 않고 그대로 저장한다.
+        #
+        # 한때는 여기서 1분 문단으로 묶어 저장했는데(읽기 좋으라고), 묶으면 문단 첫 시각만 남고
+        # 그 안의 시각은 사라진다. 화면은 없어진 시각을 글자 수로 되짚어 지어내므로, 재생하며
+        # 따라가는 밑줄이 문단 안에서 통째로 어긋났다. 문단으로 묶는 일은 읽는 쪽(화면·txt
+        # 내보내기)에서 하면 되고, 시각은 여기서 지키는 것이 맞다.
         seq = 0
-        txt_lines = []
         built = []
-        for start_ms, speaker, text in group_by_sentence(pieces):
+        for start_ms, speaker, text in pieces:
             stamp = ms_to_timestamp_str(start_ms)
             built.append(TranscriptSegment(
                 board_id=board.id,
                 start_time_ms=start_ms,
-                end_time_ms=start_ms,          # 아래에서 다음 문단 기준으로 다시 채운다
+                end_time_ms=start_ms,          # 아래에서 이웃 기준으로 다시 채운다
                 timestamp_str=stamp,
                 speaker=speaker,
                 content=text,
                 sequence=seq
             ))
-            txt_lines.append(f"{stamp} {text}")
             seq += 1
 
-        # 종료 시각은 이웃 문단을 봐야 정해지므로 다 만든 뒤에 한 번에 채운다 (SRT 자막 겹침 방지)
+        # 사람이 읽을 txt 는 예전처럼 1분 내외 문단으로 묶는다 (저장된 시각은 그대로 둔다)
+        txt_lines = [
+            f"{ms_to_timestamp_str(start_ms)} {text}"
+            for start_ms, _speaker, text in group_by_sentence(pieces)
+        ]
+
+        # 종료 시각은 이웃을 봐야 정해지므로 다 만든 뒤에 한 번에 채운다 (SRT 자막 겹침 방지)
         for seg, end_ms in zip(built, resolve_end_times([s.start_time_ms for s in built], total_ms)):
             seg.end_time_ms = end_ms
             db.add(seg)
