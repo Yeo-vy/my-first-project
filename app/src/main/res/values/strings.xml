@@ -3,4 +3,6 @@
     <string name="app_name">daglo</string>
     <string name="shortcut_server_address">서버 주소</string>
     <string name="shortcut_server_address_long">daglo 서버 주소 바꾸기</string>
+    <string name="shortcut_record">바로 녹음</string>
+    <string name="shortcut_record_long">서버 없이 바로 녹음하기</string>
 </resources>

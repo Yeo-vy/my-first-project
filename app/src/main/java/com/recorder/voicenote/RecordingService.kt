@@ -407,7 +407,8 @@ class RecordingService : Service() {
                 is AudioMerger.Result.Success -> {
                     sessionDir.deleteRecursively()
                     UploadWorker.enqueue(context, result.output, folderName)
-                    "녹음을 올리는 중입니다. 변환이 끝나면 목록에 나타납니다."
+                    // 와이파이 밖에서 녹음했을 수도 있다. 지금 올라간다고 단정하지 않는다.
+                    "녹음을 저장했습니다. 서버에 닿는 대로 올라가고, 변환이 끝나면 목록에 나타납니다."
                 }
                 is AudioMerger.Result.Failed -> {
                     // 합치기에 실패해도 조각은 남겨 둔다. 다음 실행 때 다시 시도한다.

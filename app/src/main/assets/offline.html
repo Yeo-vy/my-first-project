@@ -1,0 +1,424 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, user-scalable=no">
+<title>오프라인 녹음</title>
+<!--
+  서버에 닿지 않을 때 대신 뜨는 화면.
+
+  앱의 다른 화면은 전부 서버가 주는 웹 화면이라, 와이파이가 없으면 녹음 버튼조차 열리지 않았다.
+  이 파일은 apk 안에 들어 있어 네트워크 없이 열리고, 웹 화면과 똑같이 window.DagloNative 를 거쳐
+  같은 포그라운드 서비스를 부른다. 그래서 녹음 코드는 한 벌 그대로다.
+
+  정지하면 파일은 앱 안에 쌓이고, 와이파이가 돌아오면 WorkManager 가 알아서 올린다.
+-->
+<style>
+  :root {
+    --bg: #111827;
+    --card: #1f2937;
+    --line: #374151;
+    --text: #f9fafb;
+    --dim: #9ca3af;
+    --accent: #ef4444;
+    --ok: #34d399;
+  }
+  * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
+  body {
+    margin: 0;
+    padding: 24px 20px 40px;
+    background: var(--bg);
+    color: var(--text);
+    font-family: -apple-system, "Noto Sans KR", "Malgun Gothic", sans-serif;
+    font-size: 16px;
+    line-height: 1.6;
+    -webkit-user-select: none;
+    user-select: none;
+  }
+  .wrap { max-width: 560px; margin: 0 auto; }
+  h1 { font-size: 22px; margin: 0 0 6px; }
+  .reason { color: var(--dim); font-size: 14px; margin: 0 0 20px; }
+  .card {
+    background: var(--card);
+    border: 1px solid var(--line);
+    border-radius: 16px;
+    padding: 20px;
+    margin-bottom: 16px;
+  }
+  .time {
+    font-size: 46px;
+    font-weight: 600;
+    text-align: center;
+    letter-spacing: 2px;
+    margin: 4px 0 10px;
+  }
+  .state { text-align: center; color: var(--dim); font-size: 14px; min-height: 22px; }
+  .state.live { color: var(--accent); }
+  .level {
+    height: 8px;
+    background: #0b1220;
+    border-radius: 99px;
+    overflow: hidden;
+    margin: 14px 0 4px;
+  }
+  .level > div {
+    height: 100%;
+    width: 0;
+    background: var(--ok);
+    border-radius: 99px;
+    transition: width .15s linear;
+  }
+  label { display: block; font-size: 14px; color: var(--dim); margin: 0 0 8px; }
+  input[type=text] {
+    width: 100%;
+    padding: 14px;
+    border-radius: 12px;
+    border: 1px solid var(--line);
+    background: #0b1220;
+    color: var(--text);
+    font-size: 17px;
+    -webkit-user-select: text;
+    user-select: text;
+  }
+  .chips { margin-top: 10px; }
+  .chip {
+    display: inline-block;
+    padding: 8px 14px;
+    margin: 0 8px 8px 0;
+    border-radius: 99px;
+    border: 1px solid var(--line);
+    background: transparent;
+    color: var(--text);
+    font-size: 14px;
+  }
+  button { font-family: inherit; cursor: pointer; }
+  .btn {
+    display: block;
+    width: 100%;
+    padding: 18px;
+    margin-top: 12px;
+    border: 0;
+    border-radius: 14px;
+    font-size: 18px;
+    font-weight: 600;
+    background: var(--accent);
+    color: #fff;
+  }
+  .btn.sub {
+    background: transparent;
+    border: 1px solid var(--line);
+    color: var(--text);
+    font-size: 16px;
+    padding: 15px;
+  }
+  .btn[disabled] { opacity: .45; }
+  .row { display: flex; }
+  .row .btn { flex: 1; margin-right: 12px; }
+  .row .btn:last-child { margin-right: 0; }
+  .pending-item {
+    display: flex;
+    justify-content: space-between;
+    padding: 10px 0;
+    border-top: 1px solid var(--line);
+    font-size: 14px;
+  }
+  .pending-item:first-child { border-top: 0; }
+  .pending-item span + span { color: var(--dim); white-space: nowrap; padding-left: 12px; }
+  .muted { color: var(--dim); font-size: 14px; margin: 0; }
+  .links { text-align: center; margin-top: 22px; }
+  .links button {
+    background: none;
+    border: 0;
+    color: var(--dim);
+    font-size: 15px;
+    padding: 10px 12px;
+    text-decoration: underline;
+  }
+  .toast {
+    position: fixed;
+    left: 16px;
+    right: 16px;
+    bottom: 20px;
+    background: #f9fafb;
+    color: #111827;
+    padding: 14px 16px;
+    border-radius: 12px;
+    font-size: 15px;
+    box-shadow: 0 8px 24px rgba(0,0,0,.45);
+    display: none;
+  }
+  h2 { font-size: 15px; margin: 0 0 12px; color: var(--dim); font-weight: 600; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>오프라인 녹음</h1>
+  <p class="reason" id="reason">서버에 닿지 않아도 녹음은 됩니다. 나중에 연결되면 저절로 올라갑니다.</p>
+
+  <div class="card">
+    <div class="time" id="time">00:00</div>
+    <div class="state" id="state">준비됨</div>
+    <div class="level"><div id="level"></div></div>
+
+    <div id="folder-box">
+      <label for="folder">어느 폴더로 올릴까요</label>
+      <input type="text" id="folder" value="기본 폴더" autocomplete="off" spellcheck="false">
+      <div class="chips" id="chips"></div>
+    </div>
+
+    <button class="btn" id="main-btn">녹음 시작</button>
+    <div class="row" id="live-btns" style="display:none">
+      <button class="btn sub" id="pause-btn">일시정지</button>
+      <button class="btn sub" id="discard-btn">버리기</button>
+    </div>
+  </div>
+
+  <div class="card" id="pending-card" style="display:none">
+    <h2 id="pending-title">올리기를 기다리는 녹음</h2>
+    <div id="pending-list"></div>
+    <button class="btn sub" id="retry-btn">지금 올려 보기</button>
+  </div>
+
+  <p class="muted">
+    녹음은 이 태블릿 안에 저장됩니다. 서버와 같은 와이파이에 다시 들어오면 앱이 알아서 올리고,
+    그때부터는 웹 화면에서 평소처럼 보입니다.
+  </p>
+
+  <div class="links">
+    <button id="web-btn">서버 화면 열기</button>
+    <button id="settings-btn">서버 주소 바꾸기</button>
+  </div>
+</div>
+
+<div class="toast" id="toast"></div>
+
+<script>
+(function () {
+  "use strict";
+
+  var native = window.DagloNative || null;
+  var discardArmed = false;
+  var wasBusy = false;
+  var toastTimer = null;
+
+  function $(id) { return document.getElementById(id); }
+
+  function toast(text) {
+    var el = $("toast");
+    el.textContent = text;
+    el.style.display = "block";
+    if (toastTimer) clearTimeout(toastTimer);
+    toastTimer = setTimeout(function () { el.style.display = "none"; }, 4000);
+  }
+
+  function formatTime(ms) {
+    var total = Math.max(0, Math.floor(ms / 1000));
+    var h = Math.floor(total / 3600);
+    var m = Math.floor((total % 3600) / 60);
+    var s = total % 60;
+    var mm = (m < 10 ? "0" : "") + m;
+    var ss = (s < 10 ? "0" : "") + s;
+    return h > 0 ? h + ":" + mm + ":" + ss : mm + ":" + ss;
+  }
+
+  function formatSize(bytes) {
+    if (bytes >= 1024 * 1024) return (bytes / (1024 * 1024)).toFixed(1) + "MB";
+    return Math.max(1, Math.round(bytes / 1024)) + "KB";
+  }
+
+  function parse(json, fallback) {
+    try { return JSON.parse(json); } catch (e) { return fallback; }
+  }
+
+  function state() {
+    if (!native) return null;
+    return parse(native.state(), null);
+  }
+
+  // ---- 폴더 --------------------------------------------------------------------
+
+  function loadFolders() {
+    if (!native || !native.recentFolders) return;
+    var names = parse(native.recentFolders(), []);
+    if (!names.length) return;
+    $("folder").value = names[0];
+    var box = $("chips");
+    box.innerHTML = "";
+    names.forEach(function (name) {
+      var chip = document.createElement("button");
+      chip.className = "chip";
+      chip.type = "button";
+      chip.textContent = name;
+      chip.addEventListener("click", function () { $("folder").value = name; });
+      box.appendChild(chip);
+    });
+  }
+
+  function folderName() {
+    var value = $("folder").value.replace(/^\s+|\s+$/g, "");
+    return value || "기본 폴더";
+  }
+
+  // ---- 아직 못 올린 녹음 -----------------------------------------------------------
+
+  function loadPending() {
+    if (!native || !native.pendingUploads) return;
+    var items = parse(native.pendingUploads(), []);
+    var card = $("pending-card");
+    if (!items.length) {
+      card.style.display = "none";
+      return;
+    }
+    card.style.display = "block";
+    $("pending-title").textContent = "올리기를 기다리는 녹음 " + items.length + "개";
+    var list = $("pending-list");
+    list.innerHTML = "";
+    items.forEach(function (item) {
+      var row = document.createElement("div");
+      row.className = "pending-item";
+      var left = document.createElement("span");
+      left.textContent = item.folder + " · " + item.savedAt;
+      var right = document.createElement("span");
+      right.textContent = formatSize(item.bytes);
+      row.appendChild(left);
+      row.appendChild(right);
+      list.appendChild(row);
+    });
+  }
+
+  // ---- 화면 그리기 ----------------------------------------------------------------
+
+  function render() {
+    var s = state();
+    if (!s) {
+      $("state").textContent = "이 화면은 앱 안에서만 녹음할 수 있습니다";
+      $("main-btn").disabled = true;
+      return;
+    }
+
+    var busy = s.recording || s.saving;
+    $("time").textContent = formatTime(s.elapsedMs || 0);
+    $("level").style.width = Math.min(100, Math.round((s.level || 0) * 160)) + "%";
+
+    var stateEl = $("state");
+    stateEl.className = "state";
+    if (s.saving) {
+      stateEl.textContent = "저장하는 중...";
+    } else if (s.paused) {
+      stateEl.textContent = "일시정지됨";
+    } else if (s.recording) {
+      stateEl.textContent = "녹음 중 · 화면을 꺼도 이어집니다";
+      stateEl.className = "state live";
+    } else {
+      stateEl.textContent = "준비됨";
+    }
+
+    $("folder-box").style.display = busy ? "none" : "block";
+    $("live-btns").style.display = s.recording ? "flex" : "none";
+    $("main-btn").disabled = s.saving;
+    $("main-btn").textContent = s.recording ? "정지하고 저장" : "녹음 시작";
+    $("pause-btn").textContent = s.paused ? "이어서 녹음" : "일시정지";
+    if (!s.recording) resetDiscard();
+
+    if (s.message) {
+      toast(s.message);
+      native.clearMessage();
+    }
+
+    // 방금 저장이 끝났다 — 대기 목록에 한 줄 늘었을 것이다
+    if (wasBusy && !busy) {
+      loadPending();
+      loadFolders();
+    }
+    wasBusy = busy;
+  }
+
+  // ---- 버튼 --------------------------------------------------------------------
+
+  function resetDiscard() {
+    discardArmed = false;
+    $("discard-btn").textContent = "버리기";
+  }
+
+  function onMain() {
+    var s = state();
+    if (!s) return;
+    if (s.recording) {
+      native.stop();
+      toast("저장하고 있습니다. 연결되면 저절로 올라갑니다.");
+    } else {
+      var result = native.start(folderName());
+      if (result === "NEED_PERMISSION") {
+        toast("마이크를 허용한 뒤 다시 눌러 주세요.");
+      } else if (result === "BUSY") {
+        toast("이미 녹음 중입니다.");
+      } else {
+        toast("녹음을 시작했습니다. 화면을 꺼도 됩니다.");
+      }
+    }
+    render();
+  }
+
+  function onPause() {
+    var s = state();
+    if (!s || !s.recording) return;
+    if (s.paused) native.resume();
+    else native.pause();
+    render();
+  }
+
+  // 시스템 대화상자(confirm)는 이 WebView 에서 그대로 취소되므로 두 번 누르기로 확인받는다
+  function onDiscard() {
+    if (!discardArmed) {
+      discardArmed = true;
+      $("discard-btn").textContent = "정말 버릴까요?";
+      setTimeout(resetDiscard, 4000);
+      return;
+    }
+    resetDiscard();
+    native.discard();
+    render();
+  }
+
+  function onRetry() {
+    if (!native || !native.retryUploads) return;
+    native.retryUploads();
+    toast(navigator.onLine
+      ? "다시 올려 보고 있습니다."
+      : "연결이 없어 대기열에 넣었습니다. 와이파이가 잡히면 올라갑니다.");
+  }
+
+  $("main-btn").addEventListener("click", onMain);
+  $("pause-btn").addEventListener("click", onPause);
+  $("discard-btn").addEventListener("click", onDiscard);
+  $("retry-btn").addEventListener("click", onRetry);
+  $("web-btn").addEventListener("click", function () {
+    if (native && native.openWebScreen) native.openWebScreen();
+  });
+  $("settings-btn").addEventListener("click", function () {
+    if (native && native.openSettingsScreen) native.openSettingsScreen();
+  });
+
+  // 연결이 돌아오면 알려 주고, 밀린 녹음을 스스로 올린다
+  window.addEventListener("online", function () {
+    toast("연결이 돌아왔습니다. 밀린 녹음을 올립니다.");
+    if (native && native.retryUploads) native.retryUploads();
+    setTimeout(loadPending, 3000);
+  });
+
+  // 앱(MainActivity)이 이 화면을 띄운 이유를 넣어 준다
+  window.dagloOffline = {
+    setReason: function (text) {
+      if (text) $("reason").textContent = text;
+    }
+  };
+
+  loadFolders();
+  loadPending();
+  render();
+  setInterval(render, 400);
+  setInterval(loadPending, 15000);
+})();
+</script>
+</body>
+</html>

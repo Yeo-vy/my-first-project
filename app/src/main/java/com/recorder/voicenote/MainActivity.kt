@@ -6,6 +6,8 @@ import android.app.DownloadManager
 import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
+import android.net.ConnectivityManager
+import android.net.NetworkCapabilities
 import android.net.Uri
 import android.os.Build
 import android.os.Bundle
@@ -30,6 +32,7 @@ import androidx.activity.ComponentActivity
 import androidx.activity.OnBackPressedCallback
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.core.content.ContextCompat
+import org.json.JSONObject
 
 /**
  * 앱의 전부: daglo 웹 화면 한 장.
@@ -39,6 +42,11 @@ import androidx.core.content.ContextCompat
  * [RecorderBridge] 를 거쳐 부른다. 그래서 화면은 웹과 완전히 같고, 화면을 꺼도 녹음이 이어지는
  * 부분만 달라진다.
  *
+ * 서버에 닿지 않을 때만 앱이 가진 화면이 하나 더 있다: 오프라인 녹음 화면
+ * (`assets/offline.html`). 와이파이가 없는 강의실에서도 녹음을 시작할 수 있어야 해서 apk 안에
+ * 넣어 둔 것이고, 그 화면의 버튼도 웹과 똑같이 [RecorderBridge] 를 부른다. 녹음은 앱 안에 쌓였다가
+ * 서버에 다시 닿을 때 [UploadWorker] 가 올린다.
+ *
  * 서버 주소는 첫 실행 때 한 번 받는다. 나중에 바꾸려면 홈 화면에서 앱 아이콘을 길게 눌러
  * "서버 주소" 바로가기를 쓰거나, 화면이 열리지 않을 때 뜨는 안내에서 바꾼다.
  */
@@ -47,6 +55,8 @@ class MainActivity : ComponentActivity() {
     private lateinit var settings: DagloSettings
     private lateinit var webView: WebView
     private var fileChooserCallback: ValueCallback<Array<Uri>>? = null
+    /** 오프라인 화면을 띄운 이유. 그 화면 맨 위에 한 줄로 적어 준다. */
+    private var offlineReason: String = ""
 
     /** 웹의 '파일에서 올리기' 가 앱 안에서도 되도록 파일 선택 화면을 띄운다 */
     private val filePicker = registerForActivityResult(ActivityResultContracts.GetContent()) { uri ->
@@ -90,20 +100,28 @@ class MainActivity : ComponentActivity() {
             UploadWorker.retryPending(applicationContext)
         }.start()
 
-        if (wantsSettings(intent) || !settings.isConfigured) {
-            showAddressDialog()
-        } else {
-            loadWeb()
+        when {
+            wantsSettings(intent) -> showAddressDialog()
+            // 홈 화면의 '바로 녹음' 바로가기: 서버를 기다리지 않고 곧장 녹음 화면을 연다
+            wantsRecording(intent) -> loadOffline(REASON_SHORTCUT)
+            !settings.isConfigured -> showAddressDialog()
+            // 붙은 네트워크가 아예 없다. 웹이 뜨기를 기다릴 이유가 없으므로 바로 녹음하게 한다.
+            !hasNetwork() -> loadOffline(REASON_NO_NETWORK)
+            else -> loadWeb()
         }
     }
 
     override fun onNewIntent(intent: Intent) {
         super.onNewIntent(intent)
         if (wantsSettings(intent)) showAddressDialog()
+        if (wantsRecording(intent)) loadOffline(REASON_SHORTCUT)
     }
 
     /** 홈 화면의 '서버 주소' 바로가기로 들어왔는지 */
     private fun wantsSettings(intent: Intent?): Boolean = intent?.action == ACTION_SETTINGS
+
+    /** 홈 화면의 '바로 녹음' 바로가기로 들어왔는지 */
+    private fun wantsRecording(intent: Intent?): Boolean = intent?.action == ACTION_RECORD
 
     override fun onPause() {
         super.onPause()
@@ -132,8 +150,14 @@ class MainActivity : ComponentActivity() {
         CookieManager.getInstance().setAcceptThirdPartyCookies(webView, true)
 
         // 웹 화면의 녹음 버튼이 이 다리를 거쳐 포그라운드 서비스를 부른다
+        // 다리의 메서드는 JS 스레드에서 불리므로, 화면을 건드리는 일은 UI 스레드로 넘긴다
         webView.addJavascriptInterface(
-            RecorderBridge(applicationContext) { runOnUiThread { micPermission.launch(Manifest.permission.RECORD_AUDIO) } },
+            RecorderBridge(
+                applicationContext,
+                { runOnUiThread { micPermission.launch(Manifest.permission.RECORD_AUDIO) } },
+                { runOnUiThread { loadWeb() } },
+                { runOnUiThread { showAddressDialog() } }
+            ),
             RecorderBridge.NAME
         )
 
@@ -144,12 +168,27 @@ class MainActivity : ComponentActivity() {
                     showAddressDialog()
                     return true
                 }
+                if (url.startsWith(OFFLINE_SCHEME)) {
+                    loadOffline(REASON_CHOSEN)
+                    return true
+                }
                 return false
             }
 
             override fun onPageFinished(view: WebView?, url: String?) {
                 super.onPageFinished(view, url)
                 DagloSession.persist()
+                if (url == null) return
+                if (url.startsWith(OFFLINE_URL)) {
+                    onOfflinePageReady(view)
+                    return
+                }
+                // 서버 화면이 떴다는 것은 서버에 닿는다는 뜻이다. 와이파이 밖에서 해 둔 녹음이
+                // 남아 있으면 지금이 올리기 제일 좋은 때다.
+                val base = settings.serverUrl
+                if (base.isNotEmpty() && url.startsWith(base)) {
+                    Thread { UploadWorker.retryPending(applicationContext) }.start()
+                }
             }
 
             override fun onReceivedHttpError(
@@ -175,10 +214,10 @@ class MainActivity : ComponentActivity() {
             ) {
                 super.onReceivedError(view, request, error)
                 if (request?.isForMainFrame != true) return
-                showHint(
-                    "서버에 연결하지 못했습니다",
-                    "서버 PC 가 켜져 있는지, 태블릿이 같은 와이파이에 있는지 확인해 주세요."
-                )
+                // 앱 안에 든 화면은 실패할 일이 없지만, 혹시라도 되돌이가 생기지 않게 막아 둔다
+                if (request?.url?.toString()?.startsWith(OFFLINE_URL) == true) return
+                // 서버가 없다고 녹음까지 못 하면 안 된다. 바로 녹음할 수 있는 화면으로 넘긴다.
+                loadOffline(REASON_UNREACHABLE)
             }
         }
 
@@ -231,6 +270,51 @@ class MainActivity : ComponentActivity() {
         maybeAskBatteryExemption()
     }
 
+    /**
+     * 서버가 없어도 녹음할 수 있는 화면을 연다 (`assets/offline.html`).
+     *
+     * 이 화면은 apk 안에 들어 있어 와이파이가 전혀 없어도 뜬다. 녹음 버튼은 웹 화면의 것과 같은
+     * [RecorderBridge] 를 부르므로 녹음 → 저장 → (연결되면) 업로드까지 평소와 똑같은 길을 탄다.
+     * 앱이 웹을 다시 만들지 않는다는 원칙에서 이 화면만 예외인 이유는, 서버가 주는 화면으로는
+     * 서버가 없을 때 아무것도 할 수 없기 때문이다.
+     */
+    private fun loadOffline(reason: String) {
+        offlineReason = reason
+        webView.loadUrl(OFFLINE_URL)
+        // 여기서도 긴 녹음을 하므로 웹 화면과 똑같이 한 번 권한다
+        maybeAskBatteryExemption()
+    }
+
+    /**
+     * 오프라인 화면이 떴다. 띄운 이유를 화면에 넣어 주고 뒤로가기 기록을 지운다.
+     *
+     * 기록을 남겨 두면 뒤로가기가 방금 실패한 주소로 되돌아가 같은 실패를 되풀이한다.
+     */
+    private fun onOfflinePageReady(view: WebView?) {
+        val web = view ?: return
+        web.evaluateJavascript(
+            "window.dagloOffline && window.dagloOffline.setReason(" +
+                JSONObject.quote(offlineReason) + ")",
+            null
+        )
+        web.clearHistory()
+    }
+
+    /**
+     * 붙어 있는 네트워크가 있는지.
+     *
+     * 서버까지 닿는지는 알 수 없지만(같은 와이파이라도 서버 PC 가 꺼져 있을 수 있다), 아예 없을
+     * 때는 웹이 뜨기를 기다릴 이유가 없으므로 그 경우만 가려낸다. 나머지는 열어 보고 실패하면
+     * [onReceivedError] 가 오프라인 화면으로 넘긴다.
+     */
+    private fun hasNetwork(): Boolean {
+        val cm = getSystemService(Context.CONNECTIVITY_SERVICE) as? ConnectivityManager ?: return true
+        val caps = cm.getNetworkCapabilities(cm.activeNetwork ?: return false) ?: return false
+        return caps.hasTransport(NetworkCapabilities.TRANSPORT_WIFI) ||
+            caps.hasTransport(NetworkCapabilities.TRANSPORT_CELLULAR) ||
+            caps.hasTransport(NetworkCapabilities.TRANSPORT_ETHERNET)
+    }
+
     /** 화면을 열지 못했을 때 이유와 빠져나갈 길을 함께 보여 준다. */
     private fun showHint(title: String, body: String) {
         val html = HINT_TEMPLATE
@@ -238,6 +322,7 @@ class MainActivity : ComponentActivity() {
             .replace("{{BODY}}", body)
             .replace("{{RETRY}}", settings.webUrl)
             .replace("{{SETTINGS}}", SETTINGS_SCHEME)
+            .replace("{{OFFLINE}}", OFFLINE_SCHEME)
             .replace("{{ADDRESS}}", settings.webUrl.ifEmpty { "(없음)" })
         webView.loadDataWithBaseURL(
             settings.serverUrl.ifEmpty { null }, html, "text/html", "utf-8", null
@@ -290,6 +375,8 @@ class MainActivity : ComponentActivity() {
             .setNegativeButton(if (settings.isConfigured) "취소" else "나가기") { _, _ ->
                 if (!settings.isConfigured) finish()
             }
+            // 주소를 모르거나 서버가 꺼져 있어도 녹음은 지금 시작할 수 있어야 한다
+            .setNeutralButton("오프라인 녹음") { _, _ -> loadOffline(REASON_CHOSEN) }
             .show()
     }
 
@@ -342,8 +429,24 @@ class MainActivity : ComponentActivity() {
     companion object {
         /** 홈 화면 바로가기(res/xml/shortcuts.xml)가 보내는 인텐트 액션 */
         const val ACTION_SETTINGS = "com.recorder.voicenote.SETTINGS"
+        /** 홈 화면 바로가기 '바로 녹음' — 서버를 거치지 않고 녹음 화면부터 연다 */
+        const val ACTION_RECORD = "com.recorder.voicenote.RECORD"
         /** 안내 페이지의 '서버 주소 바꾸기' 링크 */
         private const val SETTINGS_SCHEME = "daglo://settings"
+        /** 안내 페이지의 '그냥 녹음하기' 링크 */
+        private const val OFFLINE_SCHEME = "daglo://offline"
+        /** apk 안에 든 오프라인 녹음 화면 */
+        private const val OFFLINE_URL = "file:///android_asset/offline.html"
+
+        private const val REASON_NO_NETWORK =
+            "와이파이가 없어 서버 화면을 열지 못했습니다. 녹음은 지금 바로 할 수 있습니다."
+        private const val REASON_UNREACHABLE =
+            "서버에 연결하지 못했습니다 (서버 PC 가 꺼져 있거나 다른 와이파이일 수 있습니다). " +
+                "녹음은 지금 바로 할 수 있습니다."
+        private const val REASON_SHORTCUT =
+            "바로 녹음. 정지하면 서버에 닿는 대로 저절로 올라갑니다."
+        private const val REASON_CHOSEN =
+            "서버 없이 녹음합니다. 정지하면 서버에 닿는 대로 저절로 올라갑니다."
 
         private val HINT_TEMPLATE = """
             <html><head><meta name="viewport" content="width=device-width, initial-scale=1"></head>
@@ -354,6 +457,10 @@ class MainActivity : ComponentActivity() {
                 <a href="{{RETRY}}" style="font-size:17px">다시 열기</a>
                 &nbsp;·&nbsp;
                 <a href="{{SETTINGS}}" style="font-size:17px">서버 주소 바꾸기</a>
+              </p>
+              <p>
+                <a href="{{OFFLINE}}" style="font-size:17px">그냥 녹음하기</a>
+                <span style="color:#6b7280"> — 지금 녹음하고 서버에 닿을 때 올립니다</span>
               </p>
               <p style="color:#6b7280">지금 주소: <code>{{ADDRESS}}</code></p>
             </body></html>

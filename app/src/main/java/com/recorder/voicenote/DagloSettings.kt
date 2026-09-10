@@ -3,7 +3,7 @@ package com.recorder.voicenote
 import android.content.Context
 
 /**
- * 앱이 기억하는 것은 서버 주소 하나뿐이다.
+ * 앱이 기억하는 것은 서버 주소와, 오프라인 녹음 화면이 쓸 최근 폴더 이름뿐이다.
  *
  * 로그인·목록·편집·요약은 전부 웹 화면(WebView)이 하므로 앱에는 계정도 토큰도 저장하지 않는다.
  * 업로드는 웹에서 로그인하며 받은 세션 쿠키를 그대로 쓴다([DagloSession]).
@@ -57,6 +57,28 @@ class DagloSettings(context: Context) {
             prefs.edit().putBoolean(KEY_ASKED_BATTERY, value).apply()
         }
 
+    /**
+     * 최근에 녹음을 넣은 폴더 이름들 (새것부터).
+     *
+     * 폴더 목록은 원래 서버가 준다. 서버에 닿지 않는 곳에서 녹음할 때는 그 목록을 받아올 수
+     * 없으므로, 녹음할 때마다 쓴 이름을 여기 남겨 두고 오프라인 화면에서 고를 수 있게 한다.
+     * 서버는 없는 이름으로 올리면 그 폴더를 만들어 주므로 이름만 알면 충분하다.
+     */
+    val recentFolders: List<String>
+        get() = (prefs.getString(KEY_RECENT_FOLDERS, "") ?: "")
+            .split("\n")
+            .map { it.trim() }
+            .filter { it.isNotEmpty() }
+
+    /** 방금 쓴 폴더 이름을 맨 앞에 둔다 (같은 이름은 한 번만 남는다). */
+    fun rememberFolder(name: String) {
+        val clean = name.trim()
+        if (clean.isEmpty()) return
+        val next = (listOf(clean) + recentFolders.filter { !it.equals(clean, ignoreCase = true) })
+            .take(MAX_RECENT_FOLDERS)
+        prefs.edit().putString(KEY_RECENT_FOLDERS, next.joinToString("\n")).apply()
+    }
+
     /** 설정 화면에서 받은 주소 한 줄을 기준 주소와 로그인 경로로 나눠 저장한다. */
     fun save(rawAddress: String) {
         val (base, path) = splitAddress(rawAddress)
@@ -71,6 +93,9 @@ class DagloSettings(context: Context) {
         private const val KEY_SERVER_URL = "server_url"
         private const val KEY_LOGIN_PATH = "login_path"
         private const val KEY_ASKED_BATTERY = "asked_battery"
+        private const val KEY_RECENT_FOLDERS = "recent_folders"
+        /** 오프라인 화면에 한눈에 들어올 만큼만 남긴다 */
+        private const val MAX_RECENT_FOLDERS = 8
 
         /**
          * 주소 한 줄을 (기준 주소, 로그인 경로) 로 나눈다.

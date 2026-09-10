@@ -4,6 +4,22 @@
   서버를 옮기거나 로그인 경로를 바꿨을 때는 홈 화면에서 앱 아이콘을 길게 눌러 여기로 들어온다.
 -->
 <shortcuts xmlns:android="http://schemas.android.com/apk/res/android">
+    <!--
+      와이파이가 없는 강의실에서 앱을 열면 서버 화면을 기다리다 시간을 버린다.
+      여기로 들어오면 그 기다림 없이 녹음 화면부터 뜬다.
+    -->
+    <shortcut
+        android:shortcutId="record_now"
+        android:enabled="true"
+        android:icon="@mipmap/ic_launcher"
+        android:shortcutShortLabel="@string/shortcut_record"
+        android:shortcutLongLabel="@string/shortcut_record_long">
+        <intent
+            android:action="com.recorder.voicenote.RECORD"
+            android:targetPackage="com.recorder.voicenote"
+            android:targetClass="com.recorder.voicenote.MainActivity" />
+    </shortcut>
+
     <shortcut
         android:shortcutId="server_address"
         android:enabled="true"
