@@ -185,49 +185,45 @@ def test_no_keys():
 
 # ---- 받아쓰기 / 챗봇 ---------------------------------------------------------------
 
-def test_transcribe_reuploads_on_new_key():
-    uploads, deletes = [], []
-
-    class Uploaded:
-        def __init__(self, key):
-            self.name = f"files/{key}"
-
-    class Files:
-        def __init__(self, key):
-            self.key = key
-
-        def upload(self, file, config):
-            uploads.append(self.key)
-            return Uploaded(self.key)
-
-        def delete(self, name):
-            deletes.append(name)
+def test_transcribe_switches_key_and_labels_segments():
+    extracted, sent = [], []
 
     class Candidate:
         finish_reason = None
 
         class content:
-            parts = [type("P", (), {"text": "[00:00] 안녕하세요"})()]
+            parts = [type("P", (), {"text": "<<1>> 안녕하세요\n<<2>> 반갑습니다"})()]
 
     class TranscribeModels:
         def __init__(self, key):
             self.key = key
 
         def generate_content(self, model, contents):
+            sent.append((self.key, contents))
             if self.key == "k1":
                 raise RuntimeError(MINUTE_429)
             return type("R", (), {"candidates": [Candidate()]})()
 
-    def fake_make_client(key):
-        return type("C", (), {"files": Files(key), "models": TranscribeModels(key)})()
+    def fake_extract(audio_path, start_ms, length_ms):
+        extracted.append((start_ms, length_ms))
+        return b"mp3"
 
     ai.api_keys = ["k1", "k2"]
     ai.api_key_pool = ai.ApiKeyPool(ai.api_keys)
-    ai.make_client = fake_make_client
-    text = ai.transcribe_chunk_with_fallback("chunk.mp3", "board_1_chunk_1", "prompt")
-    check("받아쓰기도 다음 키로 넘어간다", text == "[00:00] 안녕하세요", text)
-    check("키를 바꾸면 업로드부터 다시", uploads == ["k1", "k2"], str(uploads))
-    check("올린 파일은 키마다 지운다", deletes == ["files/k1", "files/k2"], str(deletes))
+    ai.make_client = lambda key: type("C", (), {"models": TranscribeModels(key)})()
+    original_extract = ai.extract_segment_mp3
+    ai.extract_segment_mp3 = fake_extract
+    try:
+        text = ai.transcribe_segments("a.m4a", [(0, 20_000), (20_000, 45_000)], "board_1_chunk_1", "prompt")
+    finally:
+        ai.extract_segment_mp3 = original_extract
+
+    check("받아쓰기도 다음 키로 넘어간다", text == "<<1>> 안녕하세요\n<<2>> 반갑습니다", text)
+    check("키를 바꿔도 오디오는 한 번만 자른다", extracted == [(0, 20_000), (20_000, 25_000)], str(extracted))
+    contents = sent[-1][1] if sent else []
+    check("프롬프트 다음에 번호와 조각이 번갈아 온다",
+          len(contents) == 5 and contents[0] == "prompt" and contents[1] == "<<1>>" and contents[3] == "<<2>>",
+          str(contents))
 
 
 def test_chat_stream_switches_before_first_text():

@@ -2,10 +2,8 @@ import os
 import re
 import json
 import subprocess
-import tempfile
 import threading
 import time
-import uuid
 import datetime
 from typing import AsyncGenerator, List, Dict, Optional, Callable, TypeVar
 from dotenv import load_dotenv
@@ -55,28 +53,41 @@ GEMINI_MAX_ATTEMPTS = max(1, int(os.getenv("GEMINI_MAX_ATTEMPTS", "3")))
 # ffmpeg 한 번 호출이 이 시간을 넘기면 강제 종료한다 (멈춘 ffmpeg 이 워커를 묶는 것을 막는다)
 FFMPEG_TIMEOUT_SEC = max(60, int(os.getenv("FFMPEG_TIMEOUT_SEC", "900")))
 
-# 청크 길이. 짧을수록 자막 시각이 정확해진다.
+# 자막 시각은 받아쓰기에게 묻지 않고 우리가 잰다.
 #
-# 청크 경계 시각은 우리가 ffmpeg 로 직접 잘라 낸 값이라 확실하지만, 청크 안쪽 시각은 전부
-# 받아쓰기가 말해 준 것이라 믿을 수 없다. 20분으로 자르던 때는 106분 강의에 확실한 시각이
-# 6개뿐이었고, 받아쓰기가 한 청크에 타임스탬프를 하나만 찍어 주는 일이 잦아 19분 30초가
-# 문단 하나로 뭉쳤다. 그러면 화면은 그 덩어리를 글자 수로 나눠 시간을 지어내고,
-# 자막 하이라이트는 그 구간 내내 엉뚱한 곳을 짚는다.
-CHUNK_MINUTES = max(1, int(os.getenv("STT_CHUNK_MINUTES", "10")))
+# 예전에는 몇 분짜리 청크를 통째로 보내고 [MM:SS] 를 찍어 달라고 했다. 그 시각은 받아쓰기가
+# 오디오에서 잰 값이 아니라 본문처럼 지어 쓴 값이라, 한 청크에 [00:00] 하나만 찍거나 20분치를
+# [00:00] [00:02] ... 로 눌러 찍는 일이 잦았다(시각 간격과 글자 수의 상관계수가 -0.11 이었다).
+# 그런 청크는 글자 수로 어림할 수밖에 없었다.
+#
+# 지금은 녹음을 말이 쉬는 자리에서 15~30초 조각으로 자르고, 조각마다 <<번호>> 를 붙여 요청
+# 하나에 묶어 보낸다. 조각의 시작 시각은 ffmpeg 로 자른 값이라 확실하고, 받아쓰기는 번호만 지키면
+# 된다. 실제로 보내 보니 시각은 못 지키던 모델이 번호는 조각 수만큼 정확히 붙였다.
+#
+# 조각 길이는 화면이 한 덩어리로 보여 주는 길이(app.js 의 DISPLAY_BLOCK_MS 20초)와
+# SRT 자막 한 줄의 상한(SUBTITLE_MAX_MS 30초)에 맞췄다.
+SEGMENT_MIN_MS = 15 * 1000
+SEGMENT_MAX_MS = 30 * 1000
+# 쉬는 자리를 찾을 때 음량을 재는 간격
+LEVEL_WINDOW_MS = 100
+# 음량이 0 인 창(-inf dB)을 대신할 값
+SILENCE_DB = -120.0
+LEVEL_LINE_PATTERN = re.compile(r"lavfi\.astats\.Overall\.RMS_level=(\S+)")
+
+# 요청 하나에 묶어 보내는 오디오 길이(분). 자막 시각의 정확도와는 상관이 없고, 호출 횟수와
+# 번호가 어긋난 요청 하나가 망가뜨리는 범위(그 요청은 글자 수로 편다)를 맞바꾼다.
+# 오디오를 요청에 바로 싣기 때문에 요청 한도(20MB)를 넘지 않도록 30분에서 막는다.
+CHUNK_MINUTES = min(30, max(1, int(os.getenv("STT_CHUNK_MINUTES", "10"))))
 CHUNK_LENGTH_MS = CHUNK_MINUTES * 60 * 1000
-# 청크 사이를 겹쳐 잘라, 경계에서 말이 잘려 사라지는 것을 막는다
-OVERLAP_MS = min(20 * 1000, CHUNK_LENGTH_MS // 4)
-CHUNK_STEP_MS = CHUNK_LENGTH_MS - OVERLAP_MS
-# 청크의 타임스탬프를 믿으려면, 찍힌 시각이 적어도 청크 길이의 이만큼은 덮어야 한다
-MIN_TIMESTAMP_COVERAGE = 0.5
-# 받아쓰기 시각을 그대로 믿었을 때 나오는 말하기 속도의 상한(초당 글자).
+# 조각 하나에 적힌 말하기 속도의 상한(초당 글자, 띄어쓰기 포함).
 #
-# 한국어 강의는 초당 4~6자쯤이다. 실제로 받아 본 응답 중에는 20분치 받아쓰기에 시각을
-# [00:00] [00:02] [00:04] ... 처럼 찍어, 그대로 믿으면 초당 13자를 말한 셈이 되는 것이 있었다
-# (시각 간격과 글자 수의 상관계수는 -0.11 로, 간격 자체에 아무 정보가 없었다).
-# 이렇게 눌린 시각은 청크의 절반을 덮더라도 믿으면 안 된다.
-MAX_PLAUSIBLE_CHARS_PER_SEC = 9.0
-# 시각을 못 믿는 청크를 펼 때 조각 하나가 넘지 않을 길이
+# 강의 녹음을 조각으로 받아써 보면 초당 5.6~7.4자다. 번호를 빼먹고 두 조각 분량을 한 번호에
+# 몰아 적으면 이 값을 넘는다. 그런 요청은 번호를 믿지 않는다.
+SEGMENT_MAX_CHARS_PER_SEC = 12.0
+# 속도를 잴 때 조각 길이를 이보다 짧게 치지 않는다 (몇 초짜리 마지막 조각에서 헛경보가 나지 않게)
+SEGMENT_PACE_MIN_SEC = 5.0
+SEGMENT_LABEL_PATTERN = re.compile(r"<<\s*(\d+)\s*>>")
+# 번호를 못 믿는 요청을 펼 때 조각 하나가 넘지 않을 길이
 SPREAD_PIECE_MAX_CHARS = 120
 # 덩어리를 문장으로 끊을 때 쓰는 자리 (문장부호 뒤)
 SENTENCE_SPLIT_PATTERN = re.compile(r'[^.!?…。\n]+[.!?…。]*\s*')
@@ -230,21 +241,63 @@ def rewrite_container(audio_path: str) -> bool:
         return False
 
 
-def extract_chunk_to_mp3(audio_path: str, dest_path: str, start_ms: int, length_ms: int) -> None:
-    """원본에서 [start, start+length) 구간만 잘라 STT 용 mp3(16kHz 모노 32k)로 만든다."""
+def extract_segment_mp3(audio_path: str, start_ms: int, length_ms: int) -> bytes:
+    """원본에서 [start, start+length) 구간만 잘라 STT 용 mp3(16kHz 모노 32k) 바이트로 돌려준다.
+
+    30초 조각이 120KB 남짓이라 파일로 쓰지 않고 파이프로 받는다.
+    """
     cmd = [
-        ffmpeg_bin(), "-v", "error", "-y", "-nostdin",
+        ffmpeg_bin(), "-v", "error", "-nostdin",
         "-ss", f"{start_ms / 1000.0:.3f}",
         "-t", f"{length_ms / 1000.0:.3f}",
         "-i", audio_path,
         "-vn", "-ac", "1", "-ar", "16000",
         "-c:a", "libmp3lame", "-b:a", "32k",
-        dest_path,
+        "-f", "mp3", "-",
     ]
-    code, _out, err = run_tool(cmd, timeout=FFMPEG_TIMEOUT_SEC)
-    if code != 0 or not os.path.exists(dest_path) or os.path.getsize(dest_path) == 0:
-        start_label = f"{start_ms // 60000}분 지점"
+    code, out, err = run_tool(cmd, timeout=FFMPEG_TIMEOUT_SEC)
+    if code != 0 or not out:
+        start_label = f"{start_ms // 60000}분 {start_ms // 1000 % 60}초 지점"
         raise RuntimeError(f"오디오 구간 추출 실패 ({start_label}): {err or f'ffmpeg 종료코드 {code}'}")
+    return out
+
+
+def measure_levels_db(audio_path: str) -> List[float]:
+    """녹음 전체의 음량을 LEVEL_WINDOW_MS 마다 잰다 (dBFS).
+
+    쉬는 자리를 찾는 데 쓴다. 무음 기준값(-35dB 같은)을 정해 두면 교실 소음이나 마이크 감도에
+    따라 쉼을 하나도 못 찾기도 하므로, 기준값 없이 구간마다 가장 조용한 곳을 고르도록 음량 자체를
+    받아 둔다. ffmpeg 안에서 8kHz 모노로 줄여 재므로 67분짜리가 3초 남짓에 끝나고, 파이썬에 남는
+    것은 숫자 목록뿐이다. 못 재면 빈 목록을 돌려주고, 그때는 조각을 일정한 길이로 자른다.
+    """
+    samples_per_window = 8000 * LEVEL_WINDOW_MS // 1000
+    code, _out, err = run_tool(
+        [
+            ffmpeg_bin(), "-hide_banner", "-nostats", "-nostdin", "-v", "info",
+            "-i", audio_path, "-vn",
+            "-af", (
+                "aformat=channel_layouts=mono,aresample=8000,"
+                f"asetnsamples=n={samples_per_window}:p=0,"
+                "astats=metadata=1:reset=1:measure_overall=RMS_level:measure_perchannel=none,"
+                # 파일(file=)로 받으면 윈도우 경로의 콜론을 필터 문법에 맞춰 이스케이프해야 한다.
+                # 로그(stderr)로 받는다.
+                "ametadata=mode=print:key=lavfi.astats.Overall.RMS_level"
+            ),
+            "-f", "null", "-",
+        ],
+        timeout=FFMPEG_TIMEOUT_SEC,
+    )
+    if code != 0:
+        print(f"[AI-WARN] 음량을 재지 못해 조각을 일정한 길이로 자릅니다: {err[-300:]}", flush=True)
+        return []
+
+    levels = []
+    for value in LEVEL_LINE_PATTERN.findall(err):
+        try:
+            levels.append(max(SILENCE_DB, float(value)))    # -inf(완전한 무음)는 SILENCE_DB 로
+        except ValueError:
+            levels.append(SILENCE_DB)
+    return levels
 
 def make_client(api_key: str) -> genai.Client:
     """타임아웃과 자동 재시도를 건 Gemini 클라이언트를 만든다."""
@@ -479,64 +532,89 @@ def resolve_end_times(start_ms_list: List[int], total_ms: int = 0) -> List[int]:
     return ends
 
 
-def parse_chunk_pieces(text: str, chunk_length_ms: int) -> List[tuple]:
-    """청크 하나의 받아쓰기를 `(청크 안에서의 ms, 본문)` 조각들로 만든다.
+def plan_segments(levels_db: List[float], total_ms: int) -> List[tuple]:
+    """녹음을 `(시작ms, 끝ms)` 조각들로 나눈다.
 
-    받아쓰기가 주는 시각은 이 청크 기준(00:00 부터)이다. 청크 길이를 넘는 값은 받아쓰기가
-    지어낸 것이므로 청크 끝으로 자르고, 뒤로 돌아가는 값은 앞 시각에 맞춘다. 시간이 되감기면
-    문단 묶기(`group_by_sentence`)와 종료 시각 계산(`resolve_end_times`)이 통째로 어긋난다.
+    조각은 SEGMENT_MIN_MS~SEGMENT_MAX_MS 길이이고, 그 범위 안에서 가장 조용한 자리에서 자른다.
+    조용한 정도는 앞뒤 창까지 세 창 가운데 가장 시끄러운 값으로 본다. 말 사이의 아주 짧은 틈
+    하나를 쉼으로 오인해 낱말 한가운데를 자르지 않게 하려는 것이다.
+    음량을 못 쟀거나(빈 목록) 음량이 녹음보다 짧게 끝나면 그 자리는 최대 길이에서 자른다.
     """
-    from server.migrator import split_timestamped_line
+    if total_ms <= 0:
+        return []
 
-    limit = max(0, chunk_length_ms)
-    pieces = []
-    last_ms = 0
-    for raw_line in text.splitlines():
-        line = raw_line.strip()
-        if not line:
-            continue
-        for piece_ms, piece_text in split_timestamped_line(line, last_ms):
-            piece_ms = min(max(piece_ms, last_ms), limit)
-            last_ms = piece_ms
-            if piece_text:
-                pieces.append((piece_ms, piece_text))
-    return pieces
+    def loudness_around(i: int) -> float:
+        return max(levels_db[i - 1:i + 2])
+
+    cuts = [0]
+    while total_ms - cuts[-1] > SEGMENT_MAX_MS:
+        start = cuts[-1]
+        first = max(1, (start + SEGMENT_MIN_MS) // LEVEL_WINDOW_MS)
+        last = min((start + SEGMENT_MAX_MS) // LEVEL_WINDOW_MS, len(levels_db) - 1)
+        if first < last:
+            quietest = min(range(first, last), key=loudness_around)
+            cuts.append(quietest * LEVEL_WINDOW_MS + LEVEL_WINDOW_MS // 2)
+        else:
+            cuts.append(start + SEGMENT_MAX_MS)
+    cuts.append(total_ms)
+    return list(zip(cuts, cuts[1:]))
 
 
-def chunk_timestamps_are_usable(pieces: List[tuple], chunk_length_ms: int) -> bool:
-    """이 청크의 타임스탬프가 청크를 실제로 설명하고 있는지.
+def group_segments(segments: List[tuple], batch_ms: int) -> List[List[tuple]]:
+    """조각들을 요청 하나에 실을 묶음으로 나눈다. 묶음 하나는 batch_ms 를 넘지 않는다
+    (조각 하나가 그보다 길면 그 조각 혼자 한 묶음이 된다)."""
+    batches: List[List[tuple]] = []
+    for seg in segments:
+        if batches and seg[1] - batches[-1][0][0] <= batch_ms:
+            batches[-1].append(seg)
+        else:
+            batches.append([seg])
+    return batches
 
-    두 가지를 본다.
-     - 찍힌 시각이 청크를 얼마나 덮는가. 받아쓰기는 앞부분만 찍고 나머지를 이어 붙이곤 한다.
-     - 그 시각대로면 초당 몇 글자를 말한 셈이 되는가. 20분치에 시각을 2초 간격으로 찍어 주는
-       경우가 있는데, 그러면 초당 13자를 말한 것이 된다 (실제는 4~6자).
 
-    둘 중 하나라도 걸리면 그 시각은 버리고 청크 안에 고르게 편다. 어림이지만 오차가 청크
-    안에 갇히고, 무엇보다 몇 분치가 한 점에 뭉치지 않는다.
+def parse_segment_transcript(text: str, count: int) -> Optional[List[str]]:
+    """`<<번호>> 본문` 꼴 응답을 조각별 본문 목록(길이 count)으로 만든다. 번호를 못 믿으면 None.
+
+    번호가 빠진 조각은 빈 본문이다 (말이 없는 조각은 번호를 건너뛰기도 한다).
+    번호가 되감기거나 겹치거나 조각 수를 넘거나, 첫 번호 앞에 글이 있으면 못 믿는다.
+    본문에 섞여 온 [MM:SS] 는 걷어낸다.
     """
-    if chunk_length_ms <= 0 or len(pieces) < 2:
-        return False
-    stamps = {ms for ms, _ in pieces}
-    if len(stamps) < 3:
-        return False
+    from server.migrator import strip_timestamps
 
-    span_ms = max(stamps) - min(stamps)
-    if span_ms < chunk_length_ms * MIN_TIMESTAMP_COVERAGE:
-        return False
+    labels = list(SEGMENT_LABEL_PATTERN.finditer(text or ""))
+    if not labels or text[:labels[0].start()].strip():
+        return None
 
-    # 청크의 절반을 덮더라도, 그 시각대로면 사람이 낼 수 없는 속도로 말한 셈이 되는 경우가 있다
-    # (시각을 고르게 눌러 찍는 버릇). 그때도 못 믿는다.
-    chars = sum(len(text) for _, text in pieces)
-    if chars / (span_ms / 1000) > MAX_PLAUSIBLE_CHARS_PER_SEC:
-        return False
-    return True
+    texts = [""] * count
+    previous = 0
+    for label, following in zip(labels, labels[1:] + [None]):
+        number = int(label.group(1))
+        if not previous < number <= count:
+            return None
+        body = text[label.end():following.start() if following else len(text)]
+        texts[number - 1] = re.sub(r"\s+", " ", strip_timestamps(body)).strip()
+        previous = number
+    return texts
+
+
+def find_crowded_segment(texts: List[str], segments: List[tuple]) -> Optional[int]:
+    """사람이 말할 수 없는 속도만큼 본문이 몰린 조각의 위치. 없으면 None.
+
+    받아쓰기가 번호를 몇 개 건너뛰고 그 말을 한 번호에 몰아 적으면, 번호 순서는 멀쩡해도
+    시각이 그만큼 앞당겨진다. 순서 검사로는 못 잡으므로 글자 수로 잡는다.
+    """
+    for i, (text, (start_ms, end_ms)) in enumerate(zip(texts, segments)):
+        seconds = max((end_ms - start_ms) / 1000, SEGMENT_PACE_MIN_SEC)
+        if len(text) > seconds * SEGMENT_MAX_CHARS_PER_SEC:
+            return i
+    return None
 
 
 def split_text_for_spreading(text: str) -> List[str]:
     """긴 덩어리를 문장 단위로 쪼갠다 (마침표가 없으면 글자 수로라도 끊는다).
 
-    시각을 못 믿는 청크는 대개 `[00:00]` 하나에 몇 분치 말이 통째로 붙어 온다. 덩어리인 채로는
-    어디에 펴 놓아도 한 점에 뭉치므로, 펴기 전에 먼저 쪼갠다.
+    번호를 못 믿는 요청은 몇 분치 말이 한 덩어리로 남는다. 덩어리인 채로는 어디에 펴 놓아도
+    한 점에 뭉치므로, 펴기 전에 먼저 쪼갠다.
     """
     parts = [p.strip() for p in SENTENCE_SPLIT_PATTERN.findall(text)]
     parts = [p for p in parts if p]
@@ -562,7 +640,7 @@ def split_text_for_spreading(text: str) -> List[str]:
 def spread_pieces(pieces: List[tuple], span_ms: int) -> List[tuple]:
     """조각들을 `[0, span_ms)` 안에 글자 수에 비례해 고르게 편다.
 
-    말하는 속도가 일정하다고 치는 셈이라 정확하지는 않지만, 청크 하나(몇 분) 안에서의
+    말하는 속도가 일정하다고 치는 셈이라 정확하지는 않지만, 요청 하나(몇 분) 안에서의
     어림이라 오차도 그 안에 갇힌다. 몇 분치가 한 시각에 뭉쳐 있는 것보다는 훨씬 낫다.
     """
     fragments = []
@@ -581,64 +659,52 @@ def spread_pieces(pieces: List[tuple], span_ms: int) -> List[tuple]:
     return spread
 
 
-def drop_overlap_pieces(pieces: List[tuple], overlap_ms: int) -> List[tuple]:
-    """두 번째 청크부터 앞의 겹친 구간을 버린다 (이전 청크가 이미 받아쓴 부분이다).
+def transcribe_segments(audio_path: str, segments: List[tuple], label: str, prompt_text: str) -> str:
+    """조각 여러 개를 요청 하나로 받아쓴다. 조각마다 앞에 `<<번호>>` 를 붙여 보낸다.
 
-    예전에는 시각을 절대 시각으로 바꾼 뒤에 `청크 시작 이상만 남긴다`로 걸렀는데, 옮기고 나면
-    모든 줄이 그 조건을 만족해서 한 줄도 걸러지지 않았다. 겹친 30초가 매 경계마다 두 번씩
-    들어가 문단과 시각이 그만큼 밀렸다. 그래서 청크 안 시각으로 거른다.
+    오디오는 파일로 올리지 않고 요청에 바로 싣는다. 16kHz 모노 32k mp3 라 10분이 2.4MB 로 요청
+    한도에 한참 못 미치고, 올린 파일은 그 키의 프로젝트에만 보여서 키를 바꿀 때마다 다시 올려야
+    했던 일도 없어진다. 키 전환과 재시도는 run_with_api_keys 가 맡는다.
     """
-    return [(ms, text) for ms, text in pieces if ms >= overlap_ms]
+    contents: list = [prompt_text]
+    for number, (start_ms, end_ms) in enumerate(segments, 1):
+        contents.append(f"<<{number}>>")
+        contents.append(genai.types.Part.from_bytes(
+            data=extract_segment_mp3(audio_path, start_ms, end_ms - start_ms),
+            mime_type="audio/mp3",
+        ))
 
-def transcribe_chunk_with_fallback(temp_chunk_path: str, display_name: str, prompt_text: str) -> str:
-    """청크 하나를 STT 한다. 키 전환과 재시도는 run_with_api_keys 가 맡는다.
-
-    올린 파일은 그 키의 프로젝트에만 보이므로, 키를 바꾸면 업로드부터 다시 한다.
-    """
     def work(client: genai.Client) -> str:
-        uploaded_file = client.files.upload(
-            file=temp_chunk_path,
-            config={"display_name": display_name}
-        )
-        try:
-            response = client.models.generate_content(
-                model=GEMINI_MODEL,
-                contents=[uploaded_file, prompt_text]
-            )
+        response = client.models.generate_content(model=GEMINI_MODEL, contents=contents)
 
-            candidate = response.candidates[0] if response.candidates else None
-            finish_reason = candidate.finish_reason if candidate else None
+        candidate = response.candidates[0] if response.candidates else None
+        finish_reason = candidate.finish_reason if candidate else None
 
-            parts = []
-            if candidate and candidate.content and candidate.content.parts:
-                parts = [p.text for p in candidate.content.parts if p.text]
-            transcript_text = "".join(parts).strip()
+        parts = []
+        if candidate and candidate.content and candidate.content.parts:
+            parts = [p.text for p in candidate.content.parts if p.text]
+        transcript_text = "".join(parts).strip()
 
-            if not transcript_text or finish_reason not in (None, genai.types.FinishReason.STOP):
-                raise RuntimeError(f"응답이 비정상 종료되었습니다 (finish_reason={finish_reason})")
+        if not transcript_text or finish_reason not in (None, genai.types.FinishReason.STOP):
+            raise RuntimeError(f"응답이 비정상 종료되었습니다 (finish_reason={finish_reason})")
 
-            return transcript_text
-        finally:
-            try:
-                client.files.delete(name=uploaded_file.name)
-            except Exception:
-                pass
+        return transcript_text
 
-    return run_with_api_keys(display_name, work)
+    return run_with_api_keys(label, work)
 
 # 프롬프트에 넣는 용어 개수 상한. 너무 많이 넣으면 정작 본문 받아쓰기 품질이 떨어진다.
 GLOSSARY_MAX_TERMS = 200
 
+# 규칙 번호는 build_glossary_prompt 가 5번을 이어 붙이므로 4번까지만 쓴다.
 STT_BASE_PROMPT = """
-이 오디오 파일을 처음부터 끝까지 빠짐없이 텍스트로 받아쓰기(Transcription) 해줘.
-이 파일은 긴 녹음에서 잘라 낸 몇 분짜리 조각이고, 파일이 시작하는 순간이 00:00 이야.
-작성할 때 아래 규칙을 엄격하게 지켜:
-1. 20~30초마다, 그리고 문단이 바뀔 때마다 맨 앞에 [MM:SS] 타임스탬프를 적어줘.
-   시각은 이 조각의 시작을 00:00 으로 센 값이어야 해 (원본 녹음에서의 시각이 아니야).
-2. 동일한 타임스탬프 연속 출력 금지, 시간은 증가해야 해.
-3. 인사말이나 부연 설명 없이 타임스탬프와 본문 텍스트만 출력해.
-4. 타임스탬프 뒤에는 반드시 받아쓴 본문이 와야 해. 말이 없는 구간에는 타임스탬프를 찍지 말고,
-   한 줄에 타임스탬프를 두 개 이상 붙이지 마.
+아래에 긴 녹음을 순서대로 잘라 낸 오디오 조각 {count}개가 있어. 조각마다 바로 앞에 <<번호>> 표시가 붙어 있어.
+조각마다 처음부터 끝까지 빠짐없이 텍스트로 받아쓰기(Transcription) 해줘. 작성할 때 아래 규칙을 엄격하게 지켜:
+1. 조각마다 그 조각의 번호 표시(<<1>>, <<2>> ...)를 먼저 적고 그 뒤에 받아쓴 본문을 적어.
+   번호는 1부터 {count}까지 빠짐없이 순서대로 적어.
+2. 한 조각에서 들린 말은 그 조각 번호 뒤에만 적어. 앞뒤 조각의 말과 합치거나 옮기지 마.
+   조각 경계에서 잘린 말은 들린 만큼만 적어.
+3. 말이 없는 조각은 번호만 적고 본문은 비워 둬. 들리지 않는 말을 지어내지 마.
+4. 인사말, 부연 설명, [MM:SS] 같은 타임스탬프 없이 번호 표시와 본문만 출력해.
 """
 
 
@@ -680,8 +746,9 @@ def build_glossary_prompt(terms: List[Dict[str, str]]) -> str:
 
 
 def process_audio_file_to_board(board_id: int, audio_path: str, db_session_factory, progress_callback: Optional[Callable[[int], None]] = None):
-    """오디오 파일을 청크 단위로 나누고 Gemini STT를 실행하여 Board에 저장하는 완전 자동화 파이프라인"""
+    """오디오 파일을 조각으로 나누고 Gemini STT를 실행하여 Board에 저장하는 완전 자동화 파이프라인"""
     from server.models import Board, TranscriptSegment, BoardSummary, Folder
+    from server.migrator import strip_timestamps
 
     db = db_session_factory()
     board = db.query(Board).filter_by(id=board_id).first()
@@ -696,7 +763,7 @@ def process_audio_file_to_board(board_id: int, audio_path: str, db_session_facto
 
         # 폴더 단어장을 프롬프트에 실어 보낸다 (고유명사·전문용어 표기 고정)
         glossary = load_glossary_terms(db, board.folder_id)
-        prompt = STT_BASE_PROMPT + build_glossary_prompt(glossary)
+        glossary_prompt = build_glossary_prompt(glossary)
         if glossary:
             print(f"[AI-GLOSSARY] Board #{board.id} 용어 {len(glossary)}개를 프롬프트에 적용합니다.", flush=True)
 
@@ -706,73 +773,69 @@ def process_audio_file_to_board(board_id: int, audio_path: str, db_session_facto
             rewrite_container(audio_path)
 
         # 파일을 통째로 디코딩하면 긴 녹음에서 수백 MB~GB 를 먹고 서버가 OOM 으로 죽는다.
-        # 길이만 먼저 재고, 실제 오디오는 청크 단위로 그때그때 잘라 쓴다.
+        # 길이만 먼저 재고, 실제 오디오는 조각 단위로 그때그때 잘라 쓴다.
         total_duration_sec = probe_duration_seconds(audio_path)
         board.duration_seconds = total_duration_sec
         db.commit()
 
         total_ms = int(total_duration_sec * 1000)
-        chunk_starts = list(range(0, max(total_ms - OVERLAP_MS, 1), CHUNK_STEP_MS))
-        total_chunks = len(chunk_starts)
+        segments = plan_segments(measure_levels_db(audio_path), total_ms)
+        batches = group_segments(segments, CHUNK_LENGTH_MS)
+        total_batches = len(batches)
+        print(
+            f"[AI-TIME] Board #{board.id} 조각 {len(segments)}개를 요청 {total_batches}번에 나눠 받아씁니다",
+            flush=True,
+        )
 
-        # (절대 ms, 본문) 조각들. 청크마다 시각을 바로잡아 여기에 쌓는다.
+        # (절대 ms, 본문) 조각들. 조각의 시작 시각은 우리가 자른 값이다.
         all_pieces: List[tuple] = []
-        for i, start_ms in enumerate(chunk_starts):
-            # 청크 하나가 오래 걸려도 '정체'로 오인되지 않도록 시작 시점에 살아있음을 알린다
+        for i, batch in enumerate(batches):
+            # 요청 하나가 오래 걸려도 '정체'로 오인되지 않도록 시작 시점에 살아있음을 알린다
             if progress_callback:
                 progress_callback(board.progress_percent or 0)
-            temp_chunk_path = os.path.join(tempfile.gettempdir(), f"chunk_{uuid.uuid4().hex}.mp3")
 
-            try:
-                # 필요한 구간만 STT 용 mp3(16kHz 모노 32k)로 뽑는다 — 메모리는 파일 길이와 무관하다
-                extract_chunk_to_mp3(audio_path, temp_chunk_path, start_ms, CHUNK_LENGTH_MS)
+            prompt = STT_BASE_PROMPT.format(count=len(batch)) + glossary_prompt
+            transcript_text = transcribe_segments(
+                audio_path, batch, f"board_{board_id}_chunk_{i+1}", prompt
+            )
 
-                transcript_text = transcribe_chunk_with_fallback(
-                    temp_chunk_path, f"board_{board_id}_chunk_{i+1}", prompt
+            texts = parse_segment_transcript(transcript_text, len(batch))
+            crowded = None if texts is None else find_crowded_segment(texts, batch)
+            if texts is not None and crowded is None:
+                all_pieces.extend(
+                    (start_ms, text) for (start_ms, _end_ms), text in zip(batch, texts) if text
+                )
+            else:
+                # 번호를 못 믿는 요청이다. 요청 하나에 실은 구간 안에 고르게 펴서 최소한 그 밖으로는
+                # 새지 않게 한다.
+                batch_start, batch_end = batch[0][0], batch[-1][1]
+                reason = "번호가 어긋나" if texts is None else f"{crowded + 1}번 조각에 말이 몰려"
+                print(
+                    f"[AI-TIME] Board #{board.id} chunk {i+1}/{total_batches}: "
+                    f"{reason} {(batch_end - batch_start) // 1000}초 안에 고르게 폅니다",
+                    flush=True,
+                )
+                body = SEGMENT_LABEL_PATTERN.sub(" ", transcript_text)
+                all_pieces.extend(
+                    (batch_start + rel_ms, text)
+                    for rel_ms, text in spread_pieces([(0, strip_timestamps(body))], batch_end - batch_start)
                 )
 
-                # 이 청크가 실제로 덮는 길이 (마지막 청크는 요청한 길이보다 짧다)
-                span_ms = max(0, min(CHUNK_LENGTH_MS, total_ms - start_ms))
-                pieces = parse_chunk_pieces(transcript_text, span_ms)
-
-                if chunk_timestamps_are_usable(pieces, span_ms):
-                    if i > 0:
-                        pieces = drop_overlap_pieces(pieces, OVERLAP_MS)
-                else:
-                    # 시각을 못 믿는 청크다. 청크 안에 고르게 펴서 최소한 청크 밖으로는 새지
-                    # 않게 한다. 겹친 구간은 어디까지가 겹침인지 알 수 없으므로 버리지 않는다
-                    # (조금 겹쳐 나오는 편이 말이 통째로 사라지는 것보다 낫다).
-                    print(
-                        f"[AI-TIME] Board #{board.id} chunk {i+1}/{total_chunks}: "
-                        f"타임스탬프를 믿을 수 없어 {span_ms // 1000}초 안에 고르게 폅니다",
-                        flush=True,
-                    )
-                    pieces = spread_pieces(pieces, span_ms)
-
-                all_pieces.extend((start_ms + rel_ms, text) for rel_ms, text in pieces)
-
-                # 진행률 업데이트
-                progress = int(10 + (i + 1) / total_chunks * 70)
-                board.progress_percent = min(85, progress)
-                db.commit()
-                if progress_callback:
-                    progress_callback(board.progress_percent)
-
-            finally:
-                if os.path.exists(temp_chunk_path):
-                    os.remove(temp_chunk_path)
+            # 진행률 업데이트
+            progress = int(10 + (i + 1) / total_batches * 70)
+            board.progress_percent = min(85, progress)
+            db.commit()
+            if progress_callback:
+                progress_callback(board.progress_percent)
 
         # 세그먼트 파싱 & 저장
         db.query(TranscriptSegment).filter_by(board_id=board.id).delete()
 
-        # 겹친 구간을 남겨 둔 청크가 있으면 앞뒤가 살짝 섞일 수 있다. 시간순으로 세워 둔다
-        # (같은 시각은 받아쓴 순서를 지킨다).
-        all_pieces.sort(key=lambda p: p[0])
         pieces = [(ms, "화자 1", text) for ms, text in all_pieces]
         # 키워드·요약에 넘길 전체 원고 (시각 + 본문)
         full_transcript = "\n".join(f"{ms_to_timestamp_str(ms)} {text}" for ms, text in all_pieces)
 
-        # 받아쓰기가 찍어 준 시각을 하나도 버리지 않고 그대로 저장한다.
+        # 조각 하나를 세그먼트 하나로, 시각을 하나도 버리지 않고 그대로 저장한다.
         #
         # 한때는 여기서 1분 문단으로 묶어 저장했는데(읽기 좋으라고), 묶으면 문단 첫 시각만 남고
         # 그 안의 시각은 사라진다. 화면은 없어진 시각을 글자 수로 되짚어 지어내므로, 재생하며
