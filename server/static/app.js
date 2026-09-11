@@ -10,6 +10,15 @@ let boards = [];
 let selectedBoardIds = new Set();
 let isUserEditing = false;
 let isModified = false;
+// 다른 창으로 갔다 돌아오면 브라우저는 마지막으로 포커스돼 있던 문단에 focus 이벤트를 다시 쏜다.
+// 문단 focus 는 "그 문단부터 재생"이라 그대로 두면 재생이 그 문단 시작으로 되감긴다.
+// 창을 떠날 때 포커스돼 있던 요소를 기억해 두고, 돌아와서 같은 요소에 오는 focus 는 무시한다.
+let focusedBeforeWindowBlur = null;
+window.addEventListener("blur", () => { focusedBeforeWindowBlur = document.activeElement; });
+window.addEventListener("focus", () => {
+    // 창의 focus 가 먼저 오고 요소의 focus 가 뒤따르므로, 한 박자 늦게 지운다.
+    setTimeout(() => { focusedBeforeWindowBlur = null; }, 0);
+});
 let currentActiveBlock = null;
 let autoPollTimer = null;
 let isRefreshing = false;
@@ -1063,6 +1072,7 @@ function renderTranscript(segments) {
         const body = p.querySelector(".paragraph-text-body");
         body.addEventListener("focus", () => {
             isUserEditing = true;
+            if (body === focusedBeforeWindowBlur) return;
             playAtMs(startMs, false);
         });
         body.addEventListener("input", () => { isModified = true; });
