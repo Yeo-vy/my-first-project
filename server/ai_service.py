@@ -5,6 +5,7 @@ import subprocess
 import threading
 import time
 import datetime
+import difflib
 from typing import AsyncGenerator, List, Dict, Optional, Callable, TypeVar
 from dotenv import load_dotenv
 from google import genai
@@ -511,6 +512,77 @@ def group_by_sentence(items, target_ms: int = None, max_ms: int = None) -> list:
     return groups
 
 
+# 받아쓰기가 조각 경계에 걸린 말을 앞뒤 조각 양쪽에 적는 일이 있다. 그러면 화면에
+# "그리고 선호도는 이미 다 주어져 있다." 가 2초 간격으로 두 번 찍힌다.
+# 운영 DB 11개 보드에서 이런 짝을 찾아 기준을 맞췄다: 6초 안에, 두 칸 안쪽 이웃끼리만 본다.
+REPEAT_WINDOW_MS = 6000
+REPEAT_LOOKAHEAD = 2
+REPEAT_MIN_CHARS = 6
+REPEAT_SIMILAR_RATIO = 0.85
+# 짧은 쪽이 긴 쪽 안에 4글자 이상 이어진 덩어리로 이만큼 들어 있으면 같은 말로 본다
+REPEAT_COVER_RATIO = 0.9
+REPEAT_COVER_BLOCK = 4
+_REPEAT_NORMALIZE = re.compile(r"[^\w]+")
+_DIGITS = re.compile(r"\d+")
+
+
+def is_repeated_text(a: str, b: str) -> bool:
+    """두 조각이 같은 말을 두 번 받아쓴 것인지. 띄어쓰기·문장부호 차이는 무시한다.
+
+    "3번 남자는 몇 등이에요?" / "4번 남자는 몇 등이에요?" 처럼 숫자만 다른 말은 강의에서
+    실제로 이어서 하는 말이라 남긴다.
+    """
+    na, nb = _REPEAT_NORMALIZE.sub("", a or ""), _REPEAT_NORMALIZE.sub("", b or "")
+    short, long_ = sorted((na, nb), key=len)
+    if len(short) < REPEAT_MIN_CHARS:
+        return False
+    if set(_DIGITS.findall(short)) - set(_DIGITS.findall(long_)):
+        return False
+    matcher = difflib.SequenceMatcher(None, na, nb, autojunk=False)
+    if matcher.ratio() >= REPEAT_SIMILAR_RATIO:
+        return True
+    covered = sum(m.size for m in matcher.get_matching_blocks() if m.size >= REPEAT_COVER_BLOCK)
+    return covered / len(short) >= REPEAT_COVER_RATIO
+
+
+def drop_repeated_pieces(pieces: List[tuple]) -> List[tuple]:
+    """같은 말을 두 번 받아쓴 이웃 조각 중 짧은 쪽을 버린다.
+
+    pieces: [(start_ms, ..., text), ...]  (시간순, 첫 칸이 시각이고 마지막 칸이 본문)
+    바로 옆 조각을 버리고 남긴 긴 쪽이 뒤에 있으면, 그 말은 앞 조각 시각에 시작했으므로
+    남긴 쪽 시각을 앞으로 당긴다.
+    """
+    starts = [p[0] or 0 for p in pieces]
+    texts = [p[-1] for p in pieces]
+    dropped = set()
+    moved_start = {}
+
+    for i in range(len(pieces)):
+        if i in dropped:
+            continue
+        neighbours = [j for j in range(i + 1, len(pieces)) if j not in dropped][:REPEAT_LOOKAHEAD]
+        for position, j in enumerate(neighbours):
+            if starts[j] - starts[i] > REPEAT_WINDOW_MS:
+                break
+            if not is_repeated_text(texts[i], texts[j]):
+                continue
+            if len(texts[i].strip()) <= len(texts[j].strip()):
+                dropped.add(i)
+                if position == 0:
+                    moved_start[j] = min(moved_start.get(i, starts[i]), starts[j])
+                break
+            dropped.add(j)
+
+    result = []
+    for i, piece in enumerate(pieces):
+        if i in dropped:
+            continue
+        if i in moved_start:
+            piece = (moved_start[i],) + tuple(piece[1:])
+        result.append(piece)
+    return result
+
+
 def resolve_end_times(start_ms_list: List[int], total_ms: int = 0) -> List[int]:
     """세그먼트 시작 시각들로 서로 겹치지 않는 종료 시각을 계산한다.
 
@@ -831,6 +903,7 @@ def process_audio_file_to_board(board_id: int, audio_path: str, db_session_facto
         # 세그먼트 파싱 & 저장
         db.query(TranscriptSegment).filter_by(board_id=board.id).delete()
 
+        all_pieces = drop_repeated_pieces(all_pieces)
         pieces = [(ms, "화자 1", text) for ms, text in all_pieces]
         # 키워드·요약에 넘길 전체 원고 (시각 + 본문)
         full_transcript = "\n".join(f"{ms_to_timestamp_str(ms)} {text}" for ms, text in all_pieces)
@@ -872,10 +945,8 @@ def process_audio_file_to_board(board_id: int, audio_path: str, db_session_facto
             RESULT_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "강의 녹음 변환")
             folder = db.query(Folder).filter_by(id=board.folder_id).first()
             folder_name = folder.name if folder else "기본 폴더"
-            if folder_name == "기본 폴더":
-                target_dir = RESULT_DIR
-            else:
-                target_dir = os.path.join(RESULT_DIR, sanitize_filename(folder_name))
+            # 기본 폴더도 업로드 쪽(강의 녹음)과 똑같이 하위 디렉터리를 만들어 그 안에 둔다
+            target_dir = os.path.join(RESULT_DIR, sanitize_filename(folder_name))
             os.makedirs(target_dir, exist_ok=True)
             board.txt_path = os.path.join(target_dir, f"{sanitize_filename(board.title)}.txt")
             db.commit()

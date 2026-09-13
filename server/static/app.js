@@ -197,6 +197,7 @@ async function submitPasswordChange() {
 // 초기화
 // -----------------------------------------
 document.addEventListener("DOMContentLoaded", async () => {
+    restoreAiPanelState();
     loadCurrentUser();
     setupAudioListeners();
     setupKeyboardShortcuts();
@@ -1492,7 +1493,32 @@ function setupKeyboardShortcuts() {
 // -----------------------------------------
 // 6. AI 어시스턴트 패널
 // -----------------------------------------
+const AI_PANEL_CLOSED_KEY = "daglo.aiPanelClosed";
+
+// 넓은 화면에서 X 로 닫은 상태는 다음 방문에도 유지한다.
+function restoreAiPanelState() {
+    let closed = false;
+    try { closed = localStorage.getItem(AI_PANEL_CLOSED_KEY) === "1"; } catch (e) {}
+    document.getElementById("board-body-grid").classList.toggle("ai-closed", closed);
+}
+
+function closeAiPanel() {
+    const grid = document.getElementById("board-body-grid");
+    grid.classList.add("ai-closed");
+    grid.classList.remove("ai-shown");
+    try { localStorage.setItem(AI_PANEL_CLOSED_KEY, "1"); } catch (e) {}
+}
+
+function openAiPanel() {
+    const grid = document.getElementById("board-body-grid");
+    grid.classList.remove("ai-closed");
+    grid.classList.add("ai-shown");
+    try { localStorage.removeItem(AI_PANEL_CLOSED_KEY); } catch (e) {}
+}
+
 function switchAiTab(tabName) {
+    // 슬라이드·퀴즈·요약 버튼이 탭을 부를 때 패널이 닫혀 있으면 결과가 안 보이므로 연다.
+    if (!document.querySelector(".ai-panel").offsetParent) openAiPanel();
     document.querySelectorAll(".ai-tab").forEach(t => {
         t.classList.toggle("active", t.dataset.tab === tabName);
     });

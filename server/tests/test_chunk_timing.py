@@ -16,6 +16,7 @@ from server.ai_service import (  # noqa: E402
     LEVEL_WINDOW_MS,
     SEGMENT_MAX_MS,
     SEGMENT_MIN_MS,
+    drop_repeated_pieces,
     find_crowded_segment,
     group_segments,
     parse_segment_transcript,
@@ -179,6 +180,42 @@ def test_spread_keeps_text_order():
 
 def test_spread_handles_empty():
     check("빈 입력은 그대로", spread_pieces([], FIVE_MIN) == [])
+
+
+# ---- drop_repeated_pieces (경계에 걸린 말을 두 번 받아쓴 경우) ---------------------
+
+def test_drops_repeated_neighbour():
+    """운영 보드 24 에서 실제로 나온 모양."""
+    pieces = [
+        (1124070, "그리고 선호도는 이미 다 주어져 있다."),
+        (1125988, "그리고 선호도는 이미 다 주어져 있다."),
+        (1126494, "대신 뭐 공동 순위 이런 거 없고 그냥 무조건 1 2 3 4 5 6 이런 선- 선호도 순위가 다 정해진 상황입니다."),
+        (1128502, "그 대신 뭐 공동 순위 이런 거 없고 그냥 무조건 1, 2, 3, 4, 5, 6 이런 선호도 순위가 다 정해진 상황입니다."),
+        (1133882, "그래서 우리가 해야 되는 거는 이 안정 매칭이 정확히 뭐를 어떻게 정의할 것이냐, 이거부터..."),
+        (1136646, "그래서 우리가 해야 되는 거는 이제 안정 매칭이 정확히 뭘 어떻게 정의할 것이냐 이거부터 해야 되고, 지금 말로 이렇게 표현되어 있는 건데 이거를 이제 정확하게 어 표기를 해야 됩니다."),
+        (1148982, "그다음에 이제 사실은 어 여러 방법이 없을 수도 있어요."),
+    ]
+    kept = drop_repeated_pieces(pieces)
+    texts = [t for _, t in kept]
+    check("중복이 한 번씩만 남는다", len(kept) == 4, str(texts))
+    check("긴 쪽을 남긴다", texts[2].endswith("표기를 해야 됩니다."), str(texts))
+    check("남긴 쪽 시각을 앞 조각으로 당긴다", kept[2][0] == 1133882, str(kept))
+    check("다음 말은 그대로", kept[3] == pieces[6], str(kept))
+
+
+def test_keeps_real_repetition_with_different_numbers():
+    pieces = [(0, "그러면은 3번 남자는 몇 등이에요?"), (2000, "4번 남자는 몇 등이에요?")]
+    check("숫자만 다른 말은 남긴다", drop_repeated_pieces(pieces) == pieces)
+
+
+def test_keeps_far_apart_repetition():
+    pieces = [(0, "그리고 선호도는 이미 다 주어져 있다."), (60_000, "그리고 선호도는 이미 다 주어져 있다.")]
+    check("멀리 떨어진 반복은 남긴다", drop_repeated_pieces(pieces) == pieces)
+
+
+def test_keeps_extra_tuple_fields():
+    pieces = [(0, "화자 1", "그리고 선호도는 이미 다 주어져 있다."), (1500, "화자 1", "그리고 선호도는 이미 다 주어져 있다. 네.")]
+    check("화자 칸을 유지한다", drop_repeated_pieces(pieces) == [(0, "화자 1", "그리고 선호도는 이미 다 주어져 있다. 네.")])
 
 
 for fn in list(globals().values()):

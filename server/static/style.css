@@ -1272,6 +1272,47 @@ body {
     border-bottom-color: var(--color-blue-500);
 }
 
+.ai-panel-close-btn {
+    flex: none;
+    align-self: center;
+    width: 32px;
+    height: 32px;
+    margin-left: 4px;
+    background: none;
+    border: none;
+    border-radius: 6px;
+    color: var(--color-dark-gray-500);
+    font-size: 16px;
+    cursor: pointer;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+}
+
+.ai-panel-close-btn:hover {
+    color: #ffffff;
+    background-color: var(--color-dark-gray-50);
+}
+
+/* AI 패널 닫기/열기.
+   ai-closed: 사용자가 X 로 닫음 (넓은 화면에서도 스크립트만).
+   ai-shown : 좁은 화면에서 사용자가 직접 연 상태. 좁은 화면은 기본이 스크립트만이다. */
+.board-body-grid.ai-closed {
+    grid-template-columns: 1fr;
+}
+
+.board-body-grid.ai-closed .ai-panel {
+    display: none;
+}
+
+.board-body-grid.ai-closed .script-panel {
+    border-right: none;
+}
+
+.board-body-grid:not(.ai-closed) #ai-panel-open-btn {
+    display: none;
+}
+
 .ai-tab-content {
     flex: 1;
     display: none;
@@ -2117,14 +2158,29 @@ body {
    세로(약 800px)부터는 오른쪽 AI 패널이 눌려서 아래로 내려야 쓸 만하다.
    ----------------------------------------- */
 @media (max-width: 1180px) {
-    /* AI 패널을 아래로 내리고 스크립트에 폭을 몰아준다 */
+    /* 창을 절반 크기로 줄이면 스크립트만 보여 준다.
+       AI 패널은 스크립트 머리의 열기 버튼으로 불러오면 아래에 붙는다. */
     .board-body-grid {
         grid-template-columns: 1fr;
-        grid-template-rows: minmax(0, 1.15fr) minmax(0, 1fr);
     }
 
     .script-panel {
         border-right: none;
+    }
+
+    .board-body-grid:not(.ai-shown) .ai-panel {
+        display: none;
+    }
+
+    .board-body-grid:not(.ai-shown) #ai-panel-open-btn {
+        display: inline-flex;
+    }
+
+    .board-body-grid.ai-shown {
+        grid-template-rows: minmax(0, 1.15fr) minmax(0, 1fr);
+    }
+
+    .board-body-grid.ai-shown .script-panel {
         border-bottom: 1px solid var(--border-color);
     }
 

@@ -35,6 +35,7 @@ from server.migrator import (
 from server.ai_service import (
     GEMINI_TIMEOUT_MS,
     api_keys,
+    drop_repeated_pieces,
     group_by_sentence,
     GLOSSARY_MAX_TERMS,
     load_glossary_terms,
@@ -652,7 +653,7 @@ def move_board_files_to_folder(board: Board, folder_name: str) -> bool:
     if WEB_DELETE_SYNC == "off":
         return False
 
-    sub = "" if folder_name == "기본 폴더" else sanitize_filename(folder_name)
+    sub = sanitize_filename(folder_name)
     moved = []
     for key, src in board_file_targets(board):
         if not os.path.isfile(src) or not is_managed_file(src):
@@ -830,8 +831,7 @@ def repair_stale_media_paths(db: Session) -> None:
                 # 보드가 영영 남는다. 지금 폴더 규칙으로 있어야 할 자리를 다시 계산해 두면
                 # 그 뒤로는 감시 스레드가 평소 규칙대로(연속 3회 안 보이면 휴지통) 처리한다.
                 folder_name = board.folder.name if board.folder else "기본 폴더"
-                sub_dir = "" if folder_name == "기본 폴더" else sanitize_filename(folder_name)
-                setattr(board, attr, os.path.join(AUDIO_DIR, sub_dir, name))
+                setattr(board, attr, os.path.join(AUDIO_DIR, sanitize_filename(folder_name), name))
                 board.audio_filename = name
                 rebased += 1
 
@@ -1709,15 +1709,20 @@ def get_board_detail(board_id: int, db: Session = Depends(get_db)):
     if not b:
         raise HTTPException(status_code=404, detail="보드를 찾을 수 없습니다.")
 
+    # 이미 저장된 보드에도 두 번 받아쓴 조각이 남아 있어서, 화면에 보내기 전에 걸러 낸다.
+    # (DB 는 그대로 두고, 사용자가 스크립트를 저장하면 걸러진 모습으로 덮어써진다)
+    kept = drop_repeated_pieces([
+        (s.start_time_ms or 0, s, strip_timestamps(s.content)) for s in b.segments
+    ])
     segments = []
-    for s in b.segments:
+    for start_ms, s, content in kept:
         segments.append({
             "id": s.id,
-            "start_time_ms": s.start_time_ms,
+            "start_time_ms": start_ms,
             "end_time_ms": s.end_time_ms,
-            "timestamp_str": s.timestamp_str,
+            "timestamp_str": s.timestamp_str if start_ms == s.start_time_ms else f"[{ms_to_timestamp(start_ms)}]",
             "speaker": s.speaker or "화자 1",
-            "content": strip_timestamps(s.content),
+            "content": content,
             "sequence": s.sequence
         })
 
@@ -2344,7 +2349,9 @@ def export_board(
         filename = f"{sanitize_filename(b.title)}.md"
     else:
         # 예전에 촘촘하게 저장된 보드도 내보낼 때는 1분 내외 문단으로 묶어 준다
-        pieces = [(s.start_time_ms or 0, s.speaker or "화자 1", strip_timestamps(s.content)) for s in b.segments]
+        pieces = drop_repeated_pieces(
+            [(s.start_time_ms or 0, s.speaker or "화자 1", strip_timestamps(s.content)) for s in b.segments]
+        )
         lines = []
         for start_ms, speaker, text in group_by_sentence(pieces):
             prefix = ""
