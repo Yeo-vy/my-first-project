@@ -1,12 +1,12 @@
 /* =========================================
-   다글로 (daglo) 완전 대체 스타일시트
+   yeovyVM 스타일시트
    ========================================= */
 
 :root {
     --font-sans: Pretendard Variable, Pretendard, -apple-system, BlinkMacSystemFont, system-ui, Roboto, Helvetica Neue, Segoe UI, Apple SD Gothic Neo, Noto Sans KR, Malgun Gothic, sans-serif;
     --font-mono: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
 
-    /* Daglo Exact Color Tokens */
+    /* yeovyVM Color Tokens */
     --color-red-100: #fde1dd;
     --color-red-400: #f16056;
     --color-red-500: #ef4b3f;
@@ -729,7 +729,7 @@ body {
 }
 
 /* -----------------------------------------
-   보드 상세 뷰 (Daglo 완벽 복제 다크 테마)
+   보드 상세 뷰 (yeovyVM 다크 테마)
    ----------------------------------------- */
 #board-detail-view {
     position: fixed;
@@ -1037,7 +1037,7 @@ body {
 }
 
 /* =========================================
-   Daglo Lexical Paragraphs & Subtitle Tokens
+   yeovyVM Lexical Paragraphs & Subtitle Tokens
    ========================================= */
 .lexical__paragraph {
     cursor: text;
@@ -1520,7 +1520,7 @@ body {
     border-color: var(--color-blue-600);
 }
 
-.daglo-chat-input-bar {
+.yeovyvm-chat-input-bar {
     display: flex;
     align-items: center;
     gap: 8px;
@@ -1531,7 +1531,7 @@ body {
     margin-top: 10px;
 }
 
-.daglo-chat-input-bar .chat-plus-btn {
+.yeovyvm-chat-input-bar .chat-plus-btn {
     background: none;
     border: none;
     color: var(--color-dark-gray-500);
@@ -1544,11 +1544,11 @@ body {
     transition: color 0.15s;
 }
 
-.daglo-chat-input-bar .chat-plus-btn:hover {
+.yeovyvm-chat-input-bar .chat-plus-btn:hover {
     color: #ffffff;
 }
 
-.daglo-chat-input-bar input {
+.yeovyvm-chat-input-bar input {
     flex: 1;
     background: transparent;
     border: none;
@@ -1558,11 +1558,11 @@ body {
     font-family: inherit;
 }
 
-.daglo-chat-input-bar input::placeholder {
+.yeovyvm-chat-input-bar input::placeholder {
     color: var(--color-dark-gray-500);
 }
 
-.daglo-chat-input-bar button#send-chat-btn {
+.yeovyvm-chat-input-bar button#send-chat-btn {
     width: 32px;
     height: 32px;
     border-radius: 50%;
@@ -1576,7 +1576,7 @@ body {
     transition: all 0.15s ease;
 }
 
-.daglo-chat-input-bar button#send-chat-btn:hover {
+.yeovyvm-chat-input-bar button#send-chat-btn:hover {
     background-color: var(--color-blue-500);
     color: #ffffff;
 }
@@ -1702,7 +1702,7 @@ body {
 }
 
 /* =========================================
-   하단 고정 오디오 플레이어 바 (Daglo 디자인)
+   하단 고정 오디오 플레이어 바 (yeovyVM 디자인)
    ========================================= */
 .bottom-audio-bar {
     position: fixed;

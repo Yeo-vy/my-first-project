@@ -1145,7 +1145,7 @@ def stream_board_chat(transcript: str, chat_history: List[Dict[str, str]], user_
         return
 
     system_instruction = f"""
-당신은 이 녹음/강의 보드의 전담 AI 비서 '다글로 챗봇'입니다.
+당신은 이 녹음/강의 보드의 전담 AI 비서 'yeovyVM 챗봇'입니다.
 아래 제공된 [전체 스크립트] 내용을 바탕으로 사용자의 질문에 정확하고 친절하게 답변하세요.
 
 규칙:

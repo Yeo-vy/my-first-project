@@ -363,7 +363,7 @@ class MainActivity : ComponentActivity() {
         AlertDialog.Builder(this)
             .setTitle("서버 주소")
             .setMessage(
-                "daglo 서버 주소를 넣어 주세요. http:// 는 빼도 됩니다.\n" +
+                "yeovyVM 서버 주소를 넣어 주세요. http:// 는 빼도 됩니다.\n" +
                     "서버 .env 에서 로그인 주소(LOGIN_PATH)를 바꿔 뒀다면 그 경로까지 붙여 적으세요."
             )
             .setView(box)
@@ -395,7 +395,7 @@ class MainActivity : ComponentActivity() {
             .setTitle("긴 녹음을 위해 한 가지만")
             .setMessage(
                 "화면을 끄고 몇 시간을 녹음하려면 이 앱을 배터리 최적화에서 빼 두는 것이 안전합니다.\n" +
-                    "다음 화면에서 daglo 를 '제한 없음(허용)' 으로 바꿔 주세요."
+                    "다음 화면에서 yeovyVM 을 '제한 없음(허용)' 으로 바꿔 주세요."
             )
             .setPositiveButton("설정 열기") { _, _ ->
                 try {

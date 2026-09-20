@@ -1,5 +1,5 @@
 /* =========================================
-   다글로 (daglo) 완전 대체 프론트엔드 로직
+   yeovyVM 프론트엔드 로직
    ========================================= */
 
 let currentFilter = "all"; // all, starred, processing, trash
@@ -1493,12 +1493,12 @@ function setupKeyboardShortcuts() {
 // -----------------------------------------
 // 6. AI 어시스턴트 패널
 // -----------------------------------------
-const AI_PANEL_CLOSED_KEY = "daglo.aiPanelClosed";
+const AI_PANEL_CLOSED_KEY = "yeovyvm.aiPanelClosed";
 
 // 넓은 화면에서 X 로 닫은 상태는 다음 방문에도 유지한다.
 function restoreAiPanelState() {
     let closed = false;
-    try { closed = localStorage.getItem(AI_PANEL_CLOSED_KEY) === "1"; } catch (e) {}
+    try { closed = (localStorage.getItem(AI_PANEL_CLOSED_KEY) === "1" || localStorage.getItem("daglo.aiPanelClosed") === "1"); } catch (e) {}
     document.getElementById("board-body-grid").classList.toggle("ai-closed", closed);
 }
 
@@ -2160,7 +2160,7 @@ let recordUploading = false;
 // 브라우저 녹음은 화면을 끄면 탭이 재워져 끊기지만, 앱은 알림을 띄운 포그라운드 서비스로
 // 녹음하므로 화면을 꺼도 몇 시간이든 이어진다. 그래서 앱 안에서는 아래 버튼들이 같은 모양
 // 그대로 네이티브 녹음을 부른다 (화면은 웹과 완전히 같다).
-const nativeRecorder = (typeof window !== "undefined" && window.DagloNative) ? window.DagloNative : null;
+const nativeRecorder = (typeof window !== "undefined" && (window.yeovyVMNative || window.DagloNative)) ? (window.yeovyVMNative || window.DagloNative) : null;
 let nativePollId = null;
 let nativeWasBusy = false;
 
@@ -2233,7 +2233,7 @@ function recordingUnavailableReason() {
     if (nativeRecorder) return null;
     if (!window.isSecureContext) {
         return "이 주소(http)에서는 브라우저가 마이크를 열어 주지 않습니다. " +
-            "태블릿에서는 daglo 앱의 [녹음] 을 쓰세요 — 앱은 화면을 꺼도 녹음이 이어집니다. " +
+            "태블릿에서는 yeovyVM 앱의 [녹음] 을 쓰세요 — 앱은 화면을 꺼도 녹음이 이어집니다. " +
             "이 화면에서 녹음하려면 서버 PC 에서 http://localhost 로 열거나 https 로 접속하세요.";
     }
     if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {

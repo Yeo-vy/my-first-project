@@ -48,7 +48,7 @@ from server.ai_service import (
     sanitize_filename,
 )
 
-app = FastAPI(title="다글로 (daglo) AI 풀스택 서버", version="3.0.0")
+app = FastAPI(title="yeovyVM 풀스택 서버", version="3.0.0")
 
 # 쿠키 인증을 쓰므로 와일드카드 오리진은 허용하지 않는다.
 # 외부 프론트엔드에서 접근해야 한다면 .env 에 ALLOWED_ORIGINS 를 쉼표로 나열한다.
@@ -115,13 +115,13 @@ async def auth_gate(request: Request, call_next):
     if path in PUBLIC_PATHS or request.method == "OPTIONS":
         return await call_next(request)
 
-    # 자동화 스크립트/외부 클라이언트는 DAGLO_API_TOKEN 헤더로 통과할 수 있다.
+    # 자동화 스크립트/외부 클라이언트는 YEOVYVM_API_TOKEN / DAGLO_API_TOKEN 헤더로 통과할 수 있다.
     if auth.api_token_ok(request):
         return await call_next(request)
 
     db = SessionLocal()
     try:
-        user = auth.resolve_session_user(db, request.cookies.get(auth.SESSION_COOKIE))
+        user = auth.resolve_session_user(db, auth.get_session_token(request))
     finally:
         db.close()
 
@@ -1350,7 +1350,7 @@ def ping():
 @app.get(LOGIN_STATUS_PATH)
 def auth_status(request: Request, db: Session = Depends(get_db)):
     """로그인 페이지가 '최초 설정'을 보여줄지 판단하는 데 쓴다."""
-    user = auth.resolve_session_user(db, request.cookies.get(auth.SESSION_COOKIE))
+    user = auth.resolve_session_user(db, auth.get_session_token(request))
     return {
         "setup_required": not auth.has_any_user(db),
         "authenticated": user is not None,
@@ -1395,7 +1395,7 @@ def auth_login(req: LoginRequest, request: Request, response: Response, db: Sess
 
 @app.post("/api/auth/logout")
 def auth_logout(request: Request, response: Response, db: Session = Depends(get_db)):
-    auth.destroy_session(db, request.cookies.get(auth.SESSION_COOKIE))
+    auth.destroy_session(db, auth.get_session_token(request))
     auth.clear_session_cookie(response)
     return {"success": True}
 
@@ -1419,7 +1419,7 @@ def auth_change_password(
     db.commit()
     # 비밀번호를 바꾸면 지금 쓰는 브라우저만 남기고 다른 세션을 모두 끊는다.
     auth.destroy_all_sessions_for_user(
-        db, user.id, keep_token=request.cookies.get(auth.SESSION_COOKIE)
+        db, user.id, keep_token=auth.get_session_token(request)
     )
     return {"success": True}
 
@@ -2480,13 +2480,13 @@ def serve_index():
     index_path = os.path.join(STATIC_DIR, "index.html")
     if os.path.exists(index_path):
         return FileResponse(index_path)
-    return {"message": "다글로 서버가 준비 중입니다."}
+    return {"message": "yeovyVM 서버가 준비 중입니다."}
 
 
 @app.get(LOGIN_PATH)
 def serve_login(request: Request, db: Session = Depends(get_db)):
     """이미 로그인한 상태면 곧바로 메인으로 보낸다."""
-    if auth.resolve_session_user(db, request.cookies.get(auth.SESSION_COOKIE)):
+    if auth.resolve_session_user(db, auth.get_session_token(request)):
         return RedirectResponse(url="/", status_code=302)
     login_path = os.path.join(STATIC_DIR, "login.html")
     if os.path.exists(login_path):
