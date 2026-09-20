@@ -15,6 +15,14 @@ import androidx.work.Worker
 import androidx.work.WorkerParameters
 import java.io.File
 
+/** 아직 못 올리고 기다리는 녹음 한 개 (오프라인 화면이 목록으로 보여 준다). */
+data class PendingUpload(
+    val folder: String,
+    val bytes: Long,
+    /** 녹음을 마친 시각 (epoch ms) */
+    val savedAt: Long
+)
+
 /**
  * 다 합쳐진 녹음 파일 하나를 서버로 올린다.
  *
@@ -49,7 +57,8 @@ class UploadWorker(context: Context, params: WorkerParameters) : Worker(context,
                 Result.success()
             }
             is ApiResult.Retryable -> {
-                // 서버가 꺼져 있거나 네트워크가 불안정한 경우. WorkManager 가 시간을 두고 다시 부른다.
+                // 서버가 꺼져 있거나 와이파이 밖인 경우. WorkManager 가 시간을 두고 다시 부른다
+                // (30초에서 시작해 두 배씩 늘어나므로, 강의 한 타임을 밖에서 보내도 따라잡는다).
                 if (runAttemptCount < MAX_ATTEMPTS) {
                     Result.retry()
                 } else {
@@ -103,7 +112,14 @@ class UploadWorker(context: Context, params: WorkerParameters) : Worker(context,
         private const val KEY_FOLDER = "folder"
         private const val CHANNEL_ID = "daglo_upload"
         private const val DEFAULT_FOLDER = "기본 폴더"
-        private const val MAX_ATTEMPTS = 5
+        /**
+         * 몇 번까지 스스로 다시 시도할지.
+         *
+         * 네트워크 조건을 걸지 않으므로 와이파이 밖에서도 시도가 소모된다. 그만큼 넉넉히 잡아
+         * 두면(30초부터 두 배씩 늘어 열 번이면 여덟 시간 남짓) 강의가 끝나고 돌아오는 동안 대개
+         * 저절로 올라간다. 다 써도 파일은 남고 [retryPending] 이 다시 집어넣는다.
+         */
+        private const val MAX_ATTEMPTS = 10
 
         fun enqueue(context: Context, file: File, folderName: String) {
             writeSidecar(file, folderName)
@@ -116,8 +132,14 @@ class UploadWorker(context: Context, params: WorkerParameters) : Worker(context,
                         .build()
                 )
                 .setConstraints(
+                    // 일부러 네트워크 조건을 걸지 않는다.
+                    //
+                    // NetworkType.CONNECTED 는 안드로이드 8 부터 '인터넷이 확인된' 연결만 인정한다.
+                    // 이 서버는 집·학교 공유기 안(LAN)에 있어서, 공유기가 인터넷에 못 나가는
+                    // 순간에도 서버에는 닿는다. 그때 조건을 걸어 두면 올릴 수 있는데도 영영
+                    // 기다린다. 그래서 그냥 시도해 보고, 실패하면 아래 Retryable 로 물러난다.
                     Constraints.Builder()
-                        .setRequiredNetworkType(NetworkType.CONNECTED)
+                        .setRequiredNetworkType(NetworkType.NOT_REQUIRED)
                         .build()
                 )
                 .build()
@@ -128,10 +150,23 @@ class UploadWorker(context: Context, params: WorkerParameters) : Worker(context,
         }
 
         /**
+         * 아직 못 올린 녹음들. 오래된 것부터 (올라가는 순서와 같다).
+         *
+         * 서버 없이 녹음하고 나면 파일이 여기 쌓이는데, 화면에 아무 흔적이 없으면 녹음이 사라진
+         * 줄 안다. 오프라인 화면이 이 목록을 그대로 보여 준다.
+         */
+        fun pending(context: Context): List<PendingUpload> =
+            (RecordingService.uploadsDir(context).listFiles() ?: emptyArray())
+                .filter { it.isFile && it.name.endsWith(".m4a") && it.length() > 0 }
+                .sortedBy { it.lastModified() }
+                .map { PendingUpload(readSidecar(it), it.length(), it.lastModified()) }
+
+        /**
          * 아직 못 올린 녹음을 다시 집어넣는다. 앱을 열 때마다 부른다.
          *
-         * 로그인이 풀린 채 녹음을 마쳤거나 서버가 오래 꺼져 있었다면 파일이 남아 있는데,
-         * 웹 화면에서 로그인한 뒤 앱을 다시 열면 여기서 자동으로 올라간다.
+         * 로그인이 풀린 채 녹음을 마쳤거나 서버 밖(와이파이가 없는 강의실)에서 녹음했다면 파일이
+         * 남아 있는데, 서버에 다시 닿는 곳에서 앱을 열면 여기서 자동으로 올라간다.
+         * 오프라인 화면의 '지금 올려 보기' 와 연결이 돌아온 순간에도 같은 길을 탄다.
          */
         fun retryPending(context: Context) {
             val files = RecordingService.uploadsDir(context).listFiles() ?: return

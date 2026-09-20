@@ -1,4 +1,4 @@
-"""다글로 서버 인증 모듈.
+"""yeovyVM 서버 인증 모듈.
 
 세션 쿠키 기반 로그인을 담당한다. 외부 의존성 없이 표준 라이브러리(hashlib/secrets)만
 사용하며, 비밀번호는 PBKDF2-HMAC-SHA256으로, 세션 토큰은 SHA-256 해시로 저장한다.
@@ -22,7 +22,7 @@ from server.models import User, UserSession
 # -----------------
 # 설정
 # -----------------
-SESSION_COOKIE = "daglo_session"
+SESSION_COOKIE = "yeovyvm_session"
 SESSION_DAYS = max(1, int(os.getenv("SESSION_DAYS", "14")))
 # 리버스 프록시 뒤 HTTPS로 서비스한다면 COOKIE_SECURE=1 로 켜는 것을 권장.
 COOKIE_SECURE = os.getenv("COOKIE_SECURE", "0").lower() in ("1", "true", "yes")
@@ -200,16 +200,21 @@ def set_session_cookie(response, token: str) -> None:
     )
 
 
+def get_session_token(request: Request) -> Optional[str]:
+    return request.cookies.get(SESSION_COOKIE) or request.cookies.get("daglo_session")
+
+
 def clear_session_cookie(response) -> None:
     response.delete_cookie(key=SESSION_COOKIE, path="/")
+    response.delete_cookie(key="daglo_session", path="/")
 
 
 # -----------------
 # 기계 클라이언트용 API 토큰
 # -----------------
 def api_token_ok(request: Request) -> bool:
-    """DAGLO_API_TOKEN 이 설정된 경우에만 헤더 토큰 인증을 허용한다."""
-    expected = os.getenv("DAGLO_API_TOKEN", "")
+    """YEOVYVM_API_TOKEN 또는 DAGLO_API_TOKEN 이 설정된 경우에만 헤더 토큰 인증을 허용한다."""
+    expected = os.getenv("YEOVYVM_API_TOKEN") or os.getenv("DAGLO_API_TOKEN", "")
     if not expected:
         return False
     provided = request.headers.get("x-api-key", "")
@@ -285,7 +290,7 @@ def user_to_dict(user: User) -> dict:
 # -----------------
 def get_current_user(request: Request, db: Session = Depends(get_db)) -> User:
     """미들웨어를 통과한 요청에서 로그인 사용자 객체를 꺼낸다."""
-    user = resolve_session_user(db, request.cookies.get(SESSION_COOKIE))
+    user = resolve_session_user(db, get_session_token(request))
     if user is None:
         raise HTTPException(status_code=401, detail="로그인이 필요합니다.")
     return user

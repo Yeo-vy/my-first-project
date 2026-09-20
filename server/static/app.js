@@ -1,5 +1,5 @@
 /* =========================================
-   다글로 (daglo) 완전 대체 프론트엔드 로직
+   yeovyVM 프론트엔드 로직
    ========================================= */
 
 let currentFilter = "all"; // all, starred, processing, trash
@@ -10,6 +10,15 @@ let boards = [];
 let selectedBoardIds = new Set();
 let isUserEditing = false;
 let isModified = false;
+// 다른 창으로 갔다 돌아오면 브라우저는 마지막으로 포커스돼 있던 문단에 focus 이벤트를 다시 쏜다.
+// 문단 focus 는 "그 문단부터 재생"이라 그대로 두면 재생이 그 문단 시작으로 되감긴다.
+// 창을 떠날 때 포커스돼 있던 요소를 기억해 두고, 돌아와서 같은 요소에 오는 focus 는 무시한다.
+let focusedBeforeWindowBlur = null;
+window.addEventListener("blur", () => { focusedBeforeWindowBlur = document.activeElement; });
+window.addEventListener("focus", () => {
+    // 창의 focus 가 먼저 오고 요소의 focus 가 뒤따르므로, 한 박자 늦게 지운다.
+    setTimeout(() => { focusedBeforeWindowBlur = null; }, 0);
+});
 let currentActiveBlock = null;
 let autoPollTimer = null;
 let isRefreshing = false;
@@ -188,6 +197,7 @@ async function submitPasswordChange() {
 // 초기화
 // -----------------------------------------
 document.addEventListener("DOMContentLoaded", async () => {
+    restoreAiPanelState();
     loadCurrentUser();
     setupAudioListeners();
     setupKeyboardShortcuts();
@@ -813,15 +823,8 @@ async function openBoardDetail(boardId, record = true) {
         document.getElementById("detail-folder-name").textContent = currentBoard.folder_name;
         document.getElementById("detail-title").textContent = currentBoard.title;
 
-        // 스타 버튼 상태
-        const starBtn = document.getElementById("detail-star-btn");
-        if (currentBoard.is_starred) {
-            starBtn.classList.add("starred");
-            starBtn.innerHTML = `<i class="fa-solid fa-star"></i>`;
-        } else {
-            starBtn.classList.remove("starred");
-            starBtn.innerHTML = `<i class="fa-regular fa-star"></i>`;
-        }
+        // 스타 상태 (상세 화면에서는 더보기 메뉴 안에 있다)
+        renderDetailStarState(currentBoard.is_starred);
 
         renderDetailStatus(currentBoard);
         renderKeywords(currentBoard.keywords || []);
@@ -848,21 +851,23 @@ async function openBoardDetail(boardId, record = true) {
     }
 }
 
+// 상세 화면의 스타 표시는 더보기 메뉴 항목 하나뿐이다.
+// 예전에는 헤더에 별도 버튼(detail-star-btn)이 있었는데, 그 버튼이 사라진 뒤에도
+// 여기서 계속 찾는 바람에 보드를 열 때마다 예외가 나서 스크립트가 그려지지 않았다.
+function renderDetailStarState(isStarred) {
+    const icon = document.getElementById("kebab-star-icon");
+    const text = document.getElementById("kebab-star-text");
+    if (icon) icon.className = isStarred ? "fa-solid fa-star" : "fa-regular fa-star";
+    if (text) text.textContent = isStarred ? "중요 보드 해제" : "중요 보드로 설정";
+}
+
 async function toggleDetailStar() {
     if (!currentBoard) return;
     const res = await fetch(`/api/boards/${currentBoard.id}/star`, { method: "POST" });
     const data = await res.json();
     currentBoard.is_starred = data.is_starred;
-    const starBtn = document.getElementById("detail-star-btn");
-    if (data.is_starred) {
-        starBtn.classList.add("starred");
-        starBtn.innerHTML = `<i class="fa-solid fa-star"></i>`;
-        showToast("중요 보드로 설정되었습니다.");
-    } else {
-        starBtn.classList.remove("starred");
-        starBtn.innerHTML = `<i class="fa-regular fa-star"></i>`;
-        showToast("중요 보드가 해제되었습니다.");
-    }
+    renderDetailStarState(data.is_starred);
+    showToast(data.is_starred ? "중요 보드로 설정되었습니다." : "중요 보드가 해제되었습니다.");
 }
 
 function renderKeywords(keywords) {
@@ -1060,11 +1065,15 @@ function renderTranscript(segments) {
             <div class="paragraph-text-body" contenteditable="true" spellcheck="false" title="누르면 이 부분부터 재생됩니다. 클릭하여 수정할 수 있습니다.">
                 ${sentencesHtml}
             </div>
-        `;
+        `
+            // 뼈대 markup 의 줄바꿈과 들여쓰기가 그대로 공백으로 그려지면
+            // 시각 줄과 본문 사이에 빈 줄이 생기고 본문 첫 줄이 밀려난다.
+            .replace(/>\n\s*</g, "><");
 
         const body = p.querySelector(".paragraph-text-body");
         body.addEventListener("focus", () => {
             isUserEditing = true;
+            if (body === focusedBeforeWindowBlur) return;
             playAtMs(startMs, false);
         });
         body.addEventListener("input", () => { isModified = true; });
@@ -1367,11 +1376,17 @@ function changeSpeed(val) {
     audioPlayer.playbackRate = parseFloat(val);
 }
 
+// 시각 표기는 서버(`ms_to_timestamp_str`)와 같은 규칙을 쓴다: 한 시간이 넘으면 시를 붙인다.
+// 붙이지 않으면 106분짜리 강의가 "106:24" 로 나오는데, 보기 나쁠 뿐 아니라 스크립트를 고쳐
+// 저장할 때 그 문자열이 timestamp_str 로 들어가고, 서버의 타임스탬프 정규식(시:분:초 두 자리)
+// 에 걸리지 않아 다시 읽을 때 시각을 잃는다.
 function formatTime(secs) {
-    const s = Math.floor(secs || 0);
-    const m = Math.floor(s / 60);
-    const remS = s % 60;
-    return `${String(m).padStart(2, '0')}:${String(remS).padStart(2, '0')}`;
+    const total = Math.max(0, Math.floor(secs || 0));
+    const h = Math.floor(total / 3600);
+    const m = Math.floor((total % 3600) / 60);
+    const s = total % 60;
+    const pad = (n) => String(n).padStart(2, '0');
+    return h > 0 ? `${pad(h)}:${pad(m)}:${pad(s)}` : `${pad(m)}:${pad(s)}`;
 }
 
 function copyParagraphText(btn) {
@@ -1478,7 +1493,32 @@ function setupKeyboardShortcuts() {
 // -----------------------------------------
 // 6. AI 어시스턴트 패널
 // -----------------------------------------
+const AI_PANEL_CLOSED_KEY = "yeovyvm.aiPanelClosed";
+
+// 넓은 화면에서 X 로 닫은 상태는 다음 방문에도 유지한다.
+function restoreAiPanelState() {
+    let closed = false;
+    try { closed = (localStorage.getItem(AI_PANEL_CLOSED_KEY) === "1" || localStorage.getItem("daglo.aiPanelClosed") === "1"); } catch (e) {}
+    document.getElementById("board-body-grid").classList.toggle("ai-closed", closed);
+}
+
+function closeAiPanel() {
+    const grid = document.getElementById("board-body-grid");
+    grid.classList.add("ai-closed");
+    grid.classList.remove("ai-shown");
+    try { localStorage.setItem(AI_PANEL_CLOSED_KEY, "1"); } catch (e) {}
+}
+
+function openAiPanel() {
+    const grid = document.getElementById("board-body-grid");
+    grid.classList.remove("ai-closed");
+    grid.classList.add("ai-shown");
+    try { localStorage.removeItem(AI_PANEL_CLOSED_KEY); } catch (e) {}
+}
+
 function switchAiTab(tabName) {
+    // 슬라이드·퀴즈·요약 버튼이 탭을 부를 때 패널이 닫혀 있으면 결과가 안 보이므로 연다.
+    if (!document.querySelector(".ai-panel").offsetParent) openAiPanel();
     document.querySelectorAll(".ai-tab").forEach(t => {
         t.classList.toggle("active", t.dataset.tab === tabName);
     });
@@ -2120,7 +2160,7 @@ let recordUploading = false;
 // 브라우저 녹음은 화면을 끄면 탭이 재워져 끊기지만, 앱은 알림을 띄운 포그라운드 서비스로
 // 녹음하므로 화면을 꺼도 몇 시간이든 이어진다. 그래서 앱 안에서는 아래 버튼들이 같은 모양
 // 그대로 네이티브 녹음을 부른다 (화면은 웹과 완전히 같다).
-const nativeRecorder = (typeof window !== "undefined" && window.DagloNative) ? window.DagloNative : null;
+const nativeRecorder = (typeof window !== "undefined" && (window.yeovyVMNative || window.DagloNative)) ? (window.yeovyVMNative || window.DagloNative) : null;
 let nativePollId = null;
 let nativeWasBusy = false;
 
@@ -2193,7 +2233,7 @@ function recordingUnavailableReason() {
     if (nativeRecorder) return null;
     if (!window.isSecureContext) {
         return "이 주소(http)에서는 브라우저가 마이크를 열어 주지 않습니다. " +
-            "태블릿에서는 daglo 앱의 [녹음] 을 쓰세요 — 앱은 화면을 꺼도 녹음이 이어집니다. " +
+            "태블릿에서는 yeovyVM 앱의 [녹음] 을 쓰세요 — 앱은 화면을 꺼도 녹음이 이어집니다. " +
             "이 화면에서 녹음하려면 서버 PC 에서 http://localhost 로 열거나 https 로 접속하세요.";
     }
     if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {

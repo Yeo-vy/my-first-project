@@ -1,12 +1,12 @@
 /* =========================================
-   다글로 (daglo) 완전 대체 스타일시트
+   yeovyVM 스타일시트
    ========================================= */
 
 :root {
     --font-sans: Pretendard Variable, Pretendard, -apple-system, BlinkMacSystemFont, system-ui, Roboto, Helvetica Neue, Segoe UI, Apple SD Gothic Neo, Noto Sans KR, Malgun Gothic, sans-serif;
     --font-mono: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
 
-    /* Daglo Exact Color Tokens */
+    /* yeovyVM Color Tokens */
     --color-red-100: #fde1dd;
     --color-red-400: #f16056;
     --color-red-500: #ef4b3f;
@@ -729,7 +729,7 @@ body {
 }
 
 /* -----------------------------------------
-   보드 상세 뷰 (Daglo 완벽 복제 다크 테마)
+   보드 상세 뷰 (yeovyVM 다크 테마)
    ----------------------------------------- */
 #board-detail-view {
     position: fixed;
@@ -1037,12 +1037,15 @@ body {
 }
 
 /* =========================================
-   Daglo Lexical Paragraphs & Subtitle Tokens
+   yeovyVM Lexical Paragraphs & Subtitle Tokens
    ========================================= */
 .lexical__paragraph {
     cursor: text;
     user-select: text;
-    white-space: pre-wrap;
+    /* 문단 뼈대에는 줄바꿈을 그대로 두지 않는다. 뼈대 markup 의 들여쓰기와 줄바꿈까지
+       공백으로 그려져서 문단마다 큰 빈 칸이 생기기 때문이다.
+       실제 본문(.paragraph-text-body)에서만 pre-wrap 을 되살린다. */
+    white-space: normal;
     word-break: break-word;
     direction: ltr;
     box-sizing: border-box;
@@ -1129,6 +1132,60 @@ body {
     transition: all 0.15s ease;
 }
 
+/* 스크립트 문단의 머리글과 도구 모음 배치.
+   이 markup 은 원본 사이트의 Tailwind 클래스 이름을 그대로 쓰는데 이 프로젝트에는
+   Tailwind 가 없다. 그래서 문단 안에서만 쓰이는 규칙을 여기에 직접 적어 둔다.
+   (이 규칙이 없으면 시각·화자·도구 모음이 세로로 쌓여서 문단마다 1000px 넘는
+    빈 공간이 생기고, 본문이 화면 밖으로 밀려나 자막이 없는 것처럼 보인다.) */
+.lexical__paragraph .flex { display: flex; }
+.lexical__paragraph .w-full { width: 100%; }
+.lexical__paragraph .justify-between { justify-content: space-between; }
+.lexical__paragraph .items-center { align-items: center; }
+.lexical__paragraph .gap-8-new { gap: 8px; }
+.lexical__paragraph .min-w-0 { min-width: 0; }
+.lexical__paragraph .shrink-0 { flex-shrink: 0; }
+.lexical__paragraph .mb-2 { margin-bottom: 0.5rem; }
+.lexical__paragraph .ml-2 { margin-left: 0.5rem; }
+.lexical__paragraph .whitespace-nowrap { white-space: nowrap; }
+.lexical__paragraph .cursor-pointer { cursor: pointer; }
+.lexical__paragraph .relative { position: relative; }
+.lexical__paragraph .absolute { position: absolute; }
+.lexical__paragraph .hidden { display: none; }
+.lexical__paragraph .hover\:underline:hover { text-decoration: underline; }
+.lexical__paragraph .hover\:text-fg-neutral:hover { color: var(--color-fg-neutral); }
+
+/* 문단 오른쪽 위에 떠 있는 도구 모음. 평소에는 감춰 두고,
+   문단에 마우스를 올렸을 때 위의 group-hover 규칙이 grid 로 펼친다. */
+.lexical__paragraph .bookmark {
+    position: absolute;
+    top: -0.75rem;
+    right: 0.5rem;
+    z-index: 5;
+    display: none;
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+    column-gap: 0.0625rem;
+    padding: 0.1875rem;
+    border: 1px solid var(--color-stroke-neutral-weak);
+    border-radius: 6px;
+    background-color: var(--color-bg-default);
+    color: var(--color-fg-neutral);
+}
+.lexical__paragraph .bookmark svg { width: 1.25rem; height: 1.25rem; }
+/* 어두운 화면 전용이므로 검은색으로 그려진 아이콘은 뒤집어서 쓴다. */
+.lexical__paragraph .dark\:invert { filter: invert(1); }
+
+/* 북마크가 걸린 문단에 표시하는 깃발 */
+.lexical__paragraph .bookmark-indicator {
+    position: absolute;
+    top: -0.5rem;
+    right: 1.5rem;
+}
+
+/* 본문은 직접 고칠 수 있는 영역이라 사용자가 넣은 줄바꿈을 그대로 보여 준다. */
+.lexical__paragraph .paragraph-text-body {
+    white-space: pre-wrap;
+}
+
 /* 개별 단어/음절 토큰 */
 [data-lexical-text="true"] {
     cursor: pointer;
@@ -1213,6 +1270,47 @@ body {
 .ai-tab.active {
     color: #ffffff;
     border-bottom-color: var(--color-blue-500);
+}
+
+.ai-panel-close-btn {
+    flex: none;
+    align-self: center;
+    width: 32px;
+    height: 32px;
+    margin-left: 4px;
+    background: none;
+    border: none;
+    border-radius: 6px;
+    color: var(--color-dark-gray-500);
+    font-size: 16px;
+    cursor: pointer;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+}
+
+.ai-panel-close-btn:hover {
+    color: #ffffff;
+    background-color: var(--color-dark-gray-50);
+}
+
+/* AI 패널 닫기/열기.
+   ai-closed: 사용자가 X 로 닫음 (넓은 화면에서도 스크립트만).
+   ai-shown : 좁은 화면에서 사용자가 직접 연 상태. 좁은 화면은 기본이 스크립트만이다. */
+.board-body-grid.ai-closed {
+    grid-template-columns: 1fr;
+}
+
+.board-body-grid.ai-closed .ai-panel {
+    display: none;
+}
+
+.board-body-grid.ai-closed .script-panel {
+    border-right: none;
+}
+
+.board-body-grid:not(.ai-closed) #ai-panel-open-btn {
+    display: none;
 }
 
 .ai-tab-content {
@@ -1422,7 +1520,7 @@ body {
     border-color: var(--color-blue-600);
 }
 
-.daglo-chat-input-bar {
+.yeovyvm-chat-input-bar {
     display: flex;
     align-items: center;
     gap: 8px;
@@ -1433,7 +1531,7 @@ body {
     margin-top: 10px;
 }
 
-.daglo-chat-input-bar .chat-plus-btn {
+.yeovyvm-chat-input-bar .chat-plus-btn {
     background: none;
     border: none;
     color: var(--color-dark-gray-500);
@@ -1446,11 +1544,11 @@ body {
     transition: color 0.15s;
 }
 
-.daglo-chat-input-bar .chat-plus-btn:hover {
+.yeovyvm-chat-input-bar .chat-plus-btn:hover {
     color: #ffffff;
 }
 
-.daglo-chat-input-bar input {
+.yeovyvm-chat-input-bar input {
     flex: 1;
     background: transparent;
     border: none;
@@ -1460,11 +1558,11 @@ body {
     font-family: inherit;
 }
 
-.daglo-chat-input-bar input::placeholder {
+.yeovyvm-chat-input-bar input::placeholder {
     color: var(--color-dark-gray-500);
 }
 
-.daglo-chat-input-bar button#send-chat-btn {
+.yeovyvm-chat-input-bar button#send-chat-btn {
     width: 32px;
     height: 32px;
     border-radius: 50%;
@@ -1478,7 +1576,7 @@ body {
     transition: all 0.15s ease;
 }
 
-.daglo-chat-input-bar button#send-chat-btn:hover {
+.yeovyvm-chat-input-bar button#send-chat-btn:hover {
     background-color: var(--color-blue-500);
     color: #ffffff;
 }
@@ -1604,7 +1702,7 @@ body {
 }
 
 /* =========================================
-   하단 고정 오디오 플레이어 바 (Daglo 디자인)
+   하단 고정 오디오 플레이어 바 (yeovyVM 디자인)
    ========================================= */
 .bottom-audio-bar {
     position: fixed;
@@ -2060,14 +2158,29 @@ body {
    세로(약 800px)부터는 오른쪽 AI 패널이 눌려서 아래로 내려야 쓸 만하다.
    ----------------------------------------- */
 @media (max-width: 1180px) {
-    /* AI 패널을 아래로 내리고 스크립트에 폭을 몰아준다 */
+    /* 창을 절반 크기로 줄이면 스크립트만 보여 준다.
+       AI 패널은 스크립트 머리의 열기 버튼으로 불러오면 아래에 붙는다. */
     .board-body-grid {
         grid-template-columns: 1fr;
-        grid-template-rows: minmax(0, 1.15fr) minmax(0, 1fr);
     }
 
     .script-panel {
         border-right: none;
+    }
+
+    .board-body-grid:not(.ai-shown) .ai-panel {
+        display: none;
+    }
+
+    .board-body-grid:not(.ai-shown) #ai-panel-open-btn {
+        display: inline-flex;
+    }
+
+    .board-body-grid.ai-shown {
+        grid-template-rows: minmax(0, 1.15fr) minmax(0, 1fr);
+    }
+
+    .board-body-grid.ai-shown .script-panel {
         border-bottom: 1px solid var(--border-color);
     }
 

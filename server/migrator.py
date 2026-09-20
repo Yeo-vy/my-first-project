@@ -9,7 +9,9 @@ BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 AUDIO_DIR = os.path.join(BASE_DIR, "녹음파일원본")
 RESULT_DIR = os.path.join(BASE_DIR, "강의 녹음 변환")
 
-TIMESTAMP_PATTERN = re.compile(r'\[(\d{1,2}:\d{2}(?::\d{2})?)\]')
+TIMESTAMP_PATTERN = re.compile(r'\[\s*(\d{1,2}:\d{2}(?::\d{2})?)\s*\]')
+# 대괄호 안쪽에 공백이 끼어도(`[ 00:12]`) 같은 타임스탬프로 본다.
+# 받아쓰기가 가끔 이렇게 내주는데, 못 알아보면 본문에 그대로 남아 자막에 찍힌다.
 
 # 받아쓰기는 사람이 허가해야 시작한다.
 # 새로 들어온 녹음은 WAITING(허가 대기)으로만 쌓이고, 웹에서 `받아쓰기 시작`을 눌러야

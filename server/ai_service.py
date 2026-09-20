@@ -2,12 +2,11 @@ import os
 import re
 import json
 import subprocess
-import tempfile
 import threading
 import time
-import uuid
 import datetime
-from typing import AsyncGenerator, List, Dict, Optional, Callable
+import difflib
+from typing import AsyncGenerator, List, Dict, Optional, Callable, TypeVar
 from dotenv import load_dotenv
 from google import genai
 from sqlalchemy.orm import Session
@@ -19,8 +18,31 @@ except ImportError:
 
 load_dotenv()
 
-api_keys = [k for k in [os.getenv("GEMINI_API_KEY"), os.getenv("GEMINI_API_KEY_PAID")] if k]
-active_key_index = 0
+# API 키는 12칸까지: GEMINI_API_KEY, GEMINI_API_KEY_2 ... GEMINI_API_KEY_12.
+# GEMINI_API_KEY_PAID 는 예전 이름이라 계속 읽되, 돈이 나가는 키라서 항상 맨 마지막에 쓴다.
+MAX_API_KEYS = 12
+API_KEY_ENV_NAMES = (
+    ["GEMINI_API_KEY"]
+    + [f"GEMINI_API_KEY_{n}" for n in range(2, MAX_API_KEYS + 1)]
+    + ["GEMINI_API_KEY_PAID"]
+)
+
+
+def load_api_keys() -> List[str]:
+    keys = []
+    for name in API_KEY_ENV_NAMES:
+        value = (os.getenv(name) or "").strip()
+        if value and value not in keys:
+            keys.append(value)
+    return keys
+
+
+api_keys = load_api_keys()
+
+T = TypeVar("T")
+
+# 되돌릴 때는 .env 에 GEMINI_MODEL=gemini-2.5-flash
+GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-3.6-flash")
 
 # google-genai SDK 는 httpx 클라이언트에 timeout=None 을 넣는다. 즉 기본값이 '무한 대기'다.
 # 응답이 끊기면 워커 스레드가 영원히 묶여 큐가 멈추고, 나머지 보드는 계속 '변환 대기 중'이 된다.
@@ -32,10 +54,47 @@ GEMINI_MAX_ATTEMPTS = max(1, int(os.getenv("GEMINI_MAX_ATTEMPTS", "3")))
 # ffmpeg 한 번 호출이 이 시간을 넘기면 강제 종료한다 (멈춘 ffmpeg 이 워커를 묶는 것을 막는다)
 FFMPEG_TIMEOUT_SEC = max(60, int(os.getenv("FFMPEG_TIMEOUT_SEC", "900")))
 
-CHUNK_LENGTH_MS = 20 * 60 * 1000   # 20분 청크
-OVERLAP_MS = 30 * 1000             # 30초 오버랩
-CHUNK_STEP_MS = CHUNK_LENGTH_MS - OVERLAP_MS
-TIMESTAMP_PATTERN = re.compile(r'\[(\d{1,2}:\d{2}(?::\d{2})?)\]')
+# 자막 시각은 받아쓰기에게 묻지 않고 우리가 잰다.
+#
+# 예전에는 몇 분짜리 청크를 통째로 보내고 [MM:SS] 를 찍어 달라고 했다. 그 시각은 받아쓰기가
+# 오디오에서 잰 값이 아니라 본문처럼 지어 쓴 값이라, 한 청크에 [00:00] 하나만 찍거나 20분치를
+# [00:00] [00:02] ... 로 눌러 찍는 일이 잦았다(시각 간격과 글자 수의 상관계수가 -0.11 이었다).
+# 그런 청크는 글자 수로 어림할 수밖에 없었다.
+#
+# 지금은 녹음을 말이 쉬는 자리에서 15~30초 조각으로 자르고, 조각마다 <<번호>> 를 붙여 요청
+# 하나에 묶어 보낸다. 조각의 시작 시각은 ffmpeg 로 자른 값이라 확실하고, 받아쓰기는 번호만 지키면
+# 된다. 실제로 보내 보니 시각은 못 지키던 모델이 번호는 조각 수만큼 정확히 붙였다.
+#
+# 조각 길이는 화면이 한 덩어리로 보여 주는 길이(app.js 의 DISPLAY_BLOCK_MS 20초)와
+# SRT 자막 한 줄의 상한(SUBTITLE_MAX_MS 30초)에 맞췄다.
+SEGMENT_MIN_MS = 15 * 1000
+SEGMENT_MAX_MS = 30 * 1000
+# 쉬는 자리를 찾을 때 음량을 재는 간격
+LEVEL_WINDOW_MS = 100
+# 음량이 0 인 창(-inf dB)을 대신할 값
+SILENCE_DB = -120.0
+LEVEL_LINE_PATTERN = re.compile(r"lavfi\.astats\.Overall\.RMS_level=(\S+)")
+
+# 요청 하나에 묶어 보내는 오디오 길이(분). 자막 시각의 정확도와는 상관이 없고, 호출 횟수와
+# 번호가 어긋난 요청 하나가 망가뜨리는 범위(그 요청은 글자 수로 편다)를 맞바꾼다.
+# 오디오를 요청에 바로 싣기 때문에 요청 한도(20MB)를 넘지 않도록 30분에서 막는다.
+CHUNK_MINUTES = min(30, max(1, int(os.getenv("STT_CHUNK_MINUTES", "10"))))
+CHUNK_LENGTH_MS = CHUNK_MINUTES * 60 * 1000
+# 조각 하나에 적힌 말하기 속도의 상한(초당 글자, 띄어쓰기 포함).
+#
+# 강의 녹음을 조각으로 받아써 보면 초당 5.6~7.4자다. 번호를 빼먹고 두 조각 분량을 한 번호에
+# 몰아 적으면 이 값을 넘는다. 그런 요청은 번호를 믿지 않는다.
+SEGMENT_MAX_CHARS_PER_SEC = 12.0
+# 속도를 잴 때 조각 길이를 이보다 짧게 치지 않는다 (몇 초짜리 마지막 조각에서 헛경보가 나지 않게)
+SEGMENT_PACE_MIN_SEC = 5.0
+SEGMENT_LABEL_PATTERN = re.compile(r"<<\s*(\d+)\s*>>")
+# 번호를 못 믿는 요청을 펼 때 조각 하나가 넘지 않을 길이
+SPREAD_PIECE_MAX_CHARS = 120
+# 덩어리를 문장으로 끊을 때 쓰는 자리 (문장부호 뒤)
+SENTENCE_SPLIT_PATTERN = re.compile(r'[^.!?…。\n]+[.!?…。]*\s*')
+TIMESTAMP_PATTERN = re.compile(r'\[\s*(\d{1,2}:\d{2}(?::\d{2})?)\s*\]')
+# 대괄호 안쪽에 공백이 끼어도(`[ 00:12]`) 같은 타임스탬프로 본다.
+# 받아쓰기가 가끔 이렇게 내주는데, 못 알아보면 본문에 그대로 남아 자막에 찍힌다.
 
 _ILLEGAL_FILENAME_CHARS = re.compile(r'[<>:"/\\|?*\x00-\x1f]')
 
@@ -183,21 +242,63 @@ def rewrite_container(audio_path: str) -> bool:
         return False
 
 
-def extract_chunk_to_mp3(audio_path: str, dest_path: str, start_ms: int, length_ms: int) -> None:
-    """원본에서 [start, start+length) 구간만 잘라 STT 용 mp3(16kHz 모노 32k)로 만든다."""
+def extract_segment_mp3(audio_path: str, start_ms: int, length_ms: int) -> bytes:
+    """원본에서 [start, start+length) 구간만 잘라 STT 용 mp3(16kHz 모노 32k) 바이트로 돌려준다.
+
+    30초 조각이 120KB 남짓이라 파일로 쓰지 않고 파이프로 받는다.
+    """
     cmd = [
-        ffmpeg_bin(), "-v", "error", "-y", "-nostdin",
+        ffmpeg_bin(), "-v", "error", "-nostdin",
         "-ss", f"{start_ms / 1000.0:.3f}",
         "-t", f"{length_ms / 1000.0:.3f}",
         "-i", audio_path,
         "-vn", "-ac", "1", "-ar", "16000",
         "-c:a", "libmp3lame", "-b:a", "32k",
-        dest_path,
+        "-f", "mp3", "-",
     ]
-    code, _out, err = run_tool(cmd, timeout=FFMPEG_TIMEOUT_SEC)
-    if code != 0 or not os.path.exists(dest_path) or os.path.getsize(dest_path) == 0:
-        start_label = f"{start_ms // 60000}분 지점"
+    code, out, err = run_tool(cmd, timeout=FFMPEG_TIMEOUT_SEC)
+    if code != 0 or not out:
+        start_label = f"{start_ms // 60000}분 {start_ms // 1000 % 60}초 지점"
         raise RuntimeError(f"오디오 구간 추출 실패 ({start_label}): {err or f'ffmpeg 종료코드 {code}'}")
+    return out
+
+
+def measure_levels_db(audio_path: str) -> List[float]:
+    """녹음 전체의 음량을 LEVEL_WINDOW_MS 마다 잰다 (dBFS).
+
+    쉬는 자리를 찾는 데 쓴다. 무음 기준값(-35dB 같은)을 정해 두면 교실 소음이나 마이크 감도에
+    따라 쉼을 하나도 못 찾기도 하므로, 기준값 없이 구간마다 가장 조용한 곳을 고르도록 음량 자체를
+    받아 둔다. ffmpeg 안에서 8kHz 모노로 줄여 재므로 67분짜리가 3초 남짓에 끝나고, 파이썬에 남는
+    것은 숫자 목록뿐이다. 못 재면 빈 목록을 돌려주고, 그때는 조각을 일정한 길이로 자른다.
+    """
+    samples_per_window = 8000 * LEVEL_WINDOW_MS // 1000
+    code, _out, err = run_tool(
+        [
+            ffmpeg_bin(), "-hide_banner", "-nostats", "-nostdin", "-v", "info",
+            "-i", audio_path, "-vn",
+            "-af", (
+                "aformat=channel_layouts=mono,aresample=8000,"
+                f"asetnsamples=n={samples_per_window}:p=0,"
+                "astats=metadata=1:reset=1:measure_overall=RMS_level:measure_perchannel=none,"
+                # 파일(file=)로 받으면 윈도우 경로의 콜론을 필터 문법에 맞춰 이스케이프해야 한다.
+                # 로그(stderr)로 받는다.
+                "ametadata=mode=print:key=lavfi.astats.Overall.RMS_level"
+            ),
+            "-f", "null", "-",
+        ],
+        timeout=FFMPEG_TIMEOUT_SEC,
+    )
+    if code != 0:
+        print(f"[AI-WARN] 음량을 재지 못해 조각을 일정한 길이로 자릅니다: {err[-300:]}", flush=True)
+        return []
+
+    levels = []
+    for value in LEVEL_LINE_PATTERN.findall(err):
+        try:
+            levels.append(max(SILENCE_DB, float(value)))    # -inf(완전한 무음)는 SILENCE_DB 로
+        except ValueError:
+            levels.append(SILENCE_DB)
+    return levels
 
 def make_client(api_key: str) -> genai.Client:
     """타임아웃과 자동 재시도를 건 Gemini 클라이언트를 만든다."""
@@ -206,7 +307,12 @@ def make_client(api_key: str) -> genai.Client:
             api_key=api_key,
             http_options={
                 "timeout": GEMINI_TIMEOUT_MS,
-                "retry_options": {"attempts": 3, "initial_delay": 2.0, "max_delay": 30.0},
+                # SDK 기본값은 429 도 같은 키로 세 번 다시 두드린다. 한도에 걸린 키는
+                # 기다려도 안 풀리는 경우가 많으니 곧장 올려 보내 ApiKeyPool 이 다음 키로 넘기게 한다.
+                "retry_options": {
+                    "attempts": 3, "initial_delay": 2.0, "max_delay": 30.0,
+                    "http_status_codes": [408, 500, 502, 503, 504],
+                },
             },
         )
     except Exception:
@@ -215,11 +321,6 @@ def make_client(api_key: str) -> genai.Client:
             return genai.Client(api_key=api_key, http_options={"timeout": GEMINI_TIMEOUT_MS})
         except Exception:
             return genai.Client(api_key=api_key)
-
-def get_client() -> Optional[genai.Client]:
-    if not api_keys:
-        return None
-    return make_client(api_keys[active_key_index])
 
 def is_quota_error(err: Exception) -> bool:
     msg = str(err).upper()
@@ -235,6 +336,110 @@ def is_transient_error(err: Exception) -> bool:
     """다시 시도하면 될 법한 일시적 오류인지 판별한다."""
     msg = f"{type(err).__name__} {err}".upper()
     return any(m in msg for m in _TRANSIENT_MARKERS)
+
+# 한도(429)에 걸린 키를 쉬게 하는 시간(초). 분당 한도는 금방 풀리지만 하루 한도는 태평양 시간
+# 자정에야 풀리므로, 그동안 같은 키를 요청마다 먼저 두드리지 않도록 길게 쉬게 한다.
+# 쉬는 키도 버리지는 않는다. 쉬지 않는 키를 다 써 본 뒤에는 빨리 풀리는 순으로 다시 시도한다.
+KEY_REST_SEC = 60
+KEY_REST_DAILY_SEC = 3600
+
+# 429 응답에 실려 오는 대기 시간. `'retryDelay': '37s'` 또는 `Please retry in 37.1s`
+_RETRY_DELAY_RE = re.compile(r"retry(?:Delay['\"]?\s*:\s*['\"]?|\s+in\s+)(\d+(?:\.\d+)?)s", re.IGNORECASE)
+
+def quota_rest_seconds(err: Exception) -> float:
+    msg = str(err)
+    # 하루 한도 응답에도 retryDelay 가 몇십 초로 찍혀 오므로 이것부터 본다.
+    if "PERDAY" in msg.upper():
+        return KEY_REST_DAILY_SEC
+    match = _RETRY_DELAY_RE.search(msg)
+    if match:
+        return min(KEY_REST_DAILY_SEC, max(10.0, float(match.group(1))))
+    return KEY_REST_SEC
+
+class ApiKeyPool:
+    """API 키 여러 개를 나눠 쓴다.
+
+    항상 앞 칸 키부터 쓰고, 한도(429)에 걸린 키는 잠시 쉬게 한 뒤 다음 칸으로 넘어간다.
+    쉬는 시간이 끝나면 다시 앞 칸부터 쓰므로, 무료 키가 풀리면 맨 뒤의 유료 키에서 저절로 돌아온다.
+    STT 워커 여러 개가 함께 쓰므로 상태는 잠금 안에서만 바꾼다.
+    """
+
+    def __init__(self, keys: List[str]):
+        self.keys = keys
+        self._lock = threading.Lock()
+        self._resting_until = [0.0] * len(keys)
+        self._last_used: Optional[int] = None
+
+    def order(self) -> List[int]:
+        """이번 요청에서 시도할 키 순서: 쉬지 않는 키를 앞 칸부터, 그다음 쉬는 키를 빨리 풀리는 순으로."""
+        now = time.monotonic()
+        with self._lock:
+            ready = [i for i in range(len(self.keys)) if self._resting_until[i] <= now]
+            resting = sorted(
+                (i for i in range(len(self.keys)) if self._resting_until[i] > now),
+                key=lambda i: self._resting_until[i],
+            )
+        return ready + resting
+
+    def rest(self, index: int, err: Exception) -> None:
+        seconds = quota_rest_seconds(err)
+        with self._lock:
+            self._resting_until[index] = time.monotonic() + seconds
+        print(
+            f"[AI-KEY] API 키 {index + 1}/{len(self.keys)} 한도 초과 → {int(seconds)}초 쉬게 하고 다음 키로 넘어갑니다.",
+            flush=True,
+        )
+
+    def mark_used(self, index: int) -> None:
+        with self._lock:
+            changed = self._last_used != index
+            self._last_used = index
+        if changed and len(self.keys) > 1:
+            print(f"[AI-KEY] API 키 {index + 1}/{len(self.keys)} 로 응답을 받았습니다.", flush=True)
+
+api_key_pool = ApiKeyPool(api_keys)
+
+def all_keys_exhausted_message(last_error: Optional[Exception]) -> str:
+    return f"API 키 {len(api_keys)}개가 모두 한도에 걸렸습니다. 잠시 뒤 다시 시도하세요. ({last_error})"
+
+def run_with_api_keys(label: str, work: Callable[[genai.Client], T]) -> T:
+    """work(client) 를 부르고, 키가 한도에 걸리면 다음 키로 자동으로 넘어간다.
+
+    - 429/할당량 오류 → 그 키를 쉬게 하고 다음 키로 넘어간다
+    - 5xx·타임아웃·연결 끊김 같은 일시적 오류 → 같은 키로 백오프 재시도한다
+      (한 번 삐끗했다고 보드 전체를 실패시키지 않는다)
+    - 그 밖의 오류 → 키를 바꿔도 결과가 같으므로 그대로 올린다
+    """
+    if not api_keys:
+        raise RuntimeError("GEMINI_API_KEY가 설정되지 않았습니다.")
+
+    last_error = None
+    for key_idx in api_key_pool.order():
+        client = make_client(api_keys[key_idx])
+        attempt = 0
+        while True:
+            try:
+                result = work(client)
+                api_key_pool.mark_used(key_idx)
+                return result
+            except Exception as err:
+                last_error = err
+                if is_quota_error(err):
+                    api_key_pool.rest(key_idx, err)
+                    break
+                attempt += 1
+                if attempt < GEMINI_MAX_ATTEMPTS and is_transient_error(err):
+                    delay = min(30, 2 ** attempt)
+                    print(
+                        f"[AI-RETRY] {label} 일시적 오류로 {delay}초 뒤 재시도 "
+                        f"({attempt}/{GEMINI_MAX_ATTEMPTS - 1}): {err}",
+                        flush=True,
+                    )
+                    time.sleep(delay)
+                    continue
+                raise
+
+    raise RuntimeError(all_keys_exhausted_message(last_error)) from last_error
 
 def timestamp_to_seconds(ts_str: str) -> int:
     parts = list(map(int, ts_str.split(':')))
@@ -307,6 +512,77 @@ def group_by_sentence(items, target_ms: int = None, max_ms: int = None) -> list:
     return groups
 
 
+# 받아쓰기가 조각 경계에 걸린 말을 앞뒤 조각 양쪽에 적는 일이 있다. 그러면 화면에
+# "그리고 선호도는 이미 다 주어져 있다." 가 2초 간격으로 두 번 찍힌다.
+# 운영 DB 11개 보드에서 이런 짝을 찾아 기준을 맞췄다: 6초 안에, 두 칸 안쪽 이웃끼리만 본다.
+REPEAT_WINDOW_MS = 6000
+REPEAT_LOOKAHEAD = 2
+REPEAT_MIN_CHARS = 6
+REPEAT_SIMILAR_RATIO = 0.85
+# 짧은 쪽이 긴 쪽 안에 4글자 이상 이어진 덩어리로 이만큼 들어 있으면 같은 말로 본다
+REPEAT_COVER_RATIO = 0.9
+REPEAT_COVER_BLOCK = 4
+_REPEAT_NORMALIZE = re.compile(r"[^\w]+")
+_DIGITS = re.compile(r"\d+")
+
+
+def is_repeated_text(a: str, b: str) -> bool:
+    """두 조각이 같은 말을 두 번 받아쓴 것인지. 띄어쓰기·문장부호 차이는 무시한다.
+
+    "3번 남자는 몇 등이에요?" / "4번 남자는 몇 등이에요?" 처럼 숫자만 다른 말은 강의에서
+    실제로 이어서 하는 말이라 남긴다.
+    """
+    na, nb = _REPEAT_NORMALIZE.sub("", a or ""), _REPEAT_NORMALIZE.sub("", b or "")
+    short, long_ = sorted((na, nb), key=len)
+    if len(short) < REPEAT_MIN_CHARS:
+        return False
+    if set(_DIGITS.findall(short)) - set(_DIGITS.findall(long_)):
+        return False
+    matcher = difflib.SequenceMatcher(None, na, nb, autojunk=False)
+    if matcher.ratio() >= REPEAT_SIMILAR_RATIO:
+        return True
+    covered = sum(m.size for m in matcher.get_matching_blocks() if m.size >= REPEAT_COVER_BLOCK)
+    return covered / len(short) >= REPEAT_COVER_RATIO
+
+
+def drop_repeated_pieces(pieces: List[tuple]) -> List[tuple]:
+    """같은 말을 두 번 받아쓴 이웃 조각 중 짧은 쪽을 버린다.
+
+    pieces: [(start_ms, ..., text), ...]  (시간순, 첫 칸이 시각이고 마지막 칸이 본문)
+    바로 옆 조각을 버리고 남긴 긴 쪽이 뒤에 있으면, 그 말은 앞 조각 시각에 시작했으므로
+    남긴 쪽 시각을 앞으로 당긴다.
+    """
+    starts = [p[0] or 0 for p in pieces]
+    texts = [p[-1] for p in pieces]
+    dropped = set()
+    moved_start = {}
+
+    for i in range(len(pieces)):
+        if i in dropped:
+            continue
+        neighbours = [j for j in range(i + 1, len(pieces)) if j not in dropped][:REPEAT_LOOKAHEAD]
+        for position, j in enumerate(neighbours):
+            if starts[j] - starts[i] > REPEAT_WINDOW_MS:
+                break
+            if not is_repeated_text(texts[i], texts[j]):
+                continue
+            if len(texts[i].strip()) <= len(texts[j].strip()):
+                dropped.add(i)
+                if position == 0:
+                    moved_start[j] = min(moved_start.get(i, starts[i]), starts[j])
+                break
+            dropped.add(j)
+
+    result = []
+    for i, piece in enumerate(pieces):
+        if i in dropped:
+            continue
+        if i in moved_start:
+            piece = (moved_start[i],) + tuple(piece[1:])
+        result.append(piece)
+    return result
+
+
 def resolve_end_times(start_ms_list: List[int], total_ms: int = 0) -> List[int]:
     """세그먼트 시작 시각들로 서로 겹치지 않는 종료 시각을 계산한다.
 
@@ -328,119 +604,179 @@ def resolve_end_times(start_ms_list: List[int], total_ms: int = 0) -> List[int]:
     return ends
 
 
-def offset_timestamps(text: str, offset_seconds: int) -> str:
-    if offset_seconds == 0:
-        return text
+def plan_segments(levels_db: List[float], total_ms: int) -> List[tuple]:
+    """녹음을 `(시작ms, 끝ms)` 조각들로 나눈다.
 
-    def repl(match):
-        secs = timestamp_to_seconds(match.group(1))
-        total_secs = secs + offset_seconds
-        h = total_secs // 3600
-        m = (total_secs % 3600) // 60
-        s = total_secs % 60
-        if h > 0:
-            return f"[{h:02d}:{m:02d}:{s:02d}]"
-        else:
-            return f"[{m:02d}:{s:02d}]"
-
-    return re.sub(TIMESTAMP_PATTERN, repl, text)
-
-def strip_overlap(text: str, boundary_seconds: int) -> str:
-    kept_lines = []
-    keep = False
-    for raw_line in text.splitlines():
-        line = raw_line.strip()
-        if not line:
-            continue
-        match = TIMESTAMP_PATTERN.search(line)
-        if match:
-            keep = timestamp_to_seconds(match.group(1)) >= boundary_seconds
-        if keep:
-            kept_lines.append(line)
-    return "\n".join(kept_lines)
-
-def transcribe_chunk_with_fallback(temp_chunk_path: str, display_name: str, prompt_text: str) -> str:
-    """청크 하나를 STT 한다.
-
-    - 429/할당량 오류 → 다음 API 키로 넘어간다
-    - 5xx·타임아웃·연결 끊김 같은 일시적 오류 → 같은 키로 백오프 재시도한다
-      (한 번 삐끗했다고 보드 전체를 실패시키지 않는다)
+    조각은 SEGMENT_MIN_MS~SEGMENT_MAX_MS 길이이고, 그 범위 안에서 가장 조용한 자리에서 자른다.
+    조용한 정도는 앞뒤 창까지 세 창 가운데 가장 시끄러운 값으로 본다. 말 사이의 아주 짧은 틈
+    하나를 쉼으로 오인해 낱말 한가운데를 자르지 않게 하려는 것이다.
+    음량을 못 쟀거나(빈 목록) 음량이 녹음보다 짧게 끝나면 그 자리는 최대 길이에서 자른다.
     """
-    global active_key_index
-    if not api_keys:
-        raise RuntimeError("GEMINI_API_KEY가 설정되지 않았습니다.")
+    if total_ms <= 0:
+        return []
 
-    last_error = None
-    key_idx = active_key_index
-    attempt = 0
+    def loudness_around(i: int) -> float:
+        return max(levels_db[i - 1:i + 2])
 
-    while key_idx < len(api_keys):
-        if key_idx != active_key_index:
-            active_key_index = key_idx
-            print(f"[AI-KEY] Switching to API key ({key_idx + 1}/{len(api_keys)})...", flush=True)
+    cuts = [0]
+    while total_ms - cuts[-1] > SEGMENT_MAX_MS:
+        start = cuts[-1]
+        first = max(1, (start + SEGMENT_MIN_MS) // LEVEL_WINDOW_MS)
+        last = min((start + SEGMENT_MAX_MS) // LEVEL_WINDOW_MS, len(levels_db) - 1)
+        if first < last:
+            quietest = min(range(first, last), key=loudness_around)
+            cuts.append(quietest * LEVEL_WINDOW_MS + LEVEL_WINDOW_MS // 2)
+        else:
+            cuts.append(start + SEGMENT_MAX_MS)
+    cuts.append(total_ms)
+    return list(zip(cuts, cuts[1:]))
 
-        client = make_client(api_keys[key_idx])
-        uploaded_file = None
-        try:
-            uploaded_file = client.files.upload(
-                file=temp_chunk_path,
-                config={"display_name": display_name}
-            )
 
-            response = client.models.generate_content(
-                model="gemini-2.5-flash",
-                contents=[uploaded_file, prompt_text]
-            )
+def group_segments(segments: List[tuple], batch_ms: int) -> List[List[tuple]]:
+    """조각들을 요청 하나에 실을 묶음으로 나눈다. 묶음 하나는 batch_ms 를 넘지 않는다
+    (조각 하나가 그보다 길면 그 조각 혼자 한 묶음이 된다)."""
+    batches: List[List[tuple]] = []
+    for seg in segments:
+        if batches and seg[1] - batches[-1][0][0] <= batch_ms:
+            batches[-1].append(seg)
+        else:
+            batches.append([seg])
+    return batches
 
-            candidate = response.candidates[0] if response.candidates else None
-            finish_reason = candidate.finish_reason if candidate else None
 
-            parts = []
-            if candidate and candidate.content and candidate.content.parts:
-                parts = [p.text for p in candidate.content.parts if p.text]
-            transcript_text = "".join(parts).strip()
+def parse_segment_transcript(text: str, count: int) -> Optional[List[str]]:
+    """`<<번호>> 본문` 꼴 응답을 조각별 본문 목록(길이 count)으로 만든다. 번호를 못 믿으면 None.
 
-            if not transcript_text or finish_reason not in (None, genai.types.FinishReason.STOP):
-                raise RuntimeError(f"응답이 비정상 종료되었습니다 (finish_reason={finish_reason})")
+    번호가 빠진 조각은 빈 본문이다 (말이 없는 조각은 번호를 건너뛰기도 한다).
+    번호가 되감기거나 겹치거나 조각 수를 넘거나, 첫 번호 앞에 글이 있으면 못 믿는다.
+    본문에 섞여 온 [MM:SS] 는 걷어낸다.
+    """
+    from server.migrator import strip_timestamps
 
-            return transcript_text
-        except Exception as err:
-            last_error = err
-            if is_quota_error(err):
-                key_idx += 1
-                attempt = 0
-                continue
-            attempt += 1
-            if attempt < GEMINI_MAX_ATTEMPTS and is_transient_error(err):
-                delay = min(30, 2 ** attempt)
-                print(
-                    f"[AI-RETRY] {display_name} 일시적 오류로 {delay}초 뒤 재시도 "
-                    f"({attempt}/{GEMINI_MAX_ATTEMPTS - 1}): {err}",
-                    flush=True,
-                )
-                time.sleep(delay)
-                continue
-            raise
-        finally:
-            if uploaded_file is not None:
-                try:
-                    client.files.delete(name=uploaded_file.name)
-                except Exception:
-                    pass
+    labels = list(SEGMENT_LABEL_PATTERN.finditer(text or ""))
+    if not labels or text[:labels[0].start()].strip():
+        return None
 
-    raise last_error
+    texts = [""] * count
+    previous = 0
+    for label, following in zip(labels, labels[1:] + [None]):
+        number = int(label.group(1))
+        if not previous < number <= count:
+            return None
+        body = text[label.end():following.start() if following else len(text)]
+        texts[number - 1] = re.sub(r"\s+", " ", strip_timestamps(body)).strip()
+        previous = number
+    return texts
+
+
+def find_crowded_segment(texts: List[str], segments: List[tuple]) -> Optional[int]:
+    """사람이 말할 수 없는 속도만큼 본문이 몰린 조각의 위치. 없으면 None.
+
+    받아쓰기가 번호를 몇 개 건너뛰고 그 말을 한 번호에 몰아 적으면, 번호 순서는 멀쩡해도
+    시각이 그만큼 앞당겨진다. 순서 검사로는 못 잡으므로 글자 수로 잡는다.
+    """
+    for i, (text, (start_ms, end_ms)) in enumerate(zip(texts, segments)):
+        seconds = max((end_ms - start_ms) / 1000, SEGMENT_PACE_MIN_SEC)
+        if len(text) > seconds * SEGMENT_MAX_CHARS_PER_SEC:
+            return i
+    return None
+
+
+def split_text_for_spreading(text: str) -> List[str]:
+    """긴 덩어리를 문장 단위로 쪼갠다 (마침표가 없으면 글자 수로라도 끊는다).
+
+    번호를 못 믿는 요청은 몇 분치 말이 한 덩어리로 남는다. 덩어리인 채로는 어디에 펴 놓아도
+    한 점에 뭉치므로, 펴기 전에 먼저 쪼갠다.
+    """
+    parts = [p.strip() for p in SENTENCE_SPLIT_PATTERN.findall(text)]
+    parts = [p for p in parts if p]
+    if not parts:
+        stripped = text.strip()
+        parts = [stripped] if stripped else []
+
+    out = []
+    for part in parts:
+        # 받아쓰기가 마침표를 거의 안 찍어 준 구간이 있다. 그때는 띄어쓰기에서 끊는다.
+        while len(part) > SPREAD_PIECE_MAX_CHARS:
+            cut = part.rfind(" ", 0, SPREAD_PIECE_MAX_CHARS)
+            if cut <= 0:
+                cut = SPREAD_PIECE_MAX_CHARS
+            head, part = part[:cut].strip(), part[cut:].strip()
+            if head:
+                out.append(head)
+        if part:
+            out.append(part)
+    return out
+
+
+def spread_pieces(pieces: List[tuple], span_ms: int) -> List[tuple]:
+    """조각들을 `[0, span_ms)` 안에 글자 수에 비례해 고르게 편다.
+
+    말하는 속도가 일정하다고 치는 셈이라 정확하지는 않지만, 요청 하나(몇 분) 안에서의
+    어림이라 오차도 그 안에 갇힌다. 몇 분치가 한 시각에 뭉쳐 있는 것보다는 훨씬 낫다.
+    """
+    fragments = []
+    for _ms, text in pieces:
+        fragments.extend(split_text_for_spreading(text))
+
+    total_chars = sum(len(t) for t in fragments)
+    if not fragments or total_chars <= 0 or span_ms <= 0:
+        return pieces
+
+    spread = []
+    before = 0
+    for text in fragments:
+        spread.append((int(span_ms * before / total_chars), text))
+        before += len(text)
+    return spread
+
+
+def transcribe_segments(audio_path: str, segments: List[tuple], label: str, prompt_text: str) -> str:
+    """조각 여러 개를 요청 하나로 받아쓴다. 조각마다 앞에 `<<번호>>` 를 붙여 보낸다.
+
+    오디오는 파일로 올리지 않고 요청에 바로 싣는다. 16kHz 모노 32k mp3 라 10분이 2.4MB 로 요청
+    한도에 한참 못 미치고, 올린 파일은 그 키의 프로젝트에만 보여서 키를 바꿀 때마다 다시 올려야
+    했던 일도 없어진다. 키 전환과 재시도는 run_with_api_keys 가 맡는다.
+    """
+    contents: list = [prompt_text]
+    for number, (start_ms, end_ms) in enumerate(segments, 1):
+        contents.append(f"<<{number}>>")
+        contents.append(genai.types.Part.from_bytes(
+            data=extract_segment_mp3(audio_path, start_ms, end_ms - start_ms),
+            mime_type="audio/mp3",
+        ))
+
+    def work(client: genai.Client) -> str:
+        response = client.models.generate_content(model=GEMINI_MODEL, contents=contents)
+
+        candidate = response.candidates[0] if response.candidates else None
+        finish_reason = candidate.finish_reason if candidate else None
+
+        parts = []
+        if candidate and candidate.content and candidate.content.parts:
+            parts = [p.text for p in candidate.content.parts if p.text]
+        transcript_text = "".join(parts).strip()
+
+        if not transcript_text or finish_reason not in (None, genai.types.FinishReason.STOP):
+            raise RuntimeError(f"응답이 비정상 종료되었습니다 (finish_reason={finish_reason})")
+
+        return transcript_text
+
+    return run_with_api_keys(label, work)
 
 # 프롬프트에 넣는 용어 개수 상한. 너무 많이 넣으면 정작 본문 받아쓰기 품질이 떨어진다.
 GLOSSARY_MAX_TERMS = 200
 
+# 규칙 번호는 build_glossary_prompt 가 5번을 이어 붙이므로 4번까지만 쓴다.
 STT_BASE_PROMPT = """
-이 오디오 파일을 처음부터 끝까지 빠짐없이 텍스트로 받아쓰기(Transcription) 해줘.
-작성할 때 아래 규칙을 엄격하게 지켜:
-1. 문단이 바뀔 때마다 맨 앞에 [MM:SS] 타임스탬프를 적어줘.
-2. 동일한 타임스탬프 연속 출력 금지, 시간은 증가해야 해.
-3. 인사말이나 부연 설명 없이 타임스탬프와 본문 텍스트만 출력해.
-4. 타임스탬프 뒤에는 반드시 받아쓴 본문이 와야 해. 말이 없는 구간에는 타임스탬프를 찍지 말고,
-   한 줄에 타임스탬프를 두 개 이상 붙이지 마.
+아래에 긴 녹음을 순서대로 잘라 낸 오디오 조각 {count}개가 있어. 조각마다 바로 앞에 <<번호>> 표시가 붙어 있어.
+조각마다 처음부터 끝까지 빠짐없이 텍스트로 받아쓰기(Transcription) 해줘. 작성할 때 아래 규칙을 엄격하게 지켜:
+1. 조각마다 그 조각의 번호 표시(<<1>>, <<2>> ...)를 먼저 적고 그 뒤에 받아쓴 본문을 적어.
+   번호는 1부터 {count}까지 빠짐없이 순서대로 적어.
+2. 한 조각에서 들린 말은 그 조각 번호 뒤에만 적어. 앞뒤 조각의 말과 합치거나 옮기지 마.
+   조각 경계에서 잘린 말은 들린 만큼만 적어.
+3. 말이 없는 조각은 번호만 적고 본문은 비워 둬. 들리지 않는 말을 지어내지 마.
+4. 인사말, 부연 설명, [MM:SS] 같은 타임스탬프 없이 번호 표시와 본문만 출력해.
 """
 
 
@@ -482,9 +818,9 @@ def build_glossary_prompt(terms: List[Dict[str, str]]) -> str:
 
 
 def process_audio_file_to_board(board_id: int, audio_path: str, db_session_factory, progress_callback: Optional[Callable[[int], None]] = None):
-    """오디오 파일을 청크 단위로 나누고 Gemini STT를 실행하여 Board에 저장하는 완전 자동화 파이프라인"""
+    """오디오 파일을 조각으로 나누고 Gemini STT를 실행하여 Board에 저장하는 완전 자동화 파이프라인"""
     from server.models import Board, TranscriptSegment, BoardSummary, Folder
-    from server.migrator import split_timestamped_line
+    from server.migrator import strip_timestamps
 
     db = db_session_factory()
     board = db.query(Board).filter_by(id=board_id).first()
@@ -499,7 +835,7 @@ def process_audio_file_to_board(board_id: int, audio_path: str, db_session_facto
 
         # 폴더 단어장을 프롬프트에 실어 보낸다 (고유명사·전문용어 표기 고정)
         glossary = load_glossary_terms(db, board.folder_id)
-        prompt = STT_BASE_PROMPT + build_glossary_prompt(glossary)
+        glossary_prompt = build_glossary_prompt(glossary)
         if glossary:
             print(f"[AI-GLOSSARY] Board #{board.id} 용어 {len(glossary)}개를 프롬프트에 적용합니다.", flush=True)
 
@@ -509,87 +845,97 @@ def process_audio_file_to_board(board_id: int, audio_path: str, db_session_facto
             rewrite_container(audio_path)
 
         # 파일을 통째로 디코딩하면 긴 녹음에서 수백 MB~GB 를 먹고 서버가 OOM 으로 죽는다.
-        # 길이만 먼저 재고, 실제 오디오는 청크 단위로 그때그때 잘라 쓴다.
+        # 길이만 먼저 재고, 실제 오디오는 조각 단위로 그때그때 잘라 쓴다.
         total_duration_sec = probe_duration_seconds(audio_path)
         board.duration_seconds = total_duration_sec
         db.commit()
 
         total_ms = int(total_duration_sec * 1000)
-        chunk_starts = list(range(0, max(total_ms - OVERLAP_MS, 1), CHUNK_STEP_MS))
-        total_chunks = len(chunk_starts)
+        segments = plan_segments(measure_levels_db(audio_path), total_ms)
+        batches = group_segments(segments, CHUNK_LENGTH_MS)
+        total_batches = len(batches)
+        print(
+            f"[AI-TIME] Board #{board.id} 조각 {len(segments)}개를 요청 {total_batches}번에 나눠 받아씁니다",
+            flush=True,
+        )
 
-        full_transcript = ""
-        for i, start_ms in enumerate(chunk_starts):
-            # 청크 하나가 오래 걸려도 '정체'로 오인되지 않도록 시작 시점에 살아있음을 알린다
+        # (절대 ms, 본문) 조각들. 조각의 시작 시각은 우리가 자른 값이다.
+        all_pieces: List[tuple] = []
+        for i, batch in enumerate(batches):
+            # 요청 하나가 오래 걸려도 '정체'로 오인되지 않도록 시작 시점에 살아있음을 알린다
             if progress_callback:
                 progress_callback(board.progress_percent or 0)
-            temp_chunk_path = os.path.join(tempfile.gettempdir(), f"chunk_{uuid.uuid4().hex}.mp3")
 
-            try:
-                # 필요한 구간만 STT 용 mp3(16kHz 모노 32k)로 뽑는다 — 메모리는 파일 길이와 무관하다
-                extract_chunk_to_mp3(audio_path, temp_chunk_path, start_ms, CHUNK_LENGTH_MS)
+            prompt = STT_BASE_PROMPT.format(count=len(batch)) + glossary_prompt
+            transcript_text = transcribe_segments(
+                audio_path, batch, f"board_{board_id}_chunk_{i+1}", prompt
+            )
 
-                transcript_text = transcribe_chunk_with_fallback(
-                    temp_chunk_path, f"board_{board_id}_chunk_{i+1}", prompt
+            texts = parse_segment_transcript(transcript_text, len(batch))
+            crowded = None if texts is None else find_crowded_segment(texts, batch)
+            if texts is not None and crowded is None:
+                all_pieces.extend(
+                    (start_ms, text) for (start_ms, _end_ms), text in zip(batch, texts) if text
+                )
+            else:
+                # 번호를 못 믿는 요청이다. 요청 하나에 실은 구간 안에 고르게 펴서 최소한 그 밖으로는
+                # 새지 않게 한다.
+                batch_start, batch_end = batch[0][0], batch[-1][1]
+                reason = "번호가 어긋나" if texts is None else f"{crowded + 1}번 조각에 말이 몰려"
+                print(
+                    f"[AI-TIME] Board #{board.id} chunk {i+1}/{total_batches}: "
+                    f"{reason} {(batch_end - batch_start) // 1000}초 안에 고르게 폅니다",
+                    flush=True,
+                )
+                body = SEGMENT_LABEL_PATTERN.sub(" ", transcript_text)
+                all_pieces.extend(
+                    (batch_start + rel_ms, text)
+                    for rel_ms, text in spread_pieces([(0, strip_timestamps(body))], batch_end - batch_start)
                 )
 
-                chunk_start_seconds = start_ms // 1000
-                adjusted = offset_timestamps(transcript_text, chunk_start_seconds)
-                if i > 0:
-                    adjusted = strip_overlap(adjusted, chunk_start_seconds)
-
-                full_transcript += adjusted + "\n\n"
-
-                # 진행률 업데이트
-                progress = int(10 + (i + 1) / total_chunks * 70)
-                board.progress_percent = min(85, progress)
-                db.commit()
-                if progress_callback:
-                    progress_callback(board.progress_percent)
-
-            finally:
-                if os.path.exists(temp_chunk_path):
-                    os.remove(temp_chunk_path)
+            # 진행률 업데이트
+            progress = int(10 + (i + 1) / total_batches * 70)
+            board.progress_percent = min(85, progress)
+            db.commit()
+            if progress_callback:
+                progress_callback(board.progress_percent)
 
         # 세그먼트 파싱 & 저장
-        lines = full_transcript.strip().split('\n')
         db.query(TranscriptSegment).filter_by(board_id=board.id).delete()
 
-        # 먼저 (시각, 화자, 문장) 조각으로 훑는다. AI 는 한 문장씩 끊어 주기 때문에
-        # 이대로 저장하면 타임스탬프가 몇 초 간격으로 촘촘히 박혀 읽기 나쁘다.
-        pieces = []
-        last_ms = 0
-        for line in lines:
-            line = line.strip()
-            if not line:
-                continue
-            # AI 가 조용한 구간에 `[00:01] [00:02] ...` 처럼 타임스탬프만 줄줄이 붙여 주는 일이 있다.
-            # 첫 개만 떼면 나머지가 본문에 남아 스크립트/자막에 그대로 찍히므로 전부 떼어낸다.
-            for piece_ms, text in split_timestamped_line(line, last_ms):
-                last_ms = piece_ms
-                if not text:
-                    continue
-                pieces.append((piece_ms, "화자 1", text))
+        all_pieces = drop_repeated_pieces(all_pieces)
+        pieces = [(ms, "화자 1", text) for ms, text in all_pieces]
+        # 키워드·요약에 넘길 전체 원고 (시각 + 본문)
+        full_transcript = "\n".join(f"{ms_to_timestamp_str(ms)} {text}" for ms, text in all_pieces)
 
-        # 1분 내외 + 문장이 끝나는 지점으로 묶어, 원본 타임스탬프 간격 자체를 넓힌다
+        # 조각 하나를 세그먼트 하나로, 시각을 하나도 버리지 않고 그대로 저장한다.
+        #
+        # 한때는 여기서 1분 문단으로 묶어 저장했는데(읽기 좋으라고), 묶으면 문단 첫 시각만 남고
+        # 그 안의 시각은 사라진다. 화면은 없어진 시각을 글자 수로 되짚어 지어내므로, 재생하며
+        # 따라가는 밑줄이 문단 안에서 통째로 어긋났다. 문단으로 묶는 일은 읽는 쪽(화면·txt
+        # 내보내기)에서 하면 되고, 시각은 여기서 지키는 것이 맞다.
         seq = 0
-        txt_lines = []
         built = []
-        for start_ms, speaker, text in group_by_sentence(pieces):
+        for start_ms, speaker, text in pieces:
             stamp = ms_to_timestamp_str(start_ms)
             built.append(TranscriptSegment(
                 board_id=board.id,
                 start_time_ms=start_ms,
-                end_time_ms=start_ms,          # 아래에서 다음 문단 기준으로 다시 채운다
+                end_time_ms=start_ms,          # 아래에서 이웃 기준으로 다시 채운다
                 timestamp_str=stamp,
                 speaker=speaker,
                 content=text,
                 sequence=seq
             ))
-            txt_lines.append(f"{stamp} {text}")
             seq += 1
 
-        # 종료 시각은 이웃 문단을 봐야 정해지므로 다 만든 뒤에 한 번에 채운다 (SRT 자막 겹침 방지)
+        # 사람이 읽을 txt 는 예전처럼 1분 내외 문단으로 묶는다 (저장된 시각은 그대로 둔다)
+        txt_lines = [
+            f"{ms_to_timestamp_str(start_ms)} {text}"
+            for start_ms, _speaker, text in group_by_sentence(pieces)
+        ]
+
+        # 종료 시각은 이웃을 봐야 정해지므로 다 만든 뒤에 한 번에 채운다 (SRT 자막 겹침 방지)
         for seg, end_ms in zip(built, resolve_end_times([s.start_time_ms for s in built], total_ms)):
             seg.end_time_ms = end_ms
             db.add(seg)
@@ -599,10 +945,8 @@ def process_audio_file_to_board(board_id: int, audio_path: str, db_session_facto
             RESULT_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "강의 녹음 변환")
             folder = db.query(Folder).filter_by(id=board.folder_id).first()
             folder_name = folder.name if folder else "기본 폴더"
-            if folder_name == "기본 폴더":
-                target_dir = RESULT_DIR
-            else:
-                target_dir = os.path.join(RESULT_DIR, sanitize_filename(folder_name))
+            # 기본 폴더도 업로드 쪽(강의 녹음)과 똑같이 하위 디렉터리를 만들어 그 안에 둔다
+            target_dir = os.path.join(RESULT_DIR, sanitize_filename(folder_name))
             os.makedirs(target_dir, exist_ok=True)
             board.txt_path = os.path.join(target_dir, f"{sanitize_filename(board.title)}.txt")
             db.commit()
@@ -665,8 +1009,7 @@ def process_audio_file_to_board(board_id: int, audio_path: str, db_session_facto
         db.close()
 
 def extract_keywords_ai(transcript: str) -> List[str]:
-    client = get_client()
-    if not client or not transcript.strip():
+    if not api_keys or not transcript.strip():
         # 간단한 빈도 기반 fallback
         words = re.findall(r'[가-힣a-zA-Z0-9_]{2,}', transcript)
         stopwords = {'그래서', '우리가', '여기서', '이런', '저런', '어떤', '때문에', '그리고', '하지만', '이렇게', '그냥', '이제', '있는', '없는'}
@@ -684,11 +1027,11 @@ def extract_keywords_ai(transcript: str) -> List[str]:
 {transcript[:5000]}
 """
     try:
-        response = client.models.generate_content(
-            model="gemini-2.5-flash",
+        response = run_with_api_keys("키워드 추출", lambda client: client.models.generate_content(
+            model=GEMINI_MODEL,
             contents=prompt,
             config={"response_mime_type": "application/json"}
-        )
+        ))
         data = json.loads(response.text.strip())
         if isinstance(data, list):
             return [str(w) for w in data[:10]]
@@ -700,8 +1043,7 @@ def extract_keywords_ai(transcript: str) -> List[str]:
         return []
 
 def generate_summary_ai(transcript: str, summary_type: str = "BASIC") -> str:
-    client = get_client()
-    if not client or not transcript.strip():
+    if not api_keys or not transcript.strip():
         return "Gemini API 키가 설정되지 않았거나 스크립트가 비어 있습니다."
 
     prompts = {
@@ -789,22 +1131,21 @@ def generate_summary_ai(transcript: str, summary_type: str = "BASIC") -> str:
     full_prompt = f"{selected_prompt}\n\n[스크립트 원본]:\n{transcript[:18000]}"
 
     try:
-        response = client.models.generate_content(
-            model="gemini-2.5-flash",
+        response = run_with_api_keys("요약", lambda client: client.models.generate_content(
+            model=GEMINI_MODEL,
             contents=full_prompt
-        )
+        ))
         return response.text or "요약을 생성하지 못했습니다."
     except Exception as e:
         return f"요약 생성 중 오류가 발생했습니다: {str(e)}"
 
 def stream_board_chat(transcript: str, chat_history: List[Dict[str, str]], user_message: str):
-    client = get_client()
-    if not client:
+    if not api_keys:
         yield "data: " + json.dumps({"text": "⚠️ Gemini API 키가 설정되지 않았습니다. .env 파일을 확인해주세요."}) + "\n\n"
         return
 
     system_instruction = f"""
-당신은 이 녹음/강의 보드의 전담 AI 비서 '다글로 챗봇'입니다.
+당신은 이 녹음/강의 보드의 전담 AI 비서 'yeovyVM 챗봇'입니다.
 아래 제공된 [전체 스크립트] 내용을 바탕으로 사용자의 질문에 정확하고 친절하게 답변하세요.
 
 규칙:
@@ -823,13 +1164,29 @@ def stream_board_chat(transcript: str, chat_history: List[Dict[str, str]], user_
 
     contents.append({"role": "user", "parts": [{"text": f"{system_instruction}\n\n[사용자 질문]:\n{user_message}"}]})
 
-    try:
-        stream = client.models.generate_content_stream(
-            model="gemini-2.5-flash",
-            contents=contents
-        )
-        for chunk in stream:
-            if chunk.text:
-                yield f"data: {json.dumps({'text': chunk.text})}\n\n"
-    except Exception as e:
-        yield f"data: {json.dumps({'error': str(e)})}\n\n"
+    # 스트리밍은 run_with_api_keys 에 맡길 수 없어 여기서 직접 키를 돌린다.
+    # 답이 이미 흘러나가기 시작한 뒤라면 키를 바꿔 처음부터 다시 보낼 수 없으니 오류로 끝낸다.
+    last_error = None
+    for key_idx in api_key_pool.order():
+        client = make_client(api_keys[key_idx])
+        sent_any = False
+        try:
+            stream = client.models.generate_content_stream(
+                model=GEMINI_MODEL,
+                contents=contents
+            )
+            for chunk in stream:
+                if chunk.text:
+                    sent_any = True
+                    yield f"data: {json.dumps({'text': chunk.text})}\n\n"
+            api_key_pool.mark_used(key_idx)
+            return
+        except Exception as e:
+            last_error = e
+            if is_quota_error(e) and not sent_any:
+                api_key_pool.rest(key_idx, e)
+                continue
+            yield f"data: {json.dumps({'error': str(e)})}\n\n"
+            return
+
+    yield f"data: {json.dumps({'error': all_keys_exhausted_message(last_error)})}\n\n"

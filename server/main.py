@@ -34,6 +34,8 @@ from server.migrator import (
 )
 from server.ai_service import (
     GEMINI_TIMEOUT_MS,
+    api_keys,
+    drop_repeated_pieces,
     group_by_sentence,
     GLOSSARY_MAX_TERMS,
     load_glossary_terms,
@@ -46,7 +48,7 @@ from server.ai_service import (
     sanitize_filename,
 )
 
-app = FastAPI(title="다글로 (daglo) AI 풀스택 서버", version="3.0.0")
+app = FastAPI(title="yeovyVM 풀스택 서버", version="3.0.0")
 
 # 쿠키 인증을 쓰므로 와일드카드 오리진은 허용하지 않는다.
 # 외부 프론트엔드에서 접근해야 한다면 .env 에 ALLOWED_ORIGINS 를 쉼표로 나열한다.
@@ -113,13 +115,13 @@ async def auth_gate(request: Request, call_next):
     if path in PUBLIC_PATHS or request.method == "OPTIONS":
         return await call_next(request)
 
-    # 자동화 스크립트/외부 클라이언트는 DAGLO_API_TOKEN 헤더로 통과할 수 있다.
+    # 자동화 스크립트/외부 클라이언트는 YEOVYVM_API_TOKEN / DAGLO_API_TOKEN 헤더로 통과할 수 있다.
     if auth.api_token_ok(request):
         return await call_next(request)
 
     db = SessionLocal()
     try:
-        user = auth.resolve_session_user(db, request.cookies.get(auth.SESSION_COOKIE))
+        user = auth.resolve_session_user(db, auth.get_session_token(request))
     finally:
         db.close()
 
@@ -521,7 +523,7 @@ def write_trash_meta(board_id: int, meta: dict) -> None:
         json.dump(meta, f, ensure_ascii=False, indent=2)
 
 
-# 변환 텍스트 옆에 같이 만들어지는 동반 파일들 (받아쓰기py.py / 자막저장서버.py 산출물).
+# 변환 텍스트 옆에 같이 만들어지는 동반 파일들 (지금은 안 쓰는 legacy/받아쓰기py.py 가 만들던 것).
 # 보드를 지웠는데 이것만 탐색기에 남아 있으면 '지운 것 같지 않으므로' 함께 정리한다.
 TRANSCRIPT_COMPANION_SUFFIXES = ("_강의스크립트.html", "_수정본.txt")
 
@@ -651,7 +653,7 @@ def move_board_files_to_folder(board: Board, folder_name: str) -> bool:
     if WEB_DELETE_SYNC == "off":
         return False
 
-    sub = "" if folder_name == "기본 폴더" else sanitize_filename(folder_name)
+    sub = sanitize_filename(folder_name)
     moved = []
     for key, src in board_file_targets(board):
         if not os.path.isfile(src) or not is_managed_file(src):
@@ -829,8 +831,7 @@ def repair_stale_media_paths(db: Session) -> None:
                 # 보드가 영영 남는다. 지금 폴더 규칙으로 있어야 할 자리를 다시 계산해 두면
                 # 그 뒤로는 감시 스레드가 평소 규칙대로(연속 3회 안 보이면 휴지통) 처리한다.
                 folder_name = board.folder.name if board.folder else "기본 폴더"
-                sub_dir = "" if folder_name == "기본 폴더" else sanitize_filename(folder_name)
-                setattr(board, attr, os.path.join(AUDIO_DIR, sub_dir, name))
+                setattr(board, attr, os.path.join(AUDIO_DIR, sanitize_filename(folder_name), name))
                 board.audio_filename = name
                 rebased += 1
 
@@ -1349,7 +1350,7 @@ def ping():
 @app.get(LOGIN_STATUS_PATH)
 def auth_status(request: Request, db: Session = Depends(get_db)):
     """로그인 페이지가 '최초 설정'을 보여줄지 판단하는 데 쓴다."""
-    user = auth.resolve_session_user(db, request.cookies.get(auth.SESSION_COOKIE))
+    user = auth.resolve_session_user(db, auth.get_session_token(request))
     return {
         "setup_required": not auth.has_any_user(db),
         "authenticated": user is not None,
@@ -1394,7 +1395,7 @@ def auth_login(req: LoginRequest, request: Request, response: Response, db: Sess
 
 @app.post("/api/auth/logout")
 def auth_logout(request: Request, response: Response, db: Session = Depends(get_db)):
-    auth.destroy_session(db, request.cookies.get(auth.SESSION_COOKIE))
+    auth.destroy_session(db, auth.get_session_token(request))
     auth.clear_session_cookie(response)
     return {"success": True}
 
@@ -1418,7 +1419,7 @@ def auth_change_password(
     db.commit()
     # 비밀번호를 바꾸면 지금 쓰는 브라우저만 남기고 다른 세션을 모두 끊는다.
     auth.destroy_all_sessions_for_user(
-        db, user.id, keep_token=request.cookies.get(auth.SESSION_COOKIE)
+        db, user.id, keep_token=auth.get_session_token(request)
     )
     return {"success": True}
 
@@ -1469,7 +1470,8 @@ def health_check(db: Session = Depends(get_db)):
         "queue_depth": stt_queue.qsize(),
         "workers": STT_WORKERS,
         "workers_alive": workers_alive,
-        "ai_ready": bool(os.getenv("GEMINI_API_KEY") or os.getenv("GEMINI_API_KEY_PAID")),
+        "ai_ready": bool(api_keys),
+        "api_keys": len(api_keys),
     }
 
 
@@ -1504,7 +1506,8 @@ def queue_status(db: Session = Depends(get_db)):
         ).count(),
         "auto_transcribe": AUTO_TRANSCRIBE,
         "gemini_timeout_ms": GEMINI_TIMEOUT_MS,
-        "ai_ready": bool(os.getenv("GEMINI_API_KEY") or os.getenv("GEMINI_API_KEY_PAID")),
+        "ai_ready": bool(api_keys),
+        "api_keys": len(api_keys),
     }
 
 
@@ -1706,15 +1709,20 @@ def get_board_detail(board_id: int, db: Session = Depends(get_db)):
     if not b:
         raise HTTPException(status_code=404, detail="보드를 찾을 수 없습니다.")
 
+    # 이미 저장된 보드에도 두 번 받아쓴 조각이 남아 있어서, 화면에 보내기 전에 걸러 낸다.
+    # (DB 는 그대로 두고, 사용자가 스크립트를 저장하면 걸러진 모습으로 덮어써진다)
+    kept = drop_repeated_pieces([
+        (s.start_time_ms or 0, s, strip_timestamps(s.content)) for s in b.segments
+    ])
     segments = []
-    for s in b.segments:
+    for start_ms, s, content in kept:
         segments.append({
             "id": s.id,
-            "start_time_ms": s.start_time_ms,
+            "start_time_ms": start_ms,
             "end_time_ms": s.end_time_ms,
-            "timestamp_str": s.timestamp_str,
+            "timestamp_str": s.timestamp_str if start_ms == s.start_time_ms else f"[{ms_to_timestamp(start_ms)}]",
             "speaker": s.speaker or "화자 1",
-            "content": strip_timestamps(s.content),
+            "content": content,
             "sequence": s.sequence
         })
 
@@ -2341,7 +2349,9 @@ def export_board(
         filename = f"{sanitize_filename(b.title)}.md"
     else:
         # 예전에 촘촘하게 저장된 보드도 내보낼 때는 1분 내외 문단으로 묶어 준다
-        pieces = [(s.start_time_ms or 0, s.speaker or "화자 1", strip_timestamps(s.content)) for s in b.segments]
+        pieces = drop_repeated_pieces(
+            [(s.start_time_ms or 0, s.speaker or "화자 1", strip_timestamps(s.content)) for s in b.segments]
+        )
         lines = []
         for start_ms, speaker, text in group_by_sentence(pieces):
             prefix = ""
@@ -2470,13 +2480,13 @@ def serve_index():
     index_path = os.path.join(STATIC_DIR, "index.html")
     if os.path.exists(index_path):
         return FileResponse(index_path)
-    return {"message": "다글로 서버가 준비 중입니다."}
+    return {"message": "yeovyVM 서버가 준비 중입니다."}
 
 
 @app.get(LOGIN_PATH)
 def serve_login(request: Request, db: Session = Depends(get_db)):
     """이미 로그인한 상태면 곧바로 메인으로 보낸다."""
-    if auth.resolve_session_user(db, request.cookies.get(auth.SESSION_COOKIE)):
+    if auth.resolve_session_user(db, auth.get_session_token(request)):
         return RedirectResponse(url="/", status_code=302)
     login_path = os.path.join(STATIC_DIR, "login.html")
     if os.path.exists(login_path):

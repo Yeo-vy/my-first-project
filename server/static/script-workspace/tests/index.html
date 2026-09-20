@@ -1,0 +1,47 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>문장별 시각 계산 테스트</title>
+<style>
+  body { margin: 0; padding: 24px; background: #1a1c1e; color: #e8e9ea;
+         font-family: Pretendard, system-ui, "Malgun Gothic", sans-serif; font-size: 14px; line-height: 1.6; }
+  h1 { font-size: 16px; margin: 0 0 4px; }
+  #summary { margin: 0 0 18px; color: #6d7175; font-variant-numeric: tabular-nums; }
+  #summary.pass { color: #4dcf87; }
+  #summary.fail { color: #e06a6a; }
+  ul { list-style: none; margin: 0; padding: 0; max-width: 760px; }
+  li { padding: 7px 0; border-bottom: 1px solid #26292b; }
+  .mark { display: inline-block; width: 22px; }
+  .ok .mark { color: #4dcf87; }
+  .no { color: #e06a6a; }
+  .msg { display: block; padding-left: 22px; color: #e06a6a; font-size: 12.5px; }
+</style>
+</head>
+<body>
+<h1>문장별 시각 계산 · 단위 테스트</h1>
+<p id="summary">실행 중…</p>
+<ul id="list"></ul>
+
+<script type="module">
+import { run } from './timeline.test.js';
+
+const { results, passed, total } = run();
+const summary = document.getElementById('summary');
+summary.textContent = `${passed} / ${total} 통과`;
+summary.className = passed === total ? 'pass' : 'fail';
+
+document.getElementById('list').innerHTML = results.map((r) => `
+  <li class="${r.ok ? 'ok' : 'no'}">
+    <span class="mark">${r.ok ? '✓' : '✗'}</span>${r.name}
+    ${r.ok ? '' : `<span class="msg">${r.message}</span>`}
+  </li>`).join('');
+
+// 자동 확인용: 브라우저 콘솔과 문서 제목에도 결과를 남깁니다.
+document.title = `${passed}/${total} 통과 · 문장별 시각 계산 테스트`;
+console.log(`[timeline.test] ${passed}/${total} 통과`);
+results.filter((r) => !r.ok).forEach((r) => console.error(`[timeline.test] 실패: ${r.name} — ${r.message}`));
+</script>
+</body>
+</html>
