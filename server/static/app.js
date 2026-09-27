@@ -1389,26 +1389,51 @@ function formatTime(secs) {
     return h > 0 ? `${pad(h)}:${pad(m)}:${pad(s)}` : `${pad(m)}:${pad(s)}`;
 }
 
-function copyParagraphText(btn) {
+// 클립보드에 글을 넣는다. 성공하면 true.
+// http://IP 로 접속하면 브라우저가 navigator.clipboard 자체를 주지 않는다(https·localhost 전용).
+// 그때 writeText 를 부르면 Promise 가 아니라 그 자리에서 예외가 나서 .catch() 로도 못 잡는다.
+// 그래서 없으면 숨긴 textarea 를 골라 execCommand("copy") 로 복사한다 — 이건 http 에서도 된다.
+async function copyText(text) {
+    if (navigator.clipboard && window.isSecureContext) {
+        try {
+            await navigator.clipboard.writeText(text);
+            return true;
+        } catch (e) {
+            // 권한 거부 등 — 아래 예전 방식으로 한 번 더 시도한다
+        }
+    }
+    const ta = document.createElement("textarea");
+    ta.value = text;
+    ta.setAttribute("readonly", "");
+    ta.style.position = "fixed";
+    ta.style.top = "0";
+    ta.style.left = "0";
+    ta.style.opacity = "0";
+    document.body.appendChild(ta);
+    ta.select();
+    ta.setSelectionRange(0, text.length);
+    let ok = false;
+    try {
+        ok = document.execCommand("copy");
+    } catch (e) {
+        ok = false;
+    }
+    document.body.removeChild(ta);
+    return ok;
+}
+
+async function copyParagraphText(btn) {
     const p = btn.closest(".lexical__paragraph");
     if (!p) return;
     const body = p.querySelector(".paragraph-text-body");
     const text = body ? body.innerText.trim() : "";
-    navigator.clipboard.writeText(text).then(() => {
-        showToast("단락이 복사되었습니다.");
-    }).catch(() => {
-        showToast("클립보드 복사에 실패했습니다.");
-    });
+    showToast(await copyText(text) ? "단락이 복사되었습니다." : "클립보드 복사에 실패했습니다.");
 }
 
-function copyAllTranscript() {
+async function copyAllTranscript() {
     const bodies = Array.from(document.querySelectorAll(".lexical__paragraph .paragraph-text-body"));
     const fullText = bodies.map(b => b.innerText.trim()).filter(Boolean).join("\n\n");
-    navigator.clipboard.writeText(fullText).then(() => {
-        showToast("전체 스크립트가 복사되었습니다.");
-    }).catch(() => {
-        showToast("클립보드 복사에 실패했습니다.");
-    });
+    showToast(await copyText(fullText) ? "전체 스크립트가 복사되었습니다." : "클립보드 복사에 실패했습니다.");
 }
 
 async function addBookmarkFromParagraph(ms, formattedTs) {
@@ -1508,15 +1533,18 @@ function renderShareState(state) {
 async function createShareLink() {
     if (!currentBoard) return;
     renderShareState({ loading: true });
+    let state;
     try {
         const res = await fetch(`/api/boards/${currentBoard.id}/share`, { method: "POST" });
         if (!res.ok) throw new Error("실패");
-        const state = await res.json();
-        renderShareState(state);
-        copyShareLink();
+        state = await res.json();
     } catch (e) {
         renderShareState({ error: true });
+        return;
     }
+    // 복사는 try 밖에서 한다. 복사가 실패해도 링크는 이미 만들어졌으니 오류 화면을 띄우면 안 된다.
+    renderShareState(state);
+    copyShareLink();
 }
 
 async function revokeShareLink() {
@@ -1533,16 +1561,16 @@ async function revokeShareLink() {
     }
 }
 
-function copyShareLink() {
+async function copyShareLink() {
     const input = document.getElementById("share-link-input");
     if (!input || !input.value) return;
-    navigator.clipboard.writeText(input.value).then(() => {
+    if (await copyText(input.value)) {
         showToast("공유 링크가 복사되었습니다.");
-    }).catch(() => {
-        // 클립보드를 막아 둔 브라우저에서는 사람이 직접 복사하도록 선택만 해 준다
+    } else {
+        // 그래도 안 되는 브라우저에서는 사람이 직접 복사하도록 선택만 해 준다
         input.select();
         showToast("링크를 길게 눌러 복사해 주세요.");
-    });
+    }
 }
 
 function toggleDetailKebab(e) {

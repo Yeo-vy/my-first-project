@@ -2,7 +2,7 @@
 <html lang="ko">
 <head>
     <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
     <meta name="robots" content="noindex, nofollow">
     <title>공유된 스크립트</title>
     <link rel="stylesheet" as="style" crossorigin href="https://cdn.jsdelivr.net/gh/orioncactus/pretendard@v1.3.9/dist/web/static/pretendard.min.css">
@@ -10,230 +10,701 @@
       공유 화면은 로그인하지 않은 사람이 여는 유일한 페이지다.
       /static 은 로그인해야 열리므로 스타일과 스크립트를 이 파일 안에 모두 담아 둔다.
       (여기서 /static/style.css 를 불러오면 공유받은 사람 화면에서 404 가 난다)
+
+      모양은 앱의 보드 상세 화면(index.html #board-detail-view)과 똑같이 맞췄다.
+      아래 규칙은 style.css 에서 상세 화면에 쓰이는 것만 옮겨 온 것이라,
+      앱 쪽 모양을 바꾸면 여기도 같이 바꿔야 한다.
+      편집·북마크·AI 패널·다운로드처럼 보드를 건드리거나 원본을 내려받는 기능은 뺐다.
     -->
     <style>
         :root {
-            --font-sans: Pretendard Variable, Pretendard, -apple-system, BlinkMacSystemFont, system-ui,
-                Segoe UI, Apple SD Gothic Neo, Noto Sans KR, Malgun Gothic, sans-serif;
-            --font-mono: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+            --font-sans: Pretendard Variable, Pretendard, -apple-system, BlinkMacSystemFont, system-ui, Roboto, Helvetica Neue, Segoe UI, Apple SD Gothic Neo, Noto Sans KR, Malgun Gothic, sans-serif;
 
-            --bg-page: #121315;
-            --bg-surface: #1c1d1f;
-            --bg-surface-strong: #2c2d30;
-            --border: #3a3b3e;
-            --fg: #d6d8dc;
-            --fg-weak: #96989d;
-            --fg-subtle: #64666b;
-            --brand: #4f90fc;
-            --brand-weak: #bfd8ff;
+            --color-yellow-500: #ffc700;
+            --color-blue-400: #4f90fc;
+            --color-blue-500: #216cf8;
+
+            --color-dark-gray-10: #0b0c0e;
+            --color-dark-gray-25: #121315;
+            --color-dark-gray-50: #1c1d1f;
+            --color-dark-gray-100: #2c2d30;
+            --color-dark-gray-200: #3a3b3e;
+            --color-dark-gray-300: #4a4b4f;
+            --color-dark-gray-400: #64666b;
+            --color-dark-gray-500: #82848a;
+            --color-dark-gray-600: #96989d;
+            --color-dark-gray-700: #b6b8bd;
+            --color-dark-gray-800: #d6d8dc;
+
+            --color-fg-neutral: var(--color-dark-gray-800);
+            --color-fg-neutral-subtle: var(--color-dark-gray-400);
+            --color-fg-brand: var(--color-blue-400);
+            --color-bg-neutral: var(--color-dark-gray-25);
+            --color-bg-brand: var(--color-blue-500);
+            --color-stroke-neutral-weak: var(--color-dark-gray-100);
+
+            --text-regular15: .9375rem;
+            --text-regular15--line-height: 1.375rem;
+            --text-regular12: .75rem;
+            --text-regular12--line-height: 1.125rem;
+
+            --bottom-player-height: 70px;
         }
 
-        * { box-sizing: border-box; }
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+            font-family: var(--font-sans);
+        }
+
+        html, body {
+            height: 100%;
+            background-color: var(--color-dark-gray-10);
+        }
 
         body {
-            margin: 0;
-            background: var(--bg-page);
-            color: var(--fg);
-            font-family: var(--font-sans);
-            font-size: 15px;
-            line-height: 1.6;
+            color: var(--color-fg-neutral);
+            overflow: hidden;
             -webkit-font-smoothing: antialiased;
         }
 
-        .wrap {
-            max-width: 860px;
-            margin: 0 auto;
-            padding: 32px 20px 140px;
+        [hidden] { display: none !important; }
+
+        /* 앱은 position:fixed 로 화면을 덮지만, 여기서는 이 화면 하나뿐이라
+           세로 flex 로 머리·본문·재생 막대를 쌓는다. 폰 주소창이 들어가고 나와도
+           재생 막대가 가려지지 않게 dvh 를 쓴다. */
+        #view {
+            height: 100vh;
+            height: 100dvh;
+            display: flex;
+            flex-direction: column;
+            overflow: hidden;
         }
 
-        /* --- 머리말 --- */
-        header.doc-head {
-            border-bottom: 1px solid var(--border);
-            padding-bottom: 20px;
-            margin-bottom: 8px;
+        /* --- 머리 --- */
+        .detail-header {
+            height: 56px;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            gap: 12px;
+            padding: 0 24px;
+            border-bottom: 1px solid var(--color-stroke-neutral-weak);
+            background-color: var(--color-dark-gray-25);
+            flex-shrink: 0;
         }
 
-        .read-only-badge {
+        .detail-left-header {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            min-width: 0;
+            flex: 1;
+        }
+
+        .detail-left-header .breadcrumb {
+            color: var(--color-dark-gray-500);
+            font-size: 13.5px;
+            font-weight: 500;
+            white-space: nowrap;
+        }
+
+        .detail-left-header .divider {
+            color: var(--color-dark-gray-300);
+            margin: 0 2px;
+        }
+
+        .detail-title {
+            font-size: 14.5px;
+            font-weight: 600;
+            color: #ffffff;
+            padding: 3px 8px;
+            border-radius: 4px;
+            white-space: nowrap;
+            overflow: hidden;
+            text-overflow: ellipsis;
+            min-width: 0;
+        }
+
+        .detail-right-header {
+            display: flex;
+            align-items: center;
+            gap: 10px;
+            flex-shrink: 0;
+            color: var(--color-dark-gray-500);
+            font-size: 12.5px;
+            font-variant-numeric: tabular-nums;
+        }
+
+        .read-only-pill {
+            background-color: var(--color-dark-gray-50);
+            border: 1px solid var(--color-stroke-neutral-weak);
+            color: var(--color-dark-gray-600);
+            border-radius: 9999px;
+            padding: 5px 12px;
+            font-size: 12.5px;
+            font-weight: 500;
             display: inline-flex;
             align-items: center;
             gap: 6px;
-            padding: 4px 10px;
-            border: 1px solid var(--border);
-            border-radius: 999px;
-            background: var(--bg-surface);
-            color: var(--fg-weak);
-            font-size: 12px;
-            font-weight: 600;
-            letter-spacing: -0.01em;
+            white-space: nowrap;
         }
 
-        h1.doc-title {
-            margin: 14px 0 10px;
-            font-size: 26px;
-            font-weight: 700;
-            line-height: 1.35;
-            letter-spacing: -0.02em;
-            color: #eff0f2;
-            /* 제목도 고칠 수 없다. 본문과 달리 선택은 되게 둔다. */
-        }
-
-        .doc-meta {
+        /* --- 스크립트 패널 --- */
+        .script-panel {
+            flex: 1;
+            min-height: 0;
             display: flex;
-            flex-wrap: wrap;
+            flex-direction: column;
+            overflow: hidden;
+            background-color: var(--color-dark-gray-10);
+        }
+
+        .script-tab-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            padding: 0 24px;
+            border-bottom: 1px solid var(--color-stroke-neutral-weak);
+            background-color: var(--color-dark-gray-25);
+            height: 48px;
+            flex-shrink: 0;
+        }
+
+        .script-tab {
+            color: #ffffff;
+            font-weight: 600;
+            font-size: 14px;
+            height: 48px;
+            display: flex;
+            align-items: center;
+            border-bottom: 2px solid var(--color-blue-500);
+            user-select: none;
+        }
+
+        .script-tab-actions {
+            display: flex;
+            align-items: center;
+            gap: 4px;
+        }
+
+        .script-header-icon-btn,
+        .icon-btn-small {
+            background: none;
+            border: none;
+            color: var(--color-dark-gray-500);
+            padding: 8px;
+            border-radius: 6px;
+            cursor: pointer;
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            transition: all 0.15s;
+        }
+
+        .script-header-icon-btn:hover,
+        .icon-btn-small:hover {
+            color: #ffffff;
+            background-color: var(--color-dark-gray-50);
+        }
+
+        .keywords-bar {
+            display: flex;
             align-items: center;
             gap: 8px;
-            color: var(--fg-subtle);
-            font-size: 13px;
+            padding: 10px 24px;
+            border-bottom: 1px solid var(--color-stroke-neutral-weak);
+            background-color: var(--color-dark-gray-25);
+            flex-wrap: wrap;
+            flex-shrink: 0;
         }
 
-        .doc-meta .dot { color: var(--border); }
+        .keywords-tag-badge {
+            background-color: var(--color-dark-gray-50);
+            border: 1px solid var(--color-stroke-neutral-weak);
+            color: var(--color-dark-gray-600);
+            border-radius: 9999px;
+            padding: 4px 10px;
+            font-size: 12px;
+            font-weight: 600;
+            display: inline-flex;
+            align-items: center;
+            gap: 6px;
+        }
 
-        .keywords {
+        .keywords-container {
             display: flex;
             flex-wrap: wrap;
             gap: 6px;
-            margin-top: 14px;
+            flex: 1;
         }
 
-        .keyword {
-            padding: 3px 9px;
-            border-radius: 6px;
-            background: var(--bg-surface-strong);
-            color: var(--fg-weak);
-            font-size: 12.5px;
-        }
-
-        /* --- 스크립트 --- */
-        .script { margin-top: 26px; }
-
-        .para {
-            display: grid;
-            grid-template-columns: 64px 1fr;
-            gap: 14px;
-            padding: 10px 12px;
-            border-radius: 8px;
-            scroll-margin-top: 24px;
-        }
-
-        .para + .para { margin-top: 2px; }
-
-        .para.playing { background: rgba(79, 144, 252, 0.10); }
-
-        .para-time {
-            padding-top: 2px;
-            border: 0;
-            background: none;
-            color: var(--fg-subtle);
-            font-family: var(--font-mono);
-            font-size: 12.5px;
-            text-align: left;
+        .keyword-pill-interactive {
+            background-color: var(--color-dark-gray-50);
+            border: 1px solid var(--color-stroke-neutral-weak);
+            color: var(--color-dark-gray-700);
+            font-size: 12px;
+            padding: 3px 10px;
+            border-radius: 12px;
+            font-weight: 500;
             cursor: pointer;
+            transition: all 0.15s ease;
         }
 
-        .para-time:hover { color: var(--brand); }
-        .para.playing .para-time { color: var(--brand); }
-
-        .para-speaker {
-            margin-bottom: 2px;
-            color: var(--fg-weak);
-            font-size: 12.5px;
-            font-weight: 600;
+        .keyword-pill-interactive:hover {
+            background-color: var(--color-blue-500);
+            border-color: var(--color-blue-500);
+            color: #ffffff;
         }
 
-        .para-text {
-            white-space: pre-wrap;
-            word-break: break-word;
+        .script-search-bar {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            padding: 8px 24px;
+            border-bottom: 1px solid var(--color-stroke-neutral-weak);
+            background-color: var(--color-dark-gray-50);
+            color: var(--color-dark-gray-500);
+            flex-shrink: 0;
         }
 
-        /* --- 재생 막대 --- */
-        .player-bar {
-            position: fixed;
-            left: 0;
-            right: 0;
-            bottom: 0;
-            padding: 12px 20px calc(12px + env(safe-area-inset-bottom));
-            background: rgba(18, 19, 21, 0.92);
-            backdrop-filter: blur(12px);
-            border-top: 1px solid var(--border);
+        .script-search-bar input {
+            flex: 1;
+            min-width: 0;
+            border: none;
+            outline: none;
+            font-size: 13px;
+            color: #ffffff;
+            background: transparent;
         }
 
-        .player-inner {
-            max-width: 860px;
+        .transcript-container {
+            flex: 1;
+            overflow-y: auto;
+            padding: 24px 32px 48px;
+            scroll-behavior: smooth;
+            -webkit-overflow-scrolling: touch;
+        }
+
+        /* 스크립트를 한 줄 폭으로 길게 늘이면 읽기 힘들어서 가운데로 모은다 */
+        .transcript-inner {
+            max-width: 920px;
             margin: 0 auto;
         }
 
-        audio {
-            width: 100%;
-            height: 38px;
+        /* --- 스크립트 문단 --- */
+        .lexical__paragraph {
+            white-space: normal;
+            word-break: break-word;
+            margin-bottom: 0.75rem;
+            position: relative;
+            touch-action: manipulation;
+            border-radius: .625rem;
+            padding: 1rem 1.25rem;
+            text-align: left;
+            font-size: var(--text-regular15);
+            line-height: var(--text-regular15--line-height);
+            font-weight: 400;
+            color: var(--color-fg-neutral);
+            transition: background-color .15s ease;
         }
 
-        /* --- 상태 표시 --- */
-        .state {
-            padding: 60px 20px;
-            text-align: center;
-            color: var(--fg-subtle);
+        .lexical__paragraph:hover {
+            background-color: var(--color-bg-neutral);
         }
 
-        .state h2 {
-            margin: 0 0 6px;
-            font-size: 17px;
-            font-weight: 600;
-            color: var(--fg-weak);
+        .para-head {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            margin-bottom: 0.5rem;
+            min-width: 0;
+            user-select: none;
+            font-size: var(--text-regular12);
+            line-height: var(--text-regular12--line-height);
+            color: var(--color-fg-neutral-subtle);
         }
+
+        .para-time {
+            flex-shrink: 0;
+            white-space: nowrap;
+            cursor: pointer;
+        }
+
+        .para-time:hover { text-decoration: underline; }
+
+        .para-speaker {
+            margin-left: 0.5rem;
+            white-space: nowrap;
+            overflow: hidden;
+            text-overflow: ellipsis;
+        }
+
+        .paragraph-text-body {
+            white-space: pre-wrap;
+        }
+
+        /* 단어 하나하나가 눌러서 그 지점부터 듣는 단위다 */
+        .word {
+            cursor: pointer;
+            transition: color 0.1s ease;
+            border-radius: 2px;
+        }
+
+        .word:hover { color: var(--color-fg-brand); }
+
+        .lexical-sentence {
+            border-radius: 4px;
+            transition: background-color 0.15s ease, color 0.15s ease;
+        }
+
+        .lexical-sentence.active-sentence {
+            background-color: var(--color-bg-brand);
+            color: #ffffff;
+            padding: 2px 4px;
+            margin: -2px -4px;
+            border-radius: 4px;
+            box-decoration-break: clone;
+            -webkit-box-decoration-break: clone;
+        }
+
+        .lexical-sentence.active-sentence .word { color: #ffffff; }
+
+        .lexical__paragraph.search-hit { outline: 2px solid var(--color-yellow-500); }
+        .lexical__paragraph.search-dim { opacity: 0.35; }
 
         .foot-note {
-            margin-top: 34px;
-            padding-top: 18px;
-            border-top: 1px solid var(--border);
-            color: var(--fg-subtle);
+            margin: 28px 0 0;
+            padding: 16px 1.25rem 0;
+            border-top: 1px solid var(--color-stroke-neutral-weak);
+            color: var(--color-fg-neutral-subtle);
             font-size: 12.5px;
         }
 
-        @media (max-width: 640px) {
-            .wrap { padding: 22px 16px 140px; }
-            h1.doc-title { font-size: 21px; }
-            .para {
-                grid-template-columns: 54px 1fr;
-                gap: 10px;
-                padding: 9px 6px;
-            }
+        /* --- 상태 표시 (불러오는 중 · 만료 · 실패) --- */
+        .state {
+            flex: 1;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            gap: 6px;
+            padding: 60px 20px;
+            text-align: center;
+            color: var(--color-fg-neutral-subtle);
+            font-size: 14px;
+        }
+
+        .state h2 {
+            font-size: 17px;
+            font-weight: 600;
+            color: var(--color-dark-gray-600);
+        }
+
+        /* --- 하단 재생 막대 --- */
+        .bottom-audio-bar {
+            flex-shrink: 0;
+            height: calc(var(--bottom-player-height) + env(safe-area-inset-bottom));
+            padding-bottom: env(safe-area-inset-bottom);
+            background-color: var(--color-dark-gray-10);
+            border-top: 1px solid var(--color-stroke-neutral-weak);
+            display: flex;
+            flex-direction: column;
+            user-select: none;
+        }
+
+        .player-progress-container {
+            position: relative;
+            width: 100%;
+            height: 4px;
+            cursor: pointer;
+            transition: height 0.12s ease;
+            touch-action: none;
+        }
+
+        .player-progress-container:hover { height: 7px; }
+
+        .player-progress-track {
+            width: 100%;
+            height: 100%;
+            background-color: var(--color-dark-gray-100);
+        }
+
+        .player-progress-fill {
+            height: 100%;
+            background-color: var(--color-blue-500);
+            width: 0%;
+            pointer-events: none;
+            transition: width 0.05s linear;
+        }
+
+        .player-progress-tooltip {
+            position: absolute;
+            bottom: 12px;
+            transform: translateX(-50%);
+            background-color: var(--color-blue-500);
+            color: #ffffff;
+            font-size: 11px;
+            font-weight: 700;
+            padding: 2px 7px;
+            border-radius: 4px;
+            pointer-events: none;
+            white-space: nowrap;
+            font-variant-numeric: tabular-nums;
+            box-shadow: 0 2px 8px rgba(0,0,0,0.5);
+        }
+
+        .player-progress-tooltip::after {
+            content: "";
+            position: absolute;
+            top: 100%;
+            left: 50%;
+            transform: translateX(-50%);
+            border-width: 4px;
+            border-style: solid;
+            border-color: var(--color-blue-500) transparent transparent transparent;
+        }
+
+        .bottom-player-main-row {
+            flex: 1;
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            padding: 0 24px;
+            position: relative;
+        }
+
+        .player-controls-center {
+            position: absolute;
+            left: 50%;
+            transform: translateX(-50%);
+            display: flex;
+            align-items: center;
+            gap: 16px;
+        }
+
+        .player-circle-btn {
+            background: none;
+            border: none;
+            color: var(--color-dark-gray-500);
+            cursor: pointer;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            padding: 6px;
+            border-radius: 50%;
+            transition: all 0.15s ease;
+        }
+
+        .player-circle-btn:hover {
+            color: #ffffff;
+            background-color: var(--color-dark-gray-50);
+        }
+
+        .player-play-circle-btn {
+            width: 36px;
+            height: 36px;
+            border-radius: 50%;
+            background-color: #ffffff;
+            border: none;
+            color: #0b0c0e;
+            cursor: pointer;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            transition: all 0.15s ease;
+        }
+
+        .player-play-circle-btn:hover {
+            transform: scale(1.06);
+            background-color: #f1f5f9;
+        }
+
+        .player-controls-right {
+            display: flex;
+            align-items: center;
+            gap: 16px;
+            margin-left: auto;
+        }
+
+        .volume-container {
+            display: flex;
+            align-items: center;
+            gap: 6px;
+        }
+
+        #volume-slider {
+            width: 70px;
+            height: 4px;
+            cursor: pointer;
+            accent-color: var(--color-blue-500);
+        }
+
+        .player-speed-btn {
+            background-color: var(--color-dark-gray-50);
+            border: 1px solid var(--color-stroke-neutral-weak);
+            color: var(--color-fg-neutral);
+            font-size: 12px;
+            font-weight: 600;
+            padding: 3px 8px;
+            border-radius: 6px;
+            cursor: pointer;
+            transition: all 0.15s;
+        }
+
+        .player-speed-btn:hover {
+            background-color: var(--color-dark-gray-100);
+            color: #ffffff;
+        }
+
+        .player-time-display {
+            color: var(--color-dark-gray-500);
+            font-size: 13px;
+            font-variant-numeric: tabular-nums;
+            font-weight: 500;
+        }
+
+        .toast {
+            visibility: hidden;
+            min-width: 180px;
+            background-color: #1e293b;
+            color: #fff;
+            text-align: center;
+            border-radius: 30px;
+            padding: 10px 20px;
+            position: fixed;
+            z-index: 2000;
+            left: 50%;
+            bottom: 30px;
+            font-size: 14px;
+            transform: translateX(-50%);
+            opacity: 0;
+            box-shadow: 0 4px 12px rgba(0,0,0,0.15);
+            transition: all 0.3s ease;
+        }
+
+        .toast.show {
+            visibility: visible;
+            opacity: 1;
+            bottom: calc(95px + env(safe-area-inset-bottom));
+        }
+
+        /* --- 폰 --- */
+        @media (max-width: 720px) {
+            .detail-header { padding: 0 14px; }
+            .detail-left-header .breadcrumb,
+            .detail-left-header .divider,
+            .read-only-pill .label { display: none; }
+            .read-only-pill { padding: 5px 8px; }
+            .script-tab-header,
+            .keywords-bar,
+            .script-search-bar { padding-left: 14px; padding-right: 14px; }
+            .transcript-container { padding: 16px 6px 40px; }
+            .lexical__paragraph { padding: 0.875rem 0.875rem; }
+            .bottom-player-main-row { padding: 0 14px; }
+            /* 폰은 기기 음량 버튼을 쓰고, 가운데 재생 버튼과 겹치지 않게 음량 막대는 감춘다 */
+            .volume-container { display: none; }
+            .player-controls-center { gap: 10px; }
+            .player-controls-right { gap: 10px; }
+        }
+
+        @media (max-width: 400px) {
+            .player-time-display { display: none; }
         }
     </style>
 </head>
 <body>
-    <div class="wrap">
+    <div id="view">
+        <header class="detail-header">
+            <div class="detail-left-header">
+                <span class="breadcrumb">공유된 보드</span>
+                <span class="divider">/</span>
+                <h1 class="detail-title" id="title">불러오는 중…</h1>
+            </div>
+            <div class="detail-right-header">
+                <span id="duration"></span>
+                <span class="read-only-pill" title="이 링크로는 내용을 볼 수만 있습니다">
+                    <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="11" width="18" height="11" rx="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/></svg>
+                    <span class="label">읽기 전용</span>
+                </span>
+            </div>
+        </header>
+
         <div id="state" class="state">
             <h2>불러오는 중…</h2>
         </div>
 
-        <div id="doc" hidden>
-            <header class="doc-head">
-                <span class="read-only-badge">
-                    <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-                        <rect x="3" y="11" width="18" height="11" rx="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/>
-                    </svg>
-                    읽기 전용으로 공유된 스크립트
-                </span>
-                <h1 class="doc-title" id="title"></h1>
-                <div class="doc-meta">
-                    <span id="created"></span>
-                    <span class="dot" id="meta-dot" hidden>·</span>
-                    <span id="duration"></span>
+        <div class="script-panel" id="doc" hidden>
+            <div class="script-tab-header">
+                <div class="script-tab"><span>스크립트</span></div>
+                <div class="script-tab-actions">
+                    <button type="button" class="script-header-icon-btn" id="search-toggle" title="본문 검색">
+                        <svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" fill="none" stroke="currentColor" stroke-width="1.8" viewBox="0 0 24 24"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>
+                    </button>
                 </div>
-                <div class="keywords" id="keywords"></div>
-            </header>
+            </div>
 
-            <div class="script" id="script"></div>
+            <div class="keywords-bar" id="keywords-bar" hidden>
+                <span class="keywords-tag-badge">
+                    <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1.8" viewBox="0 0 24 24"><path d="M20.59 13.41l-7.17 7.17a2 2 0 0 1-2.83 0L2 12V2h10l8.59 8.59a2 2 0 0 1 0 2.82z"/><line x1="7" y1="7" x2="7.01" y2="7"/></svg>
+                    <span>핵심 키워드</span>
+                </span>
+                <div id="keywords" class="keywords-container"></div>
+            </div>
 
-            <p class="foot-note">이 링크를 가진 사람은 이 스크립트만 볼 수 있습니다. 내용은 수정할 수 없습니다.</p>
+            <div class="script-search-bar" id="search-bar" hidden>
+                <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>
+                <input type="text" id="search-input" placeholder="본문 검색 (단어 찾기)">
+                <button type="button" class="icon-btn-small" id="search-clear" title="검색 닫기">
+                    <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
+                </button>
+            </div>
+
+            <div class="transcript-container" id="transcript">
+                <div class="transcript-inner">
+                    <div id="script"></div>
+                    <p class="foot-note">이 링크를 가진 사람은 이 스크립트만 볼 수 있습니다. 내용은 수정할 수 없습니다.</p>
+                </div>
+            </div>
         </div>
+
+        <footer class="bottom-audio-bar" id="player-bar" hidden>
+            <div class="player-progress-container" id="progress">
+                <div class="player-progress-track">
+                    <div class="player-progress-fill" id="progress-fill"></div>
+                </div>
+                <div class="player-progress-tooltip" id="progress-tooltip" style="left: 24px;">00:00</div>
+            </div>
+
+            <div class="bottom-player-main-row">
+                <div class="player-controls-center">
+                    <button type="button" class="player-circle-btn" id="back-btn" title="3초 이전">
+                        <svg xmlns="http://www.w3.org/2000/svg" width="22" height="22" fill="currentColor" viewBox="0 0 24 24"><path d="M12 5V1L7 6l5 5V7c3.31 0 6 2.69 6 6s-2.69 6-6 6-6-2.69-6-6H4c0 4.42 3.58 8 8 8s8-3.58 8-8-3.58-8-8-8z"/><text x="12" y="15" font-size="8" font-weight="bold" text-anchor="middle" fill="currentColor">3</text></svg>
+                    </button>
+                    <button type="button" class="player-play-circle-btn" id="play-btn" title="재생/일시정지 (Space)"></button>
+                    <button type="button" class="player-circle-btn" id="fwd-btn" title="3초 이후">
+                        <svg xmlns="http://www.w3.org/2000/svg" width="22" height="22" fill="currentColor" viewBox="0 0 24 24"><path d="M12 5V1l5 5-5 5V7c-3.31 0-6 2.69-6 6s2.69 6 6 6 6-2.69 6-6h2c0 4.42-3.58 8-8 8s-8-3.58-8-8 3.58-8 8-8z"/><text x="12" y="15" font-size="8" font-weight="bold" text-anchor="middle" fill="currentColor">3</text></svg>
+                    </button>
+                </div>
+
+                <div class="player-controls-right">
+                    <div class="volume-container">
+                        <button type="button" class="player-circle-btn" id="mute-btn" title="음소거"></button>
+                        <input type="range" id="volume-slider" min="0" max="1" step="0.05" value="1">
+                    </div>
+                    <button type="button" class="player-speed-btn" id="speed-btn" title="재생 속도">1x</button>
+                    <span class="player-time-display" id="time-display">00:00</span>
+                </div>
+            </div>
+
+            <!-- 브라우저 기본 재생기(controls)는 쓰지 않는다. 기본 재생기의 메뉴에는
+                 '다운로드' 가 들어 있는 경우가 있어서, 앱과 같은 재생 막대만 보여 준다. -->
+            <audio id="audio" preload="metadata" controlsList="nodownload"></audio>
+        </footer>
     </div>
 
-    <div class="player-bar" id="player-bar" hidden>
-        <div class="player-inner">
-            <audio id="audio" controls preload="metadata" controlsList="nodownload"></audio>
-        </div>
-    </div>
+    <div id="toast" class="toast"></div>
 
     <script>
     (function () {
@@ -246,7 +717,26 @@
         var doc = document.getElementById("doc");
         var audio = document.getElementById("audio");
         var scriptBox = document.getElementById("script");
-        var paragraphs = [];
+        var transcript = document.getElementById("transcript");
+        var playBtn = document.getElementById("play-btn");
+        var muteBtn = document.getElementById("mute-btn");
+        var progress = document.getElementById("progress");
+        var progressFill = document.getElementById("progress-fill");
+        var progressTip = document.getElementById("progress-tooltip");
+        var timeDisplay = document.getElementById("time-display");
+
+        var hasAudio = false;
+        var knownDurationSec = 0;
+        var sentences = [];
+        var activeSentence = null;
+
+        var ICON_PLAY = '<svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" fill="currentColor" viewBox="0 0 16 16"><path d="m11.596 8.697-6.363 3.692c-.54.313-1.233-.066-1.233-.697V4.308c0-.63.692-1.01 1.233-.696l6.363 3.692a.802.802 0 0 1 0 1.393z"/></svg>';
+        var ICON_PAUSE = '<svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" fill="currentColor" viewBox="0 0 16 16"><path d="M5.5 3.5A1.5 1.5 0 0 1 7 5v6a1.5 1.5 0 0 1-3 0V5a1.5 1.5 0 0 1 1.5-1.5zm5 0A1.5 1.5 0 0 1 12 5v6a1.5 1.5 0 0 1-3 0V5a1.5 1.5 0 0 1 1.5-1.5z"/></svg>';
+        var ICON_VOLUME = '<svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" viewBox="0 0 24 24"><polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5" fill="currentColor"/><path d="M15.54 8.46a5 5 0 0 1 0 7.07"/><path d="M19.07 4.93a10 10 0 0 1 0 14.14"/></svg>';
+        var ICON_MUTED = '<svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" viewBox="0 0 24 24"><polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5" fill="currentColor"/><line x1="23" y1="9" x2="17" y2="15"/><line x1="17" y1="9" x2="23" y2="15"/></svg>';
+
+        playBtn.innerHTML = ICON_PLAY;
+        muteBtn.innerHTML = ICON_VOLUME;
 
         function showState(heading, detail) {
             stateBox.hidden = false;
@@ -262,95 +752,353 @@
             }
         }
 
-        function formatTime(ms) {
-            var total = Math.max(0, Math.floor((ms || 0) / 1000));
+        var toastTimer = null;
+        function showToast(msg) {
+            var t = document.getElementById("toast");
+            t.textContent = msg;
+            t.classList.add("show");
+            clearTimeout(toastTimer);
+            toastTimer = setTimeout(function () { t.classList.remove("show"); }, 1800);
+        }
+
+        // 앱과 같은 규칙: 한 시간이 넘으면 시:분:초, 아니면 분:초
+        function formatTime(secs) {
+            var total = Math.max(0, Math.floor(secs || 0));
             var h = Math.floor(total / 3600);
             var m = Math.floor((total % 3600) / 60);
             var s = total % 60;
-            var mm = String(m).padStart(2, "0");
-            var ss = String(s).padStart(2, "0");
-            return h > 0 ? h + ":" + mm + ":" + ss : mm + ":" + ss;
+            function pad(n) { return String(n).padStart(2, "0"); }
+            return h > 0 ? pad(h) + ":" + pad(m) + ":" + pad(s) : pad(m) + ":" + pad(s);
+        }
+
+        // 앱(app.js splitSegmentsForDisplay)과 똑같이 1분 문단을 화면에서만 20초 안팎으로 쪼갠다.
+        // 그래야 공유받은 사람이 누르는 위치와 밑줄 단위가 앱에서 보는 것과 같다.
+        var DISPLAY_BLOCK_MS = 20000;
+        var DISPLAY_BLOCK_MAX_MS = 40000;
+
+        function splitSegmentsForDisplay(segments, totalMs) {
+            var blocks = [];
+            segments.forEach(function (seg, idx) {
+                var startMs = seg.start_time_ms || 0;
+                var next = segments[idx + 1];
+                var endMs = next
+                    ? Math.max(next.start_time_ms || 0, startMs)
+                    : Math.max(totalMs || 0, seg.end_time_ms || 0, startMs);
+                var span = endMs - startMs;
+                var text = (seg.content || "").trim();
+                var speaker = seg.speaker || "화자 1";
+
+                function push(t, atMs, toMs) {
+                    blocks.push({ content: t, start_time_ms: atMs, end_time_ms: toMs, speaker: speaker });
+                }
+
+                if (span <= DISPLAY_BLOCK_MAX_MS || text.length < 50) {
+                    push(text, startMs, endMs);
+                    return;
+                }
+
+                var parts = text.match(/[^.!?…。]+[.!?…。]*\s*/g) || [text];
+                var msPerChar = span / (text.length || 1);
+                var targetChars = Math.max(25, Math.round(DISPLAY_BLOCK_MS / msPerChar));
+
+                var buf = "";
+                var before = 0;
+                function flush() {
+                    var t = buf.trim();
+                    if (t) {
+                        push(t, Math.round(startMs + before * msPerChar), Math.round(startMs + (before + buf.length) * msPerChar));
+                    }
+                    before += buf.length;
+                    buf = "";
+                }
+
+                parts.forEach(function (part) {
+                    var piece = part;
+                    while (buf.length + piece.length > targetChars * 2) {
+                        var room = Math.max(1, targetChars - buf.length);
+                        var cut = piece.lastIndexOf(" ", room);
+                        if (cut < room / 2) cut = Math.min(room, piece.length);
+                        buf += piece.slice(0, cut);
+                        flush();
+                        piece = piece.slice(cut);
+                    }
+                    buf += piece;
+                    if (buf.length >= targetChars) flush();
+                });
+                flush();
+            });
+            return blocks;
         }
 
         function renderKeywords(list) {
+            var bar = document.getElementById("keywords-bar");
             var box = document.getElementById("keywords");
             box.innerHTML = "";
-            (list || []).forEach(function (word) {
-                var chip = document.createElement("span");
-                chip.className = "keyword";
-                chip.textContent = word;
-                box.appendChild(chip);
+            if (!list || !list.length) {
+                bar.hidden = true;
+                return;
+            }
+            bar.hidden = false;
+            list.forEach(function (word) {
+                var pill = document.createElement("span");
+                pill.className = "keyword-pill-interactive";
+                pill.textContent = "# " + word;
+                pill.addEventListener("click", function () { jumpToText(word); });
+                box.appendChild(pill);
             });
         }
 
+        // 본문은 모두 textContent 로 넣는다. 받아쓴 글에 태그처럼 보이는 문자가 섞여도
+        // 그대로 글자로 보여야 하고, 공유 화면에서 스크립트가 실행되면 안 된다.
         function renderScript(segments) {
             scriptBox.innerHTML = "";
-            paragraphs = [];
+            sentences = [];
+            activeSentence = null;
 
             if (!segments || !segments.length) {
                 var empty = document.createElement("p");
-                empty.style.color = "var(--fg-subtle)";
-                empty.textContent = "아직 스크립트가 없습니다.";
+                empty.style.cssText = "color:var(--color-fg-neutral-subtle); padding:60px 20px; text-align:center;";
+                empty.textContent = "스크립트 내용이 없습니다.";
                 scriptBox.appendChild(empty);
                 return;
             }
 
-            var lastSpeaker = null;
-            segments.forEach(function (seg) {
+            var totalMs = Math.round(knownDurationSec * 1000);
+            var blocks = splitSegmentsForDisplay(segments, totalMs);
+
+            blocks.forEach(function (seg, idx) {
                 var startMs = seg.start_time_ms || 0;
+                var nextBlock = blocks[idx + 1];
+                var endMs = seg.end_time_ms || (nextBlock ? nextBlock.start_time_ms : startMs + 10000);
+                var startSec = startMs / 1000;
+                var spanSec = Math.max(0.5, endMs / 1000 - startSec);
 
-                var row = document.createElement("div");
-                row.className = "para";
-                row.dataset.ms = String(startMs);
-                row.dataset.endMs = String(seg.end_time_ms || startMs + 5000);
+                var p = document.createElement("div");
+                p.className = "lexical__paragraph";
+                p.dataset.ms = String(startMs);
 
-                var time = document.createElement("button");
-                time.type = "button";
+                var head = document.createElement("div");
+                head.className = "para-head";
+                var time = document.createElement("span");
                 time.className = "para-time";
-                time.textContent = formatTime(startMs);
+                time.textContent = formatTime(startSec);
                 time.title = "이 지점부터 듣기";
-                time.addEventListener("click", function () { seekTo(startMs); });
-                row.appendChild(time);
+                time.addEventListener("click", function () { playAtMs(startMs, true); });
+                head.appendChild(time);
+                var who = document.createElement("span");
+                who.className = "para-speaker";
+                who.textContent = seg.speaker;
+                head.appendChild(who);
+                p.appendChild(head);
 
+                // 앱과 같이 문장마다 글자 수로 시각을 나눠 주고, 재생 중인 문장을 파랗게 칠한다.
                 var body = document.createElement("div");
-                if (seg.speaker && seg.speaker !== lastSpeaker) {
-                    var who = document.createElement("div");
-                    who.className = "para-speaker";
-                    who.textContent = seg.speaker;
-                    body.appendChild(who);
-                    lastSpeaker = seg.speaker;
-                }
+                body.className = "paragraph-text-body";
+                var rawText = (seg.content || "").trim();
+                var matches = rawText.match(/[^.!?…。\n]+[.!?…。\n]*\s*/g) || [rawText];
+                var totalChars = rawText.length || 1;
+                var charOffset = 0;
 
-                var text = document.createElement("div");
-                text.className = "para-text";
-                // 본문은 textContent 로만 넣는다. 받아쓴 글에 태그처럼 보이는 문자가 섞여도
-                // 그대로 글자로 보여야 하고, 공유 화면에서 스크립트가 실행되면 안 된다.
-                text.textContent = seg.content || "";
-                body.appendChild(text);
+                matches.forEach(function (sentText) {
+                    var trimmed = sentText.trim();
+                    if (!trimmed) return;
+                    var sStart = startSec + (charOffset / totalChars) * spanSec;
+                    var sEnd = startSec + ((charOffset + sentText.length) / totalChars) * spanSec;
+                    charOffset += sentText.length;
 
-                row.appendChild(body);
-                scriptBox.appendChild(row);
-                paragraphs.push(row);
+                    var sent = document.createElement("span");
+                    sent.className = "lexical-sentence";
+                    sent.dataset.startT = sStart.toFixed(2);
+                    sent.dataset.endT = sEnd.toFixed(2);
+
+                    var words = trimmed.split(/\s+/);
+                    var wCount = words.length || 1;
+                    words.forEach(function (w, wIdx) {
+                        var wT = sStart + (wIdx / wCount) * (sEnd - sStart);
+                        var span = document.createElement("span");
+                        span.className = "word";
+                        span.textContent = w + " ";
+                        span.addEventListener("click", function () { playAtMs(wT * 1000, false); });
+                        sent.appendChild(span);
+                    });
+
+                    body.appendChild(sent);
+                    sentences.push(sent);
+                });
+
+                p.appendChild(body);
+                scriptBox.appendChild(p);
             });
         }
 
-        function seekTo(ms) {
-            if (!audio.src) return;
+        // --- 재생 ---
+        function playAtMs(ms, scroll) {
+            if (!hasAudio) return;
             audio.currentTime = ms / 1000;
-            audio.play().catch(function () { /* 사용자가 재생을 막아 둔 경우 */ });
+            var started = audio.play();
+            if (started && started.catch) started.catch(function () { /* 사용자가 재생을 막아 둔 경우 */ });
+            if (scroll) scrollToBlockAt(ms);
         }
 
-        function highlightPlaying() {
-            var nowMs = audio.currentTime * 1000;
-            paragraphs.forEach(function (row) {
-                var start = parseInt(row.dataset.ms, 10) || 0;
-                var end = parseInt(row.dataset.endMs, 10) || start + 5000;
-                row.classList.toggle("playing", nowMs >= start && nowMs < end);
+        function scrollToBlockAt(ms) {
+            var target = null;
+            scriptBox.querySelectorAll(".lexical__paragraph").forEach(function (p) {
+                if ((parseFloat(p.dataset.ms) || 0) <= ms) target = p;
             });
+            if (target) target.scrollIntoView({ behavior: "smooth", block: "center" });
         }
 
-        audio.addEventListener("timeupdate", highlightPlaying);
+        function durationSec() {
+            return (isFinite(audio.duration) && audio.duration) || knownDurationSec || 0;
+        }
 
+        // 말풍선이 양 끝에서 화면 밖으로 반쯤 잘리지 않게 가장자리에서 24px 안쪽에 붙잡아 둔다
+        function placeTip(pct) {
+            progressTip.style.left = "clamp(24px, " + pct + "%, calc(100% - 24px))";
+        }
+
+        function setProgress(sec) {
+            var dur = durationSec();
+            if (dur <= 0) return;
+            var pct = Math.min(100, Math.max(0, (sec / dur) * 100));
+            progressFill.style.width = pct + "%";
+            placeTip(pct);
+            progressTip.textContent = formatTime(sec);
+        }
+
+        function highlightSentence(sec) {
+            var found = null;
+            for (var i = 0; i < sentences.length; i++) {
+                var s = parseFloat(sentences[i].dataset.startT) || 0;
+                var e = parseFloat(sentences[i].dataset.endT) || s + 5;
+                if (sec >= s && sec < e) { found = sentences[i]; break; }
+                if (sec >= s) found = sentences[i];
+            }
+            if (found !== activeSentence) {
+                if (activeSentence) activeSentence.classList.remove("active-sentence");
+                if (found) found.classList.add("active-sentence");
+                activeSentence = found;
+            }
+        }
+
+        audio.addEventListener("timeupdate", function () {
+            var sec = audio.currentTime;
+            timeDisplay.textContent = formatTime(sec);
+            setProgress(sec);
+            highlightSentence(sec);
+        });
+        audio.addEventListener("play", function () { playBtn.innerHTML = ICON_PAUSE; });
+        audio.addEventListener("pause", function () { playBtn.innerHTML = ICON_PLAY; });
+
+        function togglePlay() {
+            if (!hasAudio) return;
+            if (audio.paused) {
+                var started = audio.play();
+                if (started && started.catch) started.catch(function () {});
+            } else {
+                audio.pause();
+            }
+        }
+
+        function seekRelative(sec) {
+            audio.currentTime = Math.max(0, Math.min(durationSec() || 999999, audio.currentTime + sec));
+        }
+
+        function percentAt(event) {
+            var rect = progress.getBoundingClientRect();
+            return Math.max(0, Math.min(1, (event.clientX - rect.left) / rect.width));
+        }
+
+        playBtn.addEventListener("click", togglePlay);
+        document.getElementById("back-btn").addEventListener("click", function () { seekRelative(-3); });
+        document.getElementById("fwd-btn").addEventListener("click", function () { seekRelative(3); });
+
+        progress.addEventListener("click", function (e) {
+            var target = percentAt(e) * durationSec();
+            audio.currentTime = target;
+            setProgress(target);
+            scrollToBlockAt(target * 1000);
+        });
+        progress.addEventListener("mousemove", function (e) {
+            if (!audio.paused) return;
+            var pct = percentAt(e);
+            placeTip(pct * 100);
+            progressTip.textContent = formatTime(pct * durationSec());
+        });
+
+        var SPEEDS = [1, 1.2, 1.5, 1.8, 2, 0.8];
+        document.getElementById("speed-btn").addEventListener("click", function () {
+            var idx = SPEEDS.findIndex(function (r) { return Math.abs(r - (audio.playbackRate || 1)) < 0.05; });
+            var next = SPEEDS[((idx === -1 ? 0 : idx) + 1) % SPEEDS.length];
+            audio.playbackRate = next;
+            this.textContent = next + "x";
+            showToast("재생 속도: " + next + "x");
+        });
+
+        muteBtn.addEventListener("click", function () {
+            audio.muted = !audio.muted;
+            muteBtn.innerHTML = audio.muted ? ICON_MUTED : ICON_VOLUME;
+        });
+        document.getElementById("volume-slider").addEventListener("input", function () {
+            var vol = parseFloat(this.value);
+            audio.volume = vol;
+            audio.muted = vol === 0;
+            muteBtn.innerHTML = audio.muted ? ICON_MUTED : ICON_VOLUME;
+        });
+
+        // 앱처럼 스페이스바로 재생/일시정지. 검색창에 글을 쓸 때는 건드리지 않는다.
+        document.addEventListener("keydown", function (e) {
+            if (e.code !== "Space" || !hasAudio) return;
+            var tag = (e.target && e.target.tagName) || "";
+            if (tag === "INPUT" || tag === "TEXTAREA" || tag === "BUTTON") return;
+            e.preventDefault();
+            togglePlay();
+        });
+
+        // --- 검색 · 키워드 ---
+        var searchBar = document.getElementById("search-bar");
+        var searchInput = document.getElementById("search-input");
+
+        function findInTranscript(q) {
+            var query = (q || "").trim().toLowerCase();
+            var first = null;
+            scriptBox.querySelectorAll(".lexical__paragraph").forEach(function (p) {
+                var hit = query && p.querySelector(".paragraph-text-body").textContent.toLowerCase().indexOf(query) !== -1;
+                p.classList.toggle("search-hit", !!hit);
+                p.classList.toggle("search-dim", !!query && !hit);
+                if (hit && !first) first = p;
+            });
+            if (first) first.scrollIntoView({ behavior: "smooth", block: "center" });
+        }
+
+        function jumpToText(word) {
+            var query = (word || "").toLowerCase();
+            var paras = scriptBox.querySelectorAll(".lexical__paragraph");
+            for (var i = 0; i < paras.length; i++) {
+                if (paras[i].textContent.toLowerCase().indexOf(query) !== -1) {
+                    var p = paras[i];
+                    p.scrollIntoView({ behavior: "smooth", block: "center" });
+                    p.classList.add("search-hit");
+                    setTimeout(function () { p.classList.remove("search-hit"); }, 1500);
+                    return;
+                }
+            }
+            showToast("본문에서 찾지 못했습니다.");
+        }
+
+        document.getElementById("search-toggle").addEventListener("click", function () {
+            searchBar.hidden = !searchBar.hidden;
+            if (!searchBar.hidden) searchInput.focus();
+            else { searchInput.value = ""; findInTranscript(""); }
+        });
+        searchInput.addEventListener("input", function () { findInTranscript(this.value); });
+        document.getElementById("search-clear").addEventListener("click", function () {
+            searchInput.value = "";
+            findInTranscript("");
+            searchBar.hidden = true;
+        });
+
+        // --- 불러오기 ---
         fetch("/api/share/" + encodeURIComponent(token), { headers: { "Accept": "application/json" } })
             .then(function (res) {
                 if (res.status === 404) throw new Error("expired");
@@ -358,16 +1106,24 @@
                 return res.json();
             })
             .then(function (data) {
-                document.title = (data.title || "공유된 스크립트") + " · 읽기 전용";
-                document.getElementById("title").textContent = data.title || "제목 없음";
-                document.getElementById("created").textContent = data.created_at || "";
+                var title = data.title || "제목 없음";
+                document.title = title + " · 읽기 전용";
+                var titleEl = document.getElementById("title");
+                titleEl.textContent = title;
+                titleEl.title = title;
                 document.getElementById("duration").textContent = data.duration_str || "";
-                document.getElementById("meta-dot").hidden = !(data.created_at && data.duration_str);
+
+                // 마지막 문단이 어디서 끝나는지 알려면 전체 길이가 필요하다. 응답에는 "01:23:45"
+                // 문자열만 있어서 초로 되돌린다. (오디오가 열리면 audio.duration 이 우선한다)
+                knownDurationSec = String(data.duration_str || "").split(":").reduce(function (acc, n) {
+                    return acc * 60 + (parseInt(n, 10) || 0);
+                }, 0);
 
                 renderKeywords(data.keywords);
                 renderScript(data.segments);
 
                 if (data.has_audio && data.audio_url) {
+                    hasAudio = true;
                     audio.src = data.audio_url;
                     document.getElementById("player-bar").hidden = false;
                 }
@@ -376,6 +1132,7 @@
                 doc.hidden = false;
             })
             .catch(function (err) {
+                document.getElementById("title").textContent = "공유된 스크립트";
                 if (err && err.message === "expired") {
                     showState("링크를 열 수 없습니다.", "공유가 해제되었거나 주소가 잘못되었습니다.");
                 } else {
