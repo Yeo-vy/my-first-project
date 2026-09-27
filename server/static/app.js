@@ -466,15 +466,7 @@ function renderBoardsTable() {
             } else if (b.has_audio && !IN_FLIGHT_STATUSES.includes(b.status)) {
                 redoBtn = `<button class="icon-btn-small" onclick="retranscribeBoard(event, ${b.id})" title="다시 받아쓰기"><i class="fa-solid fa-rotate-right"></i></button>`;
             }
-            let downloadBtns = "";
-            if (b.status === "COMPLETED") {
-                downloadBtns += `<button class="icon-btn-small" onclick="event.stopPropagation(); quickExport(${b.id}, 'txt')" title="텍스트(.txt) 다운로드"><i class="fa-regular fa-file-lines"></i></button>`;
-                if (b.has_audio) {
-                    downloadBtns += `<button class="icon-btn-small" onclick="event.stopPropagation(); quickExport(${b.id}, 'audio')" title="원본 녹음파일 다운로드"><i class="fa-solid fa-file-audio"></i></button>`;
-                }
-            }
             actionButtons = `
-                ${downloadBtns}
                 ${redoBtn}
                 <button class="icon-btn-small" onclick="deleteBoard(${b.id})" title="삭제"><i class="fa-regular fa-trash-can"></i></button>
             `;

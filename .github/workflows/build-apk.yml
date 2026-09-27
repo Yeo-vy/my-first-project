@@ -54,14 +54,14 @@ jobs:
 
       - name: 빌드 로그 업로드
         if: always()
-        uses: actions/upload-artifact@v5
+        uses: actions/upload-artifact@v7
         with:
           name: build-log
           path: build.log
           if-no-files-found: ignore
 
       - name: APK 업로드 (Actions 아티팩트)
-        uses: actions/upload-artifact@v5
+        uses: actions/upload-artifact@v7
         with:
           name: VoiceRecorder-debug-apk
           path: app/build/outputs/apk/debug/app-debug.apk
