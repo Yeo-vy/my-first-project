@@ -170,15 +170,19 @@ body {
 .user-badge-text {
     display: flex;
     flex-direction: column;
+    justify-content: center;
     min-width: 0;
 }
 
 .user-badge .user-name {
-    font-size: 11.5px;
-    color: var(--text-muted);
+    font-size: 16px;
+    font-weight: 700;
+    color: #0f172a;
+    letter-spacing: -0.3px;
     white-space: nowrap;
     overflow: hidden;
     text-overflow: ellipsis;
+    line-height: 1.2;
 }
 
 .user-badge-caret {
@@ -2017,6 +2021,17 @@ body {
     background-color: var(--primary-light);
 }
 
+.export-btn-card.disabled {
+    opacity: 0.55;
+    cursor: not-allowed;
+    background-color: #f8fafc;
+}
+
+.export-btn-card.disabled:hover {
+    border-color: var(--border-color);
+    background-color: #f8fafc;
+}
+
 .export-btn-card i {
     font-size: 24px;
     color: var(--primary-color);
@@ -2026,6 +2041,47 @@ body {
     display: flex;
     justify-content: flex-end;
     gap: 8px;
+}
+
+/* 공유 모달: 주소 칸 + 복사 버튼 한 줄 */
+.share-link-row {
+    display: flex;
+    gap: 8px;
+    align-items: center;
+    margin: 14px 0 4px;
+}
+
+.share-link-row input[type="text"] {
+    flex: 1;
+    min-width: 0;
+    font-family: var(--font-mono, ui-monospace, Menlo, Consolas, monospace);
+    font-size: 12.5px;
+    color: var(--text-muted);
+    background-color: #f8fafc;
+}
+
+.share-link-row .btn-secondary {
+    flex-shrink: 0;
+}
+
+.share-viewed {
+    margin: 6px 0 18px;
+    font-size: 12.5px;
+    color: var(--text-muted);
+}
+
+.share-viewed:empty {
+    margin: 0 0 12px;
+}
+
+.btn-secondary.danger {
+    color: var(--danger-color);
+    border-color: #fecaca;
+}
+
+.btn-secondary.danger:hover {
+    background-color: #fef2f2;
+    border-color: var(--danger-color);
 }
 
 .toast {

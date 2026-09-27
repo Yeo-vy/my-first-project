@@ -41,6 +41,8 @@ class Board(Base):
     summaries = relationship("BoardSummary", back_populates="board", cascade="all, delete-orphan")
     chats = relationship("BoardChat", back_populates="board", cascade="all, delete-orphan", order_by="BoardChat.created_at")
     bookmarks = relationship("Bookmark", back_populates="board", cascade="all, delete-orphan", order_by="Bookmark.timestamp_ms")
+    # 보드를 지우면 공유 링크도 같이 죽어야 한다 (남아 있으면 삭제한 보드가 계속 열린다)
+    share = relationship("BoardShare", back_populates="board", cascade="all, delete-orphan", uselist=False)
 
 
 class TranscriptSegment(Base):
@@ -109,6 +111,27 @@ class GlossaryTerm(Base):
     term = Column(String(200), nullable=False)
     note = Column(String(300), default="")  # 설명 또는 자주 잘못 인식되는 표기
     created_at = Column(DateTime, default=datetime.datetime.utcnow)
+
+
+class BoardShare(Base):
+    """보드 하나를 '읽기 전용'으로 바깥에 여는 공유 링크.
+
+    로그인 세션(UserSession)과 달리 토큰을 해시가 아니라 그대로 보관한다. 공유 링크는
+    사람이 나중에 다시 복사해 갈 수 있어야 하기 때문이다. 대신 이 토큰으로 열리는 것은
+    이 보드의 스크립트와 오디오뿐이고, 목록·다른 보드·수정 API 는 열리지 않는다.
+
+    보드당 한 개만 둔다(board_id unique). 공유를 끄면 행을 지우므로 링크는 그 즉시 죽는다.
+    """
+    __tablename__ = "board_shares"
+
+    id = Column(Integer, primary_key=True, index=True)
+    board_id = Column(Integer, ForeignKey("boards.id"), nullable=False, unique=True, index=True)
+    token = Column(String(64), nullable=False, unique=True, index=True)
+    created_at = Column(DateTime, default=datetime.datetime.utcnow)
+    # 마지막으로 열람된 시각. 공유 화면에서 '누가 보고 갔는지' 대신 '열린 적이 있는지'만 남긴다.
+    last_viewed_at = Column(DateTime, nullable=True)
+
+    board = relationship("Board", back_populates="share")
 
 
 class User(Base):

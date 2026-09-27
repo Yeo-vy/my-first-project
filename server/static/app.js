@@ -466,7 +466,15 @@ function renderBoardsTable() {
             } else if (b.has_audio && !IN_FLIGHT_STATUSES.includes(b.status)) {
                 redoBtn = `<button class="icon-btn-small" onclick="retranscribeBoard(event, ${b.id})" title="다시 받아쓰기"><i class="fa-solid fa-rotate-right"></i></button>`;
             }
+            let downloadBtns = "";
+            if (b.status === "COMPLETED") {
+                downloadBtns += `<button class="icon-btn-small" onclick="event.stopPropagation(); quickExport(${b.id}, 'txt')" title="텍스트(.txt) 다운로드"><i class="fa-regular fa-file-lines"></i></button>`;
+                if (b.has_audio) {
+                    downloadBtns += `<button class="icon-btn-small" onclick="event.stopPropagation(); quickExport(${b.id}, 'audio')" title="원본 녹음파일 다운로드"><i class="fa-solid fa-file-audio"></i></button>`;
+                }
+            }
             actionButtons = `
+                ${downloadBtns}
                 ${redoBtn}
                 <button class="icon-btn-small" onclick="deleteBoard(${b.id})" title="삭제"><i class="fa-regular fa-trash-can"></i></button>
             `;
@@ -1434,11 +1442,114 @@ function openQuizModalFromHeader() {
     requestSummary("QUIZ");
 }
 
-function shareCurrentBoard() {
-    navigator.clipboard.writeText(window.location.href).then(() => {
-        showToast("보드 공유 링크가 복사되었습니다.");
+// -----------------------------------------
+// 공유 링크 (읽기 전용)
+//
+// 예전에는 지금 주소창을 그대로 복사했는데, 그 주소는 로그인해야 열리고 열리면 내 보드
+// 전부가 보인다. 그래서 이 보드 하나만 읽기 전용으로 여는 별도 주소를 만들어 준다.
+// -----------------------------------------
+async function shareCurrentBoard() {
+    if (!currentBoard) return;
+    const modal = document.getElementById("share-modal");
+    if (modal) modal.style.display = "flex";
+    renderShareState({ loading: true });
+
+    try {
+        const res = await fetch(`/api/boards/${currentBoard.id}/share`);
+        if (!res.ok) throw new Error("실패");
+        renderShareState(await res.json());
+    } catch (e) {
+        renderShareState({ error: true });
+    }
+}
+
+function closeShareModal() {
+    const modal = document.getElementById("share-modal");
+    if (modal) modal.style.display = "none";
+}
+
+function renderShareState(state) {
+    const body = document.getElementById("share-body");
+    const linkRow = document.getElementById("share-link-row");
+    const input = document.getElementById("share-link-input");
+    const createBtn = document.getElementById("share-create-btn");
+    const revokeBtn = document.getElementById("share-revoke-btn");
+    const viewed = document.getElementById("share-viewed");
+    if (!body) return;
+
+    if (state.loading) {
+        body.textContent = "공유 상태를 확인하는 중…";
+        linkRow.style.display = "none";
+        createBtn.style.display = "none";
+        revokeBtn.style.display = "none";
+        viewed.textContent = "";
+        return;
+    }
+
+    if (state.error) {
+        body.textContent = "공유 상태를 불러오지 못했습니다. 잠시 후 다시 시도해 주세요.";
+        linkRow.style.display = "none";
+        createBtn.style.display = "none";
+        revokeBtn.style.display = "none";
+        viewed.textContent = "";
+        return;
+    }
+
+    if (state.shared) {
+        body.textContent = "링크를 가진 사람은 이 보드의 스크립트만 볼 수 있습니다. 수정하거나 다른 보드를 열 수는 없습니다.";
+        input.value = state.url || "";
+        linkRow.style.display = "flex";
+        createBtn.style.display = "none";
+        revokeBtn.style.display = "inline-flex";
+        viewed.textContent = state.last_viewed_at
+            ? `마지막 열람: ${new Date(state.last_viewed_at + "Z").toLocaleString("ko-KR")}`
+            : "아직 아무도 열어 보지 않았습니다.";
+    } else {
+        body.textContent = "공유를 켜면 로그인 없이 이 보드의 스크립트만 볼 수 있는 주소가 만들어집니다.";
+        linkRow.style.display = "none";
+        createBtn.style.display = "inline-flex";
+        revokeBtn.style.display = "none";
+        viewed.textContent = "";
+    }
+}
+
+async function createShareLink() {
+    if (!currentBoard) return;
+    renderShareState({ loading: true });
+    try {
+        const res = await fetch(`/api/boards/${currentBoard.id}/share`, { method: "POST" });
+        if (!res.ok) throw new Error("실패");
+        const state = await res.json();
+        renderShareState(state);
+        copyShareLink();
+    } catch (e) {
+        renderShareState({ error: true });
+    }
+}
+
+async function revokeShareLink() {
+    if (!currentBoard) return;
+    if (!confirm("공유를 해제하면 이미 전달한 링크도 바로 열리지 않습니다. 해제할까요?")) return;
+    renderShareState({ loading: true });
+    try {
+        const res = await fetch(`/api/boards/${currentBoard.id}/share`, { method: "DELETE" });
+        if (!res.ok) throw new Error("실패");
+        renderShareState(await res.json());
+        showToast("공유를 해제했습니다.");
+    } catch (e) {
+        renderShareState({ error: true });
+    }
+}
+
+function copyShareLink() {
+    const input = document.getElementById("share-link-input");
+    if (!input || !input.value) return;
+    navigator.clipboard.writeText(input.value).then(() => {
+        showToast("공유 링크가 복사되었습니다.");
     }).catch(() => {
-        showToast("공유 링크 복사에 실패했습니다.");
+        // 클립보드를 막아 둔 브라우저에서는 사람이 직접 복사하도록 선택만 해 준다
+        input.select();
+        showToast("링크를 길게 눌러 복사해 주세요.");
     });
 }
 
@@ -1765,17 +1876,64 @@ async function submitRenameSpeaker() {
 // 8. 내보내기 & 업로드 모달
 // -----------------------------------------
 function openExportModal() {
-    document.getElementById("export-modal").style.display = "flex";
+    const modal = document.getElementById("export-modal");
+    if (!modal) return;
+    const audioBtn = document.getElementById("export-audio-btn");
+    const audioDesc = document.getElementById("export-audio-desc");
+    if (audioBtn) {
+        const hasAudio = currentBoard && (currentBoard.has_audio || currentBoard.audio_url);
+        if (hasAudio) {
+            audioBtn.classList.remove("disabled");
+            if (audioDesc) audioDesc.textContent = "업로드된 원본 오디오 파일 (.mp3, .m4a 등)";
+        } else {
+            audioBtn.classList.add("disabled");
+            if (audioDesc) audioDesc.textContent = "이 보드에는 원본 오디오 파일이 없습니다";
+        }
+    }
+    modal.style.display = "flex";
 }
 
 function closeExportModal() {
-    document.getElementById("export-modal").style.display = "none";
+    const modal = document.getElementById("export-modal");
+    if (modal) modal.style.display = "none";
+}
+
+function triggerDownload(url, filename) {
+    const a = document.createElement("a");
+    a.href = url;
+    if (filename) a.download = filename;
+    document.body.appendChild(a);
+    a.click();
+    setTimeout(() => {
+        if (a.parentNode) document.body.removeChild(a);
+    }, 200);
 }
 
 function exportFile(format) {
     if (!currentBoard) return;
-    window.open(`/api/boards/${currentBoard.id}/export?format=${format}`, "_blank");
+
+    if (format === "audio") {
+        const hasAudio = currentBoard.has_audio || currentBoard.audio_url;
+        if (!hasAudio) {
+            showToast("원본 오디오 파일이 존재하지 않습니다.");
+            return;
+        }
+        triggerDownload(`/api/boards/${currentBoard.id}/export?format=audio`);
+        closeExportModal();
+        showToast("원본 녹음 파일 다운로드를 시작합니다.");
+        return;
+    }
+
+    triggerDownload(`/api/boards/${currentBoard.id}/export?format=${format}`);
     closeExportModal();
+    const formatName = format === "txt" ? "텍스트(.txt)" : format.toUpperCase();
+    showToast(`${formatName} 파일 다운로드를 시작합니다.`);
+}
+
+function quickExport(boardId, format) {
+    triggerDownload(`/api/boards/${boardId}/export?format=${format}`);
+    const formatName = format === "audio" ? "원본 녹음 파일" : "텍스트(.txt)";
+    showToast(`${formatName} 다운로드를 시작합니다.`);
 }
 
 function openNewFolderModal() {

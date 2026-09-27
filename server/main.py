@@ -7,6 +7,7 @@ import shutil
 import mimetypes
 import datetime
 import queue
+import secrets
 import threading
 import unicodedata
 from typing import Optional, List
@@ -19,7 +20,10 @@ from sqlalchemy.orm import Session
 from pydantic import BaseModel
 
 from server.database import init_db, get_db, SessionLocal
-from server.models import Folder, Board, TranscriptSegment, BoardSummary, BoardChat, Bookmark, GlossaryTerm, User
+from server.models import (
+    Folder, Board, TranscriptSegment, BoardSummary, BoardChat, Bookmark,
+    GlossaryTerm, User, BoardShare,
+)
 from server import auth
 from server.migrator import (
     AUTO_TRANSCRIBE,
@@ -96,6 +100,22 @@ PUBLIC_PATHS = {
 if PING_PUBLIC:
     PUBLIC_PATHS.add("/api/ping")
 
+# 공유 링크(/share/<토큰>)로 들어온 사람만 통과하는 두 갈래.
+# 목록·다른 보드·수정 API 는 여기 없으므로, 토큰을 들고 있어도 그 보드의 스크립트와
+# 오디오 말고는 아무것도 열리지 않는다. 읽기(GET/HEAD)만 허용한다.
+SHARE_PAGE_PREFIX = "/share/"
+SHARE_API_PREFIX = "/api/share/"
+
+
+def is_public_share_path(path: str, method: str) -> bool:
+    """공유 링크로 로그인 없이 열어 줄 요청인지 판별한다.
+
+    뒤에 누가 이 접두사 밑에 쓰기 API 를 만들더라도 게이트가 먼저 막도록 메서드를 함께 본다.
+    """
+    if method not in ("GET", "HEAD"):
+        return False
+    return path.startswith(SHARE_PAGE_PREFIX) or path.startswith(SHARE_API_PREFIX)
+
 if LOGIN_PATH == "/login":
     print(
         "[WARN] LOGIN_PATH 가 기본값(/login)입니다. 인터넷에 열어 둔 서버라면 스캐너 봇이 "
@@ -113,6 +133,9 @@ async def auth_gate(request: Request, call_next):
     path = request.url.path
 
     if path in PUBLIC_PATHS or request.method == "OPTIONS":
+        return await call_next(request)
+
+    if is_public_share_path(path, request.method):
         return await call_next(request)
 
     # 자동화 스크립트/외부 클라이언트는 YEOVYVM_API_TOKEN / DAGLO_API_TOKEN 헤더로 통과할 수 있다.
@@ -1703,14 +1726,13 @@ def get_boards(
         })
     return results
 
-@app.get("/api/boards/{board_id}")
-def get_board_detail(board_id: int, db: Session = Depends(get_db)):
-    b = db.query(Board).filter_by(id=board_id).first()
-    if not b:
-        raise HTTPException(status_code=404, detail="보드를 찾을 수 없습니다.")
+def board_view_segments(b: Board) -> list:
+    """화면에 내보낼 스크립트 조각들.
 
-    # 이미 저장된 보드에도 두 번 받아쓴 조각이 남아 있어서, 화면에 보내기 전에 걸러 낸다.
-    # (DB 는 그대로 두고, 사용자가 스크립트를 저장하면 걸러진 모습으로 덮어써진다)
+    이미 저장된 보드에도 두 번 받아쓴 조각이 남아 있어서, 화면에 보내기 전에 걸러 낸다.
+    (DB 는 그대로 두고, 사용자가 스크립트를 저장하면 걸러진 모습으로 덮어써진다)
+    본인 화면과 공유 화면이 같은 스크립트를 보도록 두 곳에서 같이 쓴다.
+    """
     kept = drop_repeated_pieces([
         (s.start_time_ms or 0, s, strip_timestamps(s.content)) for s in b.segments
     ])
@@ -1725,6 +1747,16 @@ def get_board_detail(board_id: int, db: Session = Depends(get_db)):
             "content": content,
             "sequence": s.sequence
         })
+    return segments
+
+
+@app.get("/api/boards/{board_id}")
+def get_board_detail(board_id: int, db: Session = Depends(get_db)):
+    b = db.query(Board).filter_by(id=board_id).first()
+    if not b:
+        raise HTTPException(status_code=404, detail="보드를 찾을 수 없습니다.")
+
+    segments = board_view_segments(b)
 
     summaries = []
     for sum_item in b.summaries:
@@ -2258,14 +2290,31 @@ async def chat_with_board(board_id: int, req: ChatMessageRequest, db: Session = 
 # 5. Audio Streaming
 # -----------------
 @app.get("/api/audio/{board_id}")
-def stream_audio(board_id: int, request: Request, db: Session = Depends(get_db)):
+def stream_audio(board_id: int, request: Request, download: bool = Query(False), db: Session = Depends(get_db)):
     b = db.query(Board).filter_by(id=board_id).first()
+    return audio_response_for_board(b, request, download=download)
+
+
+def audio_response_for_board(b, request: Request, download: bool = False):
+    """보드의 오디오를 Range 요청까지 받아 내려준다 (로그인 화면과 공유 화면이 같이 쓴다)."""
     if not b or not b.audio_path or not os.path.exists(b.audio_path):
         raise HTTPException(status_code=404, detail="오디오 파일을 찾을 수 없습니다.")
 
     file_path = b.audio_path
     file_size = os.path.getsize(file_path)
     content_type = mimetypes.guess_type(file_path)[0] or "audio/mpeg"
+
+    if download:
+        import urllib.parse
+        ext = os.path.splitext(file_path)[1] or ".mp3"
+        filename = f"{sanitize_filename(b.title)}{ext}"
+        encoded_filename = urllib.parse.quote(filename)
+        return FileResponse(
+            file_path,
+            media_type=content_type,
+            filename=filename,
+            headers={"Content-Disposition": f"attachment; filename=\"{encoded_filename}\"; filename*=UTF-8''{encoded_filename}"}
+        )
 
     range_header = request.headers.get("Range")
     if range_header:
@@ -2303,7 +2352,8 @@ def stream_audio(board_id: int, request: Request, db: Session = Depends(get_db))
         return FileResponse(file_path, media_type=content_type, headers={"Accept-Ranges": "bytes"})
 
 # -----------------
-# 6. Export Endpoint (TXT, SRT, VTT, Markdown)
+# -----------------
+# 6. Export Endpoint (TXT, SRT, VTT, Markdown, Audio)
 # -----------------
 @app.get("/api/boards/{board_id}/export")
 def export_board(
@@ -2317,7 +2367,26 @@ def export_board(
     if not b:
         raise HTTPException(status_code=404, detail="보드를 찾을 수 없습니다.")
 
-    if format == "srt":
+    import urllib.parse
+    format_lower = (format or "txt").lower().strip()
+
+    if format_lower in ("audio", "mp3", "m4a", "wav", "original"):
+        if not b.audio_path or not os.path.exists(b.audio_path):
+            raise HTTPException(status_code=404, detail="원본 녹음 파일을 찾을 수 없습니다.")
+        ext = os.path.splitext(b.audio_path)[1] or ".mp3"
+        filename = f"{sanitize_filename(b.title)}{ext}"
+        media_type = mimetypes.guess_type(b.audio_path)[0] or "application/octet-stream"
+        encoded_filename = urllib.parse.quote(filename)
+        return FileResponse(
+            b.audio_path,
+            media_type=media_type,
+            filename=filename,
+            headers={
+                "Content-Disposition": f"attachment; filename=\"{encoded_filename}\"; filename*=UTF-8''{encoded_filename}"
+            }
+        )
+
+    if format_lower == "srt":
         srt_lines = []
         # 이전 버전이 '시작+10초'로 저장해 둔 보드도 겹치지 않게, 내보낼 때 이웃 기준으로 다시 잡는다
         segs = list(b.segments)
@@ -2337,7 +2406,8 @@ def export_board(
         content = "\n".join(srt_lines)
         media_type = "text/plain; charset=utf-8"
         filename = f"{sanitize_filename(b.title)}.srt"
-    elif format == "md":
+        content_bytes = content.encode("utf-8")
+    elif format_lower == "md":
         lines = [f"# {b.title}\n\n**녹음 일시**: {b.created_at}\n\n---\n"]
         for s in b.segments:
             prefix = ""
@@ -2347,8 +2417,8 @@ def export_board(
         content = "\n".join(lines)
         media_type = "text/markdown; charset=utf-8"
         filename = f"{sanitize_filename(b.title)}.md"
-    else:
-        # 예전에 촘촘하게 저장된 보드도 내보낼 때는 1분 내외 문단으로 묶어 준다
+        content_bytes = content.encode("utf-8")
+    else:  # format_lower == "txt"
         pieces = drop_repeated_pieces(
             [(s.start_time_ms or 0, s.speaker or "화자 1", strip_timestamps(s.content)) for s in b.segments]
         )
@@ -2359,15 +2429,26 @@ def export_board(
             if include_speakers and speaker: prefix += f"[{speaker}] "
             lines.append(f"{prefix}{text}")
         content = "\n\n".join(lines)
+        # segments 결과가 비어있는 경우 b.txt_path fallback
+        if not content.strip() and b.txt_path and os.path.exists(b.txt_path):
+            try:
+                with open(b.txt_path, "r", encoding="utf-8") as f:
+                    content = f.read()
+            except Exception:
+                pass
+        # group_by_sentence에서 문장이 걸러진 경우 대비
+        if not content.strip() and b.segments:
+            content = "\n\n".join([f"[{s.timestamp_str}] [{s.speaker}] {s.content}" for s in b.segments])
         media_type = "text/plain; charset=utf-8"
         filename = f"{sanitize_filename(b.title)}.txt"
+        # 윈도우 메모장에서 한글이 깨지지 않고 바로 열리도록 UTF-8 BOM 추가
+        content_bytes = b"\xef\xbb\xbf" + content.encode("utf-8")
 
-    import urllib.parse
     encoded_filename = urllib.parse.quote(filename)
     return Response(
-        content=content.encode("utf-8"),
+        content=content_bytes,
         media_type=media_type,
-        headers={"Content-Disposition": f"attachment; filename*=UTF-8''{encoded_filename}"}
+        headers={"Content-Disposition": f"attachment; filename=\"{encoded_filename}\"; filename*=UTF-8''{encoded_filename}"}
     )
 
 # -----------------
@@ -2468,6 +2549,135 @@ async def upload_audio_file(
         "needs_approval": board.status == "WAITING",
         "queue_depth": stt_queue.qsize(),
     }
+
+# -----------------
+# 7.5 공유 링크 (읽기 전용)
+#
+# 공유받은 사람은 로그인하지 않는다. 그래서 이 구간의 응답에는 '이 보드' 밖의 것이
+# 하나도 들어가면 안 된다 — 폴더 이름도, 보드 번호도, 다른 보드로 갈 실마리도.
+# 수정 API 는 아예 이 접두사 밑에 두지 않는다(게이트가 GET/HEAD 만 통과시킨다).
+# -----------------
+def find_shared_board(db: Session, token: str):
+    """공유 토큰으로 보드를 찾는다. 없거나 휴지통에 들어간 보드면 None."""
+    token = (token or "").strip()
+    if not token or len(token) > 64:
+        return None
+    share = db.query(BoardShare).filter(BoardShare.token == token).one_or_none()
+    if share is None:
+        return None
+    board = db.query(Board).filter_by(id=share.board_id).first()
+    if board is None or board.is_deleted:
+        return None
+    return share, board
+
+
+def share_url_for(request: Request, token: str) -> str:
+    """공유 링크 전체 주소. 리버스 프록시 뒤에서도 브라우저가 본 주소를 그대로 쓴다."""
+    return f"{str(request.base_url).rstrip('/')}{SHARE_PAGE_PREFIX}{token}"
+
+
+def share_state(request: Request, share: Optional[BoardShare]) -> dict:
+    if share is None:
+        return {"shared": False, "url": None, "created_at": None, "last_viewed_at": None}
+    return {
+        "shared": True,
+        "url": share_url_for(request, share.token),
+        "created_at": share.created_at.isoformat() if share.created_at else None,
+        "last_viewed_at": share.last_viewed_at.isoformat() if share.last_viewed_at else None,
+    }
+
+
+@app.get("/api/boards/{board_id}/share")
+def get_board_share(board_id: int, request: Request, db: Session = Depends(get_db)):
+    """이 보드가 지금 공유 중인지 알려 준다 (공유 창을 열 때 쓴다)."""
+    b = db.query(Board).filter_by(id=board_id).first()
+    if not b:
+        raise HTTPException(status_code=404, detail="보드를 찾을 수 없습니다.")
+    return share_state(request, b.share)
+
+
+@app.post("/api/boards/{board_id}/share")
+def create_board_share(board_id: int, request: Request, db: Session = Depends(get_db)):
+    """공유를 켠다. 이미 켜져 있으면 같은 링크를 그대로 돌려준다(누를 때마다 바뀌면 곤란하다)."""
+    b = db.query(Board).filter_by(id=board_id).first()
+    if not b:
+        raise HTTPException(status_code=404, detail="보드를 찾을 수 없습니다.")
+    if b.is_deleted:
+        raise HTTPException(status_code=400, detail="휴지통에 있는 보드는 공유할 수 없습니다.")
+
+    if b.share is None:
+        db.add(BoardShare(board_id=b.id, token=secrets.token_urlsafe(24)))
+        db.commit()
+        db.refresh(b)
+    return share_state(request, b.share)
+
+
+@app.delete("/api/boards/{board_id}/share")
+def revoke_board_share(board_id: int, request: Request, db: Session = Depends(get_db)):
+    """공유를 끈다. 행을 지우므로 돌아다니던 링크는 그 즉시 404 가 된다."""
+    b = db.query(Board).filter_by(id=board_id).first()
+    if not b:
+        raise HTTPException(status_code=404, detail="보드를 찾을 수 없습니다.")
+    if b.share is not None:
+        db.delete(b.share)
+        db.commit()
+    return {"shared": False, "url": None, "created_at": None, "last_viewed_at": None}
+
+
+@app.get(SHARE_PAGE_PREFIX + "{token}")
+def serve_share_page(token: str, db: Session = Depends(get_db)):
+    """공유 화면. 토큰이 틀리면 로그인 화면이 아니라 그냥 없는 페이지로 응답한다."""
+    if find_shared_board(db, token) is None:
+        return Response(content="Not Found", status_code=404, media_type="text/plain")
+    share_path = os.path.join(STATIC_DIR, "share.html")
+    if not os.path.exists(share_path):
+        return Response(content="Not Found", status_code=404, media_type="text/plain")
+    # 공유 링크가 검색엔진·캐시에 남지 않게 한다.
+    return FileResponse(share_path, headers={
+        "X-Robots-Tag": "noindex, nofollow",
+        "Cache-Control": "no-store",
+    })
+
+
+@app.get(SHARE_API_PREFIX + "{token}")
+def get_shared_board(token: str, db: Session = Depends(get_db)):
+    """공유 화면이 읽는 내용. 스크립트와 제목뿐이고, 고칠 수 있는 통로는 없다."""
+    found = find_shared_board(db, token)
+    if found is None:
+        raise HTTPException(status_code=404, detail="링크가 만료되었거나 잘못된 주소입니다.")
+    share, b = found
+
+    share.last_viewed_at = datetime.datetime.utcnow()
+    db.commit()
+
+    try:
+        keywords = json.loads(b.keywords_json) if b.keywords_json else []
+    except Exception:
+        keywords = []
+
+    return {
+        "title": b.title,
+        "duration_str": format_seconds(b.duration_seconds),
+        "created_at": b.created_at.strftime("%Y. %m. %d. %H:%M") if b.created_at else "",
+        "status": b.status,
+        "keywords": keywords,
+        "segments": board_view_segments(b),
+        "has_audio": bool(b.audio_path and os.path.exists(b.audio_path)),
+        "audio_url": (
+            f"{SHARE_API_PREFIX}{token}/audio"
+            if b.audio_path and os.path.exists(b.audio_path) else None
+        ),
+    }
+
+
+@app.get(SHARE_API_PREFIX + "{token}/audio")
+def stream_shared_audio(token: str, request: Request, db: Session = Depends(get_db)):
+    """공유 화면의 재생용 오디오. 보드 번호가 아니라 토큰으로만 찾는다."""
+    found = find_shared_board(db, token)
+    if found is None:
+        raise HTTPException(status_code=404, detail="링크가 만료되었거나 잘못된 주소입니다.")
+    return audio_response_for_board(found[1], request)
+
 
 # -----------------
 # 8. Static Files & Root
