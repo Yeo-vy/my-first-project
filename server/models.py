@@ -128,10 +128,30 @@ class BoardShare(Base):
     board_id = Column(Integer, ForeignKey("boards.id"), nullable=False, unique=True, index=True)
     token = Column(String(64), nullable=False, unique=True, index=True)
     created_at = Column(DateTime, default=datetime.datetime.utcnow)
-    # 마지막으로 열람된 시각. 공유 화면에서 '누가 보고 갔는지' 대신 '열린 적이 있는지'만 남긴다.
+    # 마지막으로 열람된 시각.
     last_viewed_at = Column(DateTime, nullable=True)
 
     board = relationship("Board", back_populates="share")
+    views = relationship("BoardShareView", back_populates="share", cascade="all, delete-orphan")
+
+
+class BoardShareView(Base):
+    """공유 링크를 연 곳(IP)별 열람 기록. 공유 창에 '최근 접속자' 로 보여 준다.
+
+    IP 하나당 한 줄만 두고 다시 열면 시각과 횟수만 갱신한다 — 새로고침할 때마다 줄이 쌓이지 않게.
+    board_shares 에 칼럼을 더하지 않고 표를 따로 둔 것은, 이미 돌고 있는 DB 에도
+    create_all 만으로 붙기 때문이다(ALTER 없이).
+    """
+    __tablename__ = "board_share_views"
+
+    id = Column(Integer, primary_key=True, index=True)
+    share_id = Column(Integer, ForeignKey("board_shares.id", ondelete="CASCADE"), nullable=False, index=True)
+    ip = Column(String(64), nullable=False)
+    first_viewed_at = Column(DateTime, default=datetime.datetime.utcnow)
+    last_viewed_at = Column(DateTime, default=datetime.datetime.utcnow)
+    view_count = Column(Integer, default=1)
+
+    share = relationship("BoardShare", back_populates="views")
 
 
 class User(Base):

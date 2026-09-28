@@ -1,8 +1,12 @@
 package com.recorder.voicenote
 
 import android.Manifest
+import android.content.ClipData
+import android.content.ClipboardManager
 import android.content.Context
 import android.content.pm.PackageManager
+import android.os.Handler
+import android.os.Looper
 import android.webkit.JavascriptInterface
 import androidx.core.content.ContextCompat
 import org.json.JSONArray
@@ -131,6 +135,26 @@ class RecorderBridge(
     fun retryUploads() {
         // 파일을 훑고 WorkManager 에 넣는 일이라 JS 스레드를 잡아 두지 않는다
         Thread { UploadWorker.retryPending(context) }.start()
+    }
+
+    /**
+     * 글을 클립보드에 넣는다. http 로 연 웹 화면에서는 WebView 가 navigator.clipboard 를 주지 않고
+     * execCommand("copy") 도 기기마다 되다 말다 해서, 앱 안에서는 이 길로 복사한다.
+     * 옛 안드로이드는 ClipboardManager 를 만들 때 Handler 를 만들어서 Looper 없는 JS 스레드에서
+     * 부르면 죽는다. 그래서 메인 스레드로 넘겨서 넣고, 웹에는 곧바로 true 를 돌려준다.
+     */
+    @JavascriptInterface
+    fun copyText(text: String?): Boolean {
+        val value = text ?: ""
+        Handler(Looper.getMainLooper()).post {
+            try {
+                val clipboard = context.getSystemService(Context.CLIPBOARD_SERVICE) as? ClipboardManager
+                clipboard?.setPrimaryClip(ClipData.newPlainText("yeovyVM", value))
+            } catch (e: Exception) {
+                // 복사에 실패해도 앱이 죽으면 안 된다
+            }
+        }
+        return true
     }
 
     /** 오프라인 화면에서 '서버 화면 열기' 를 눌렀다. */

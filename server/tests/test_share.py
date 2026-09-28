@@ -28,7 +28,7 @@ os.environ["LOGIN_PATH"] = "test-gate"
 from fastapi.testclient import TestClient  # noqa: E402
 
 from server.database import SessionLocal, init_db  # noqa: E402
-from server.models import Board, Folder, TranscriptSegment  # noqa: E402
+from server.models import Board, BoardShareView, Folder, TranscriptSegment  # noqa: E402
 from server import auth, main  # noqa: E402
 
 passed = 0
@@ -164,9 +164,25 @@ check("내용이 그대로다", unchanged["title"] == "공유할 강의" and len
 # -----------------
 state = client.get(f"/api/boards/{shared_id}/share").json()
 check("열람 시각이 남는다", state.get("last_viewed_at") is not None, str(state))
+viewers = state.get("viewers") or []
+check("접속자 IP 가 남는다", len(viewers) >= 1 and bool(viewers[0].get("ip")), str(state))
+
+# 같은 IP 가 다시 열면 줄이 늘지 않고 횟수만 오른다
+before = {v["ip"]: v["view_count"] for v in viewers}
+anon.get(f"/api/share/{token}")
+after = client.get(f"/api/boards/{shared_id}/share").json()["viewers"]
+check("같은 IP 는 한 줄로 합쳐진다", len(after) == len(viewers), str(after))
+check("다시 열면 횟수가 오른다",
+      any(v["view_count"] == before.get(v["ip"], 0) + 1 for v in after), str(after))
+
+# 프록시 뒤에서 온 요청은 X-Forwarded-For 의 첫 주소로 남는다
+anon.get(f"/api/share/{token}", headers={"X-Forwarded-For": "203.0.113.7, 10.0.0.1"})
+after = client.get(f"/api/boards/{shared_id}/share").json()["viewers"]
+check("새 IP 가 맨 위에 보인다", after and after[0]["ip"] == "203.0.113.7", str(after))
 
 revoked = client.delete(f"/api/boards/{shared_id}/share")
 check("공유 해제 성공", revoked.status_code == 200 and revoked.json()["shared"] is False)
+check("해제하면 접속 기록도 지워진다", SessionLocal().query(BoardShareView).count() == 0)
 check("해제하면 내용이 바로 죽는다", anon.get(f"/api/share/{token}").status_code == 404)
 check("해제하면 화면도 바로 죽는다", anon.get(f"/share/{token}").status_code == 404)
 

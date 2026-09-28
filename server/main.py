@@ -22,7 +22,7 @@ from pydantic import BaseModel
 from server.database import init_db, get_db, SessionLocal
 from server.models import (
     Folder, Board, TranscriptSegment, BoardSummary, BoardChat, Bookmark,
-    GlossaryTerm, User, BoardShare,
+    GlossaryTerm, User, BoardShare, BoardShareView,
 )
 from server import auth
 from server.migrator import (
@@ -126,6 +126,20 @@ if LOGIN_REDIRECT:
         "[WARN] LOGIN_REDIRECT 가 켜져 있습니다. 루트(/)로 들어온 봇에게 302 응답으로 "
         f"{LOGIN_PATH} 주소가 그대로 새어 나갑니다."
     )
+
+
+@app.middleware("http")
+async def static_revalidate(request: Request, call_next):
+    """/static 파일은 매번 서버에 '바뀌었나' 를 묻게 한다.
+
+    캐시 헤더가 없으면 브라우저가 app.js 를 며칠씩 옛것으로 쓴다. 그러면 서버를 고쳐도
+    화면에서는 예전 버그(예: http 에서 복사 버튼이 조용히 실패)가 그대로 남는다.
+    no-cache 는 '저장하지 마' 가 아니라 '쓰기 전에 확인해' 라서, 안 바뀌었으면 304 로 끝난다.
+    """
+    response = await call_next(request)
+    if request.url.path.startswith("/static/"):
+        response.headers["Cache-Control"] = "no-cache"
+    return response
 
 
 @app.middleware("http")
@@ -2576,15 +2590,41 @@ def share_url_for(request: Request, token: str) -> str:
     return f"{str(request.base_url).rstrip('/')}{SHARE_PAGE_PREFIX}{token}"
 
 
+# 공유 창에 보여 줄 최근 접속자 수
+SHARE_RECENT_VIEWERS = 10
+
+
 def share_state(request: Request, share: Optional[BoardShare]) -> dict:
     if share is None:
-        return {"shared": False, "url": None, "created_at": None, "last_viewed_at": None}
+        return {"shared": False, "url": None, "created_at": None, "last_viewed_at": None, "viewers": []}
+    recent = sorted(share.views, key=lambda v: v.last_viewed_at or datetime.datetime.min, reverse=True)
     return {
         "shared": True,
         "url": share_url_for(request, share.token),
         "created_at": share.created_at.isoformat() if share.created_at else None,
         "last_viewed_at": share.last_viewed_at.isoformat() if share.last_viewed_at else None,
+        "viewers": [
+            {
+                "ip": v.ip,
+                "last_viewed_at": v.last_viewed_at.isoformat() if v.last_viewed_at else None,
+                "view_count": v.view_count or 1,
+            }
+            for v in recent[:SHARE_RECENT_VIEWERS]
+        ],
     }
+
+
+def record_share_view(db: Session, share: BoardShare, ip: str) -> None:
+    """공유 링크 열람을 남긴다. 같은 IP 가 다시 열면 시각과 횟수만 올린다."""
+    now = datetime.datetime.utcnow()
+    share.last_viewed_at = now
+    view = db.query(BoardShareView).filter_by(share_id=share.id, ip=ip).first()
+    if view is None:
+        db.add(BoardShareView(share_id=share.id, ip=ip, first_viewed_at=now, last_viewed_at=now, view_count=1))
+    else:
+        view.last_viewed_at = now
+        view.view_count = (view.view_count or 0) + 1
+    db.commit()
 
 
 @app.get("/api/boards/{board_id}/share")
@@ -2621,7 +2661,7 @@ def revoke_board_share(board_id: int, request: Request, db: Session = Depends(ge
     if b.share is not None:
         db.delete(b.share)
         db.commit()
-    return {"shared": False, "url": None, "created_at": None, "last_viewed_at": None}
+    return share_state(request, None)
 
 
 @app.get(SHARE_PAGE_PREFIX + "{token}")
@@ -2640,15 +2680,14 @@ def serve_share_page(token: str, db: Session = Depends(get_db)):
 
 
 @app.get(SHARE_API_PREFIX + "{token}")
-def get_shared_board(token: str, db: Session = Depends(get_db)):
+def get_shared_board(token: str, request: Request, db: Session = Depends(get_db)):
     """공유 화면이 읽는 내용. 스크립트와 제목뿐이고, 고칠 수 있는 통로는 없다."""
     found = find_shared_board(db, token)
     if found is None:
         raise HTTPException(status_code=404, detail="링크가 만료되었거나 잘못된 주소입니다.")
     share, b = found
 
-    share.last_viewed_at = datetime.datetime.utcnow()
-    db.commit()
+    record_share_view(db, share, auth.client_ip(request))
 
     try:
         keywords = json.loads(b.keywords_json) if b.keywords_json else []

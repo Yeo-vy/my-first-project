@@ -1393,7 +1393,16 @@ function formatTime(secs) {
 // http://IP 로 접속하면 브라우저가 navigator.clipboard 자체를 주지 않는다(https·localhost 전용).
 // 그때 writeText 를 부르면 Promise 가 아니라 그 자리에서 예외가 나서 .catch() 로도 못 잡는다.
 // 그래서 없으면 숨긴 textarea 를 골라 execCommand("copy") 로 복사한다 — 이건 http 에서도 된다.
+//
+// 태블릿 앱(WebView) 안에서는 둘 다 막힐 수 있어서, 앱이 주는 네이티브 복사를 가장 먼저 쓴다.
 async function copyText(text) {
+    if (window.DagloNative && typeof window.DagloNative.copyText === "function") {
+        try {
+            if (window.DagloNative.copyText(text)) return true;
+        } catch (e) {
+            // 옛 앱이거나 다리가 끊겼다 — 웹 방식으로 넘어간다
+        }
+    }
     if (navigator.clipboard && window.isSecureContext) {
         try {
             await navigator.clipboard.writeText(text);
@@ -1409,7 +1418,11 @@ async function copyText(text) {
     ta.style.top = "0";
     ta.style.left = "0";
     ta.style.opacity = "0";
+    // 모달 안의 버튼에 포커스가 남아 있으면 select() 만으로는 선택이 잡히지 않는 브라우저가 있다.
+    // 그래서 textarea 에 포커스를 옮겼다가 끝나면 원래 자리로 돌려준다.
+    const prevFocus = document.activeElement;
     document.body.appendChild(ta);
+    ta.focus({ preventScroll: true });
     ta.select();
     ta.setSelectionRange(0, text.length);
     let ok = false;
@@ -1419,6 +1432,7 @@ async function copyText(text) {
         ok = false;
     }
     document.body.removeChild(ta);
+    if (prevFocus && typeof prevFocus.focus === "function") prevFocus.focus({ preventScroll: true });
     return ok;
 }
 
@@ -1492,7 +1506,9 @@ function renderShareState(state) {
     const createBtn = document.getElementById("share-create-btn");
     const revokeBtn = document.getElementById("share-revoke-btn");
     const viewed = document.getElementById("share-viewed");
+    const viewers = document.getElementById("share-viewers");
     if (!body) return;
+    renderShareViewers(viewers, state.shared ? state.viewers : null);
 
     if (state.loading) {
         body.textContent = "공유 상태를 확인하는 중…";
@@ -1527,6 +1543,29 @@ function renderShareState(state) {
         createBtn.style.display = "inline-flex";
         revokeBtn.style.display = "none";
         viewed.textContent = "";
+    }
+}
+
+// 공유 링크를 연 IP 들 (최근 순). 서버 시각은 UTC 라서 "Z" 를 붙여 이 기기 시각으로 바꾼다.
+function renderShareViewers(list, viewers) {
+    if (!list) return;
+    list.innerHTML = "";
+    if (!viewers || viewers.length === 0) return;
+    const title = document.createElement("li");
+    title.className = "share-viewers-title";
+    title.textContent = "최근 접속자";
+    list.appendChild(title);
+    for (const v of viewers) {
+        const li = document.createElement("li");
+        const ip = document.createElement("span");
+        ip.className = "share-viewer-ip";
+        ip.textContent = v.ip;
+        const meta = document.createElement("span");
+        meta.className = "share-viewer-meta";
+        const when = v.last_viewed_at ? new Date(v.last_viewed_at + "Z").toLocaleString("ko-KR") : "";
+        meta.textContent = v.view_count > 1 ? `${when} · ${v.view_count}회` : when;
+        li.append(ip, meta);
+        list.appendChild(li);
     }
 }
 

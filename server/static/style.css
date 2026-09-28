@@ -2074,6 +2074,47 @@ body {
     margin: 0 0 12px;
 }
 
+/* 공유 모달: 최근 접속자(IP) 목록 */
+.share-viewers {
+    list-style: none;
+    margin: -10px 0 18px;
+    padding: 0;
+    max-height: 180px;
+    overflow-y: auto;
+    font-size: 12.5px;
+}
+
+.share-viewers:empty {
+    display: none;
+}
+
+.share-viewers li {
+    display: flex;
+    justify-content: space-between;
+    gap: 12px;
+    padding: 4px 0;
+    border-bottom: 1px solid #f1f5f9;
+}
+
+.share-viewers li:last-child {
+    border-bottom: none;
+}
+
+.share-viewers .share-viewers-title {
+    color: var(--text-muted);
+    font-weight: 600;
+    border-bottom: none;
+}
+
+.share-viewer-ip {
+    font-family: var(--font-mono, ui-monospace, Menlo, Consolas, monospace);
+}
+
+.share-viewer-meta {
+    color: var(--text-muted);
+    white-space: nowrap;
+}
+
 .btn-secondary.danger {
     color: var(--danger-color);
     border-color: #fecaca;
