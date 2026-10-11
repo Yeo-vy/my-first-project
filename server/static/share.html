@@ -4,25 +4,36 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
     <meta name="robots" content="noindex, nofollow">
-    <title>공유된 스크립트</title>
+    <title>공유된 스크립트 · yeovyVM</title>
     <link rel="stylesheet" as="style" crossorigin href="https://cdn.jsdelivr.net/gh/orioncactus/pretendard@v1.3.9/dist/web/static/pretendard.min.css">
-    <!--
-      공유 화면은 로그인하지 않은 사람이 여는 유일한 페이지다.
-      /static 은 로그인해야 열리므로 스타일과 스크립트를 이 파일 안에 모두 담아 둔다.
-      (여기서 /static/style.css 를 불러오면 공유받은 사람 화면에서 404 가 난다)
-
-      모양은 앱의 보드 상세 화면(index.html #board-detail-view)과 똑같이 맞췄다.
-      아래 규칙은 style.css 에서 상세 화면에 쓰이는 것만 옮겨 온 것이라,
-      앱 쪽 모양을 바꾸면 여기도 같이 바꿔야 한다.
-      편집·북마크·AI 패널·다운로드처럼 보드를 건드리거나 원본을 내려받는 기능은 뺐다.
-    -->
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.1/css/all.min.css">
     <style>
         :root {
             --font-sans: Pretendard Variable, Pretendard, -apple-system, BlinkMacSystemFont, system-ui, Roboto, Helvetica Neue, Segoe UI, Apple SD Gothic Neo, Noto Sans KR, Malgun Gothic, sans-serif;
+            --font-mono: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
 
+            /* yeovyVM Color Tokens */
+            --color-red-100: #fde1dd;
+            --color-red-400: #f16056;
+            --color-red-500: #ef4b3f;
+            --color-red-600: #d34034;
+            --color-yellow-100: #fff5cd;
+            --color-yellow-400: #ffcf25;
             --color-yellow-500: #ffc700;
+            --color-yellow-600: #d8a801;
+            --color-green-100: #daf5e6;
+            --color-green-400: #4dcf87;
+            --color-green-500: #27c56d;
+            --color-cyan-100: #d7f8f5;
+            --color-cyan-500: #00c3b3;
+            --color-blue-50: #f5f9ff;
+            --color-blue-100: #eaf2ff;
+            --color-blue-200: #bfd8ff;
             --color-blue-400: #4f90fc;
             --color-blue-500: #216cf8;
+            --color-blue-600: #1c5cd8;
+            --color-blue-700: #174cb7;
+            --color-blue-900: #0c2c77;
 
             --color-dark-gray-10: #0b0c0e;
             --color-dark-gray-25: #121315;
@@ -35,13 +46,29 @@
             --color-dark-gray-600: #96989d;
             --color-dark-gray-700: #b6b8bd;
             --color-dark-gray-800: #d6d8dc;
+            --color-dark-gray-900: #eff0f2;
 
             --color-fg-neutral: var(--color-dark-gray-800);
+            --color-fg-neutral-weak: var(--color-dark-gray-600);
+            --color-fg-neutral-soft: var(--color-dark-gray-500);
             --color-fg-neutral-subtle: var(--color-dark-gray-400);
+            --color-fg-neutral-faint: var(--color-dark-gray-200);
+            --color-fg-neutral-inverted: var(--color-dark-gray-50);
+            --color-fg-placeholder: var(--color-dark-gray-400);
             --color-fg-brand: var(--color-blue-400);
+            --color-fg-brand-weak: var(--color-blue-200);
+            --color-fg-point-cyan: var(--color-cyan-500);
+
+            --color-bg-default: var(--color-dark-gray-50);
             --color-bg-neutral: var(--color-dark-gray-25);
+            --color-bg-neutral-weak: var(--color-dark-gray-10);
+            --color-bg-neutral-strong: var(--color-dark-gray-100);
             --color-bg-brand: var(--color-blue-500);
+            --color-bg-brand-weak: var(--color-blue-700);
+
+            --color-stroke-neutral: var(--color-dark-gray-200);
             --color-stroke-neutral-weak: var(--color-dark-gray-100);
+            --color-stroke-neutral-strong: var(--color-dark-gray-300);
 
             --text-regular15: .9375rem;
             --text-regular15--line-height: 1.375rem;
@@ -69,20 +96,16 @@
             -webkit-font-smoothing: antialiased;
         }
 
-        [hidden] { display: none !important; }
-
-        /* 앱은 position:fixed 로 화면을 덮지만, 여기서는 이 화면 하나뿐이라
-           세로 flex 로 머리·본문·재생 막대를 쌓는다. 폰 주소창이 들어가고 나와도
-           재생 막대가 가려지지 않게 dvh 를 쓴다. */
         #view {
             height: 100vh;
             height: 100dvh;
             display: flex;
             flex-direction: column;
             overflow: hidden;
+            position: relative;
         }
 
-        /* --- 머리 --- */
+        /* --- 상단 헤더 --- */
         .detail-header {
             height: 56px;
             display: flex;
@@ -93,72 +116,89 @@
             border-bottom: 1px solid var(--color-stroke-neutral-weak);
             background-color: var(--color-dark-gray-25);
             flex-shrink: 0;
+            z-index: 10;
         }
 
         .detail-left-header {
             display: flex;
             align-items: center;
-            gap: 8px;
+            gap: 10px;
             min-width: 0;
-            flex: 1;
         }
 
         .detail-left-header .breadcrumb {
-            color: var(--color-dark-gray-500);
-            font-size: 13.5px;
-            font-weight: 500;
+            font-size: 13px;
+            color: var(--color-fg-neutral-subtle);
             white-space: nowrap;
         }
 
         .detail-left-header .divider {
-            color: var(--color-dark-gray-300);
-            margin: 0 2px;
+            color: var(--color-stroke-neutral-weak);
         }
 
         .detail-title {
-            font-size: 14.5px;
-            font-weight: 600;
+            font-size: 16px;
+            font-weight: 700;
             color: #ffffff;
-            padding: 3px 8px;
-            border-radius: 4px;
             white-space: nowrap;
             overflow: hidden;
             text-overflow: ellipsis;
-            min-width: 0;
         }
 
         .detail-right-header {
             display: flex;
             align-items: center;
-            gap: 10px;
+            gap: 12px;
             flex-shrink: 0;
-            color: var(--color-dark-gray-500);
-            font-size: 12.5px;
+        }
+
+        #duration {
+            font-size: 13px;
+            color: var(--color-fg-neutral-subtle);
             font-variant-numeric: tabular-nums;
         }
 
         .read-only-pill {
-            background-color: var(--color-dark-gray-50);
-            border: 1px solid var(--color-stroke-neutral-weak);
-            color: var(--color-dark-gray-600);
-            border-radius: 9999px;
-            padding: 5px 12px;
-            font-size: 12.5px;
-            font-weight: 500;
             display: inline-flex;
             align-items: center;
-            gap: 6px;
-            white-space: nowrap;
+            gap: 5px;
+            padding: 4px 10px;
+            font-size: 12px;
+            font-weight: 600;
+            color: var(--color-dark-gray-600);
+            background-color: var(--color-dark-gray-50);
+            border: 1px solid var(--color-stroke-neutral-weak);
+            border-radius: 9999px;
+            user-select: none;
+        }
+
+        /* --- 상태 표시 (로딩/오류) --- */
+        .state {
+            flex: 1;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            gap: 8px;
+            padding: 60px 20px;
+            text-align: center;
+            color: var(--color-fg-neutral-subtle);
+        }
+
+        .state h2 {
+            font-size: 17px;
+            font-weight: 600;
+            color: var(--color-dark-gray-600);
         }
 
         /* --- 스크립트 패널 --- */
         .script-panel {
             flex: 1;
-            min-height: 0;
             display: flex;
             flex-direction: column;
             overflow: hidden;
             background-color: var(--color-dark-gray-10);
+            min-height: 0;
         }
 
         .script-tab-header {
@@ -189,8 +229,7 @@
             gap: 4px;
         }
 
-        .script-header-icon-btn,
-        .icon-btn-small {
+        .script-header-icon-btn {
             background: none;
             border: none;
             color: var(--color-dark-gray-500);
@@ -203,8 +242,7 @@
             transition: all 0.15s;
         }
 
-        .script-header-icon-btn:hover,
-        .icon-btn-small:hover {
+        .script-header-icon-btn:hover {
             color: #ffffff;
             background-color: var(--color-dark-gray-50);
         }
@@ -231,6 +269,7 @@
             display: inline-flex;
             align-items: center;
             gap: 6px;
+            user-select: none;
         }
 
         .keywords-container {
@@ -271,7 +310,6 @@
 
         .script-search-bar input {
             flex: 1;
-            min-width: 0;
             border: none;
             outline: none;
             font-size: 13px;
@@ -279,80 +317,167 @@
             background: transparent;
         }
 
+        .icon-btn-small {
+            background: none;
+            border: none;
+            color: var(--color-dark-gray-500);
+            cursor: pointer;
+            padding: 4px 8px;
+            border-radius: 4px;
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            transition: all 0.15s;
+        }
+
+        .icon-btn-small:hover {
+            color: #ffffff;
+            background-color: var(--color-dark-gray-100);
+        }
+
+        /* --- 자막 세그먼트 박스 --- */
         .transcript-container {
             flex: 1;
             overflow-y: auto;
-            padding: 24px 32px 48px;
+            padding: 24px 32px 120px;
             scroll-behavior: smooth;
             -webkit-overflow-scrolling: touch;
         }
 
-        /* 스크립트를 한 줄 폭으로 길게 늘이면 읽기 힘들어서 가운데로 모은다 */
         .transcript-inner {
             max-width: 920px;
             margin: 0 auto;
         }
 
-        /* --- 스크립트 문단 --- */
+        /* =========================================
+           yeovyVM Lexical Paragraphs & Subtitle Tokens
+           ========================================= */
         .lexical__paragraph {
+            cursor: text;
+            user-select: text;
             white-space: normal;
             word-break: break-word;
+            direction: ltr;
+            box-sizing: border-box;
+            border: 0 solid;
+            margin: 0;
             margin-bottom: 0.75rem;
+            padding: 0;
+            font-family: var(--font-sans);
             position: relative;
             touch-action: manipulation;
             border-radius: .625rem;
-            padding: 1rem 1.25rem;
+            padding-top: 1rem;
+            padding-bottom: 1rem;
+            padding-left: 1.25rem;
+            padding-right: 1.25rem;
             text-align: left;
             font-size: var(--text-regular15);
             line-height: var(--text-regular15--line-height);
+            letter-spacing: 0px;
             font-weight: 400;
             color: var(--color-fg-neutral);
             transition: background-color .15s ease;
+            outline: none;
         }
 
         .lexical__paragraph:hover {
             background-color: var(--color-bg-neutral);
         }
 
-        .para-head {
-            display: flex;
-            align-items: center;
-            gap: 8px;
-            margin-bottom: 0.5rem;
-            min-width: 0;
-            user-select: none;
+        .text-regular12 {
             font-size: var(--text-regular12);
             line-height: var(--text-regular12--line-height);
+        }
+
+        .text-fg-neutral-subtle {
             color: var(--color-fg-neutral-subtle);
         }
 
-        .para-time {
-            flex-shrink: 0;
-            white-space: nowrap;
+        .group\/paragraph:hover .group-hover\/paragraph\:grid {
+            display: grid !important;
+        }
+
+        .bookmark.shadow-elevation-01 {
+            box-shadow: 0 4px 6px -1px rgba(0,0,0,0.5), 0 2px 4px -2px rgba(0,0,0,0.5);
+        }
+
+        .bg-bg-default {
+            background-color: var(--color-bg-default);
+        }
+
+        .border-stroke-neutral-weak {
+            border-color: var(--color-stroke-neutral-weak);
+        }
+
+        .rounded-2 {
+            border-radius: 8px;
+            border: none;
+            background: none;
+            color: var(--color-fg-neutral);
             cursor: pointer;
+            display: flex;
+            align-items: center;
+            justify-content: center;
         }
 
-        .para-time:hover { text-decoration: underline; }
-
-        .para-speaker {
-            margin-left: 0.5rem;
-            white-space: nowrap;
-            overflow: hidden;
-            text-overflow: ellipsis;
+        .rounded-2:hover {
+            background-color: var(--color-bg-neutral);
+            color: #ffffff;
         }
 
-        .paragraph-text-body {
+        .default-transition {
+            transition: all 0.15s ease;
+        }
+
+        .lexical__paragraph .flex { display: flex; }
+        .lexical__paragraph .w-full { width: 100%; }
+        .lexical__paragraph .justify-between { justify-content: space-between; }
+        .lexical__paragraph .items-center { align-items: center; }
+        .lexical__paragraph .gap-8-new { gap: 8px; }
+        .lexical__paragraph .min-w-0 { min-width: 0; }
+        .lexical__paragraph .shrink-0 { flex-shrink: 0; }
+        .lexical__paragraph .mb-2 { margin-bottom: 0.5rem; }
+        .lexical__paragraph .ml-2 { margin-left: 0.5rem; }
+        .lexical__paragraph .whitespace-nowrap { white-space: nowrap; }
+        .lexical__paragraph .cursor-pointer { cursor: pointer; }
+        .lexical__paragraph .relative { position: relative; }
+        .lexical__paragraph .absolute { position: absolute; }
+        .lexical__paragraph .hidden { display: none; }
+        .lexical__paragraph .hover\:underline:hover { text-decoration: underline; }
+        .lexical__paragraph .hover\:text-fg-neutral:hover { color: var(--color-fg-neutral); }
+
+        .lexical__paragraph .bookmark {
+            position: absolute;
+            top: -0.75rem;
+            right: 0.5rem;
+            z-index: 5;
+            display: none;
+            grid-template-columns: repeat(2, minmax(0, 1fr));
+            column-gap: 0.0625rem;
+            padding: 0.1875rem;
+            border: 1px solid var(--color-stroke-neutral-weak);
+            border-radius: 6px;
+            background-color: var(--color-bg-default);
+            color: var(--color-fg-neutral);
+        }
+        .lexical__paragraph .bookmark svg { width: 1.25rem; height: 1.25rem; }
+        .lexical__paragraph .dark\:invert { filter: invert(1); }
+
+        .lexical__paragraph .paragraph-text-body {
             white-space: pre-wrap;
         }
 
-        /* 단어 하나하나가 눌러서 그 지점부터 듣는 단위다 */
-        .word {
+        [data-lexical-text="true"] {
             cursor: pointer;
             transition: color 0.1s ease;
             border-radius: 2px;
+            display: inline;
         }
 
-        .word:hover { color: var(--color-fg-brand); }
+        [data-lexical-text="true"]:hover {
+            color: var(--color-fg-brand);
+        }
 
         .lexical-sentence {
             border-radius: 4px;
@@ -360,8 +485,8 @@
         }
 
         .lexical-sentence.active-sentence {
-            background-color: var(--color-bg-brand);
-            color: #ffffff;
+            background-color: var(--color-bg-brand) !important;
+            color: #ffffff !important;
             padding: 2px 4px;
             margin: -2px -4px;
             border-radius: 4px;
@@ -369,10 +494,17 @@
             -webkit-box-decoration-break: clone;
         }
 
-        .lexical-sentence.active-sentence .word { color: #ffffff; }
+        .lexical-sentence.active-sentence [data-lexical-text="true"] {
+            color: #ffffff !important;
+        }
 
-        .lexical__paragraph.search-hit { outline: 2px solid var(--color-yellow-500); }
-        .lexical__paragraph.search-dim { opacity: 0.35; }
+        .lexical__paragraph.search-hit {
+            outline: 2px solid var(--color-yellow-500);
+        }
+
+        .lexical__paragraph.search-dim {
+            opacity: 0.35;
+        }
 
         .foot-note {
             margin: 28px 0 0;
@@ -382,35 +514,21 @@
             font-size: 12.5px;
         }
 
-        /* --- 상태 표시 (불러오는 중 · 만료 · 실패) --- */
-        .state {
-            flex: 1;
-            display: flex;
-            flex-direction: column;
-            align-items: center;
-            justify-content: center;
-            gap: 6px;
-            padding: 60px 20px;
-            text-align: center;
-            color: var(--color-fg-neutral-subtle);
-            font-size: 14px;
-        }
-
-        .state h2 {
-            font-size: 17px;
-            font-weight: 600;
-            color: var(--color-dark-gray-600);
-        }
-
-        /* --- 하단 재생 막대 --- */
+        /* =========================================
+           하단 고정 오디오 플레이어 바
+           ========================================= */
         .bottom-audio-bar {
-            flex-shrink: 0;
+            position: fixed;
+            bottom: 0;
+            left: 0;
+            right: 0;
             height: calc(var(--bottom-player-height) + env(safe-area-inset-bottom));
             padding-bottom: env(safe-area-inset-bottom);
             background-color: var(--color-dark-gray-10);
             border-top: 1px solid var(--color-stroke-neutral-weak);
             display: flex;
             flex-direction: column;
+            z-index: 60;
             user-select: none;
         }
 
@@ -423,12 +541,15 @@
             touch-action: none;
         }
 
-        .player-progress-container:hover { height: 7px; }
+        .player-progress-container:hover {
+            height: 7px;
+        }
 
         .player-progress-track {
             width: 100%;
             height: 100%;
             background-color: var(--color-dark-gray-100);
+            position: relative;
         }
 
         .player-progress-fill {
@@ -565,6 +686,7 @@
             font-weight: 500;
         }
 
+        /* 토스트 알림 */
         .toast {
             visibility: hidden;
             min-width: 180px;
@@ -587,10 +709,9 @@
         .toast.show {
             visibility: visible;
             opacity: 1;
-            bottom: calc(95px + env(safe-area-inset-bottom));
+            bottom: calc(85px + env(safe-area-inset-bottom));
         }
 
-        /* --- 폰 --- */
         @media (max-width: 720px) {
             .detail-header { padding: 0 14px; }
             .detail-left-header .breadcrumb,
@@ -600,10 +721,9 @@
             .script-tab-header,
             .keywords-bar,
             .script-search-bar { padding-left: 14px; padding-right: 14px; }
-            .transcript-container { padding: 16px 6px 40px; }
+            .transcript-container { padding: 16px 12px 100px; }
             .lexical__paragraph { padding: 0.875rem 0.875rem; }
             .bottom-player-main-row { padding: 0 14px; }
-            /* 폰은 기기 음량 버튼을 쓰고, 가운데 재생 버튼과 겹치지 않게 음량 막대는 감춘다 */
             .volume-container { display: none; }
             .player-controls-center { gap: 10px; }
             .player-controls-right { gap: 10px; }
@@ -616,6 +736,7 @@
 </head>
 <body>
     <div id="view">
+        <!-- 헤더 -->
         <header class="detail-header">
             <div class="detail-left-header">
                 <span class="breadcrumb">공유된 보드</span>
@@ -631,76 +752,86 @@
             </div>
         </header>
 
+        <!-- 로딩/오류 상태 화면 -->
         <div id="state" class="state">
             <h2>불러오는 중…</h2>
         </div>
 
-        <div class="script-panel" id="doc" hidden>
+        <!-- 스크립트 에디터 패널 (자막 표시 영역) -->
+        <div class="script-panel" id="doc" style="display: none;">
+            <!-- 스크립트 탭 헤더 -->
             <div class="script-tab-header">
                 <div class="script-tab"><span>스크립트</span></div>
                 <div class="script-tab-actions">
-                    <button type="button" class="script-header-icon-btn" id="search-toggle" title="본문 검색">
+                    <button type="button" class="script-header-icon-btn" onclick="toggleScriptSearch()" title="본문 검색">
                         <svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" fill="none" stroke="currentColor" stroke-width="1.8" viewBox="0 0 24 24"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>
                     </button>
                 </div>
             </div>
 
-            <div class="keywords-bar" id="keywords-bar" hidden>
-                <span class="keywords-tag-badge">
+            <!-- 핵심 키워드 바 -->
+            <div class="keywords-bar" id="keywords-bar" style="display: none;">
+                <div class="keywords-tag-badge">
                     <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1.8" viewBox="0 0 24 24"><path d="M20.59 13.41l-7.17 7.17a2 2 0 0 1-2.83 0L2 12V2h10l8.59 8.59a2 2 0 0 1 0 2.82z"/><line x1="7" y1="7" x2="7.01" y2="7"/></svg>
                     <span>핵심 키워드</span>
-                </span>
-                <div id="keywords" class="keywords-container"></div>
+                </div>
+                <div id="keywords-container" class="keywords-container"></div>
             </div>
 
-            <div class="script-search-bar" id="search-bar" hidden>
-                <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>
-                <input type="text" id="search-input" placeholder="본문 검색 (단어 찾기)">
-                <button type="button" class="icon-btn-small" id="search-clear" title="검색 닫기">
-                    <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
+            <!-- 자막 본문 검색 바 (토글형) -->
+            <div class="script-search-bar" id="script-search-bar" style="display: none;">
+                <i class="fa-solid fa-magnifying-glass"></i>
+                <input type="text" id="script-find-input" placeholder="본문 검색 (단어 찾기)" oninput="findInTranscript(this.value)">
+                <button type="button" class="icon-btn-small" onclick="clearScriptFind()" title="검색 닫기">
+                    <i class="fa-solid fa-xmark"></i>
                 </button>
             </div>
 
-            <div class="transcript-container" id="transcript">
+            <!-- 자막 세그먼트 박스 (Lexical 구조) -->
+            <div class="transcript-container" id="transcript-container">
                 <div class="transcript-inner">
-                    <div id="script"></div>
+                    <div id="transcript-body"></div>
                     <p class="foot-note">이 링크를 가진 사람은 이 스크립트만 볼 수 있습니다. 내용은 수정할 수 없습니다.</p>
                 </div>
             </div>
         </div>
 
-        <footer class="bottom-audio-bar" id="player-bar" hidden>
-            <div class="player-progress-container" id="progress">
+        <!-- 하단 고정 오디오 플레이어 바 -->
+        <footer class="bottom-audio-bar" id="bottom-audio-bar" style="display: none;">
+            <!-- 상단 전체 너비 프로그레스 바 -->
+            <div class="player-progress-container" id="player-progress-container" onclick="onProgressTrackClick(event)" onmousemove="onProgressTrackHover(event)">
                 <div class="player-progress-track">
-                    <div class="player-progress-fill" id="progress-fill"></div>
+                    <div class="player-progress-fill" id="player-progress-fill" style="width: 0%;"></div>
                 </div>
-                <div class="player-progress-tooltip" id="progress-tooltip" style="left: 24px;">00:00</div>
+                <div class="player-progress-tooltip" id="player-progress-tooltip" style="left: 0%;">00:00</div>
             </div>
 
             <div class="bottom-player-main-row">
                 <div class="player-controls-center">
-                    <button type="button" class="player-circle-btn" id="back-btn" title="3초 이전">
+                    <button type="button" class="player-circle-btn" onclick="seekRelative(-3)" title="3초 이전">
                         <svg xmlns="http://www.w3.org/2000/svg" width="22" height="22" fill="currentColor" viewBox="0 0 24 24"><path d="M12 5V1L7 6l5 5V7c3.31 0 6 2.69 6 6s-2.69 6-6 6-6-2.69-6-6H4c0 4.42 3.58 8 8 8s8-3.58 8-8-3.58-8-8-8z"/><text x="12" y="15" font-size="8" font-weight="bold" text-anchor="middle" fill="currentColor">3</text></svg>
                     </button>
-                    <button type="button" class="player-play-circle-btn" id="play-btn" title="재생/일시정지 (Space)"></button>
-                    <button type="button" class="player-circle-btn" id="fwd-btn" title="3초 이후">
+                    <button type="button" class="player-play-circle-btn" id="main-play-btn" onclick="togglePlay()" title="재생/일시정지 (Space)">
+                        <svg id="play-icon-svg" xmlns="http://www.w3.org/2000/svg" width="18" height="18" fill="currentColor" viewBox="0 0 16 16"><path d="m11.596 8.697-6.363 3.692c-.54.313-1.233-.066-1.233-.697V4.308c0-.63.692-1.01 1.233-.696l6.363 3.692a.802.802 0 0 1 0 1.393z"/></svg>
+                    </button>
+                    <button type="button" class="player-circle-btn" onclick="seekRelative(3)" title="3초 이후">
                         <svg xmlns="http://www.w3.org/2000/svg" width="22" height="22" fill="currentColor" viewBox="0 0 24 24"><path d="M12 5V1l5 5-5 5V7c-3.31 0-6 2.69-6 6s2.69 6 6 6 6-2.69 6-6h2c0 4.42-3.58 8-8 8s-8-3.58-8-8 3.58-8 8-8z"/><text x="12" y="15" font-size="8" font-weight="bold" text-anchor="middle" fill="currentColor">3</text></svg>
                     </button>
                 </div>
 
                 <div class="player-controls-right">
                     <div class="volume-container">
-                        <button type="button" class="player-circle-btn" id="mute-btn" title="음소거"></button>
-                        <input type="range" id="volume-slider" min="0" max="1" step="0.05" value="1">
+                        <button type="button" class="player-circle-btn" onclick="toggleMute()" title="음소거">
+                            <i class="fa-solid fa-volume-high" id="volume-icon"></i>
+                        </button>
+                        <input type="range" id="volume-slider" min="0" max="1" step="0.05" value="1" oninput="changeVolume(this.value)">
                     </div>
-                    <button type="button" class="player-speed-btn" id="speed-btn" title="재생 속도">1x</button>
-                    <span class="player-time-display" id="time-display">00:00</span>
+                    <button type="button" class="player-speed-btn" id="playback-speed-btn" onclick="cycleSpeed()" title="재생 속도">1.0x</button>
+                    <span class="player-time-display" id="player-time-display">00:00</span>
                 </div>
             </div>
 
-            <!-- 브라우저 기본 재생기(controls)는 쓰지 않는다. 기본 재생기의 메뉴에는
-                 '다운로드' 가 들어 있는 경우가 있어서, 앱과 같은 재생 막대만 보여 준다. -->
-            <audio id="audio" preload="metadata" controlsList="nodownload"></audio>
+            <audio id="audio-player" preload="metadata" controlsList="nodownload"></audio>
         </footer>
     </div>
 
@@ -710,37 +841,44 @@
     (function () {
         "use strict";
 
-        // 주소 /share/<토큰> 의 마지막 칸이 토큰이다.
         var token = decodeURIComponent(window.location.pathname.split("/").filter(Boolean).pop() || "");
 
         var stateBox = document.getElementById("state");
         var doc = document.getElementById("doc");
-        var audio = document.getElementById("audio");
-        var scriptBox = document.getElementById("script");
-        var transcript = document.getElementById("transcript");
-        var playBtn = document.getElementById("play-btn");
-        var muteBtn = document.getElementById("mute-btn");
-        var progress = document.getElementById("progress");
-        var progressFill = document.getElementById("progress-fill");
-        var progressTip = document.getElementById("progress-tooltip");
-        var timeDisplay = document.getElementById("time-display");
+        var audio = document.getElementById("audio-player");
+        var transcriptBody = document.getElementById("transcript-body");
+        var transcriptContainer = document.getElementById("transcript-container");
+        var mainPlayBtn = document.getElementById("main-play-btn");
+        var volumeIcon = document.getElementById("volume-icon");
+        var progressContainer = document.getElementById("player-progress-container");
+        var progressFill = document.getElementById("player-progress-fill");
+        var progressTooltip = document.getElementById("player-progress-tooltip");
+        var timeDisplay = document.getElementById("player-time-display");
+        var bottomAudioBar = document.getElementById("bottom-audio-bar");
+        var playbackSpeedBtn = document.getElementById("playback-speed-btn");
 
         var hasAudio = false;
         var knownDurationSec = 0;
-        var sentences = [];
-        var activeSentence = null;
+        var currentActiveSentence = null;
+        var toastTimer = null;
 
         var ICON_PLAY = '<svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" fill="currentColor" viewBox="0 0 16 16"><path d="m11.596 8.697-6.363 3.692c-.54.313-1.233-.066-1.233-.697V4.308c0-.63.692-1.01 1.233-.696l6.363 3.692a.802.802 0 0 1 0 1.393z"/></svg>';
         var ICON_PAUSE = '<svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" fill="currentColor" viewBox="0 0 16 16"><path d="M5.5 3.5A1.5 1.5 0 0 1 7 5v6a1.5 1.5 0 0 1-3 0V5a1.5 1.5 0 0 1 1.5-1.5zm5 0A1.5 1.5 0 0 1 12 5v6a1.5 1.5 0 0 1-3 0V5a1.5 1.5 0 0 1 1.5-1.5z"/></svg>';
-        var ICON_VOLUME = '<svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" viewBox="0 0 24 24"><polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5" fill="currentColor"/><path d="M15.54 8.46a5 5 0 0 1 0 7.07"/><path d="M19.07 4.93a10 10 0 0 1 0 14.14"/></svg>';
-        var ICON_MUTED = '<svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" viewBox="0 0 24 24"><polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5" fill="currentColor"/><line x1="23" y1="9" x2="17" y2="15"/><line x1="17" y1="9" x2="23" y2="15"/></svg>';
 
-        playBtn.innerHTML = ICON_PLAY;
-        muteBtn.innerHTML = ICON_VOLUME;
+        function escapeHtml(str) {
+            if (!str) return "";
+            return String(str)
+                .replace(/&/g, "&amp;")
+                .replace(/</g, "&lt;")
+                .replace(/>/g, "&gt;")
+                .replace(/"/g, "&quot;")
+                .replace(/'/g, "&#039;");
+        }
 
         function showState(heading, detail) {
-            stateBox.hidden = false;
-            doc.hidden = true;
+            stateBox.style.display = "flex";
+            doc.style.display = "none";
+            bottomAudioBar.style.display = "none";
             stateBox.innerHTML = "";
             var h = document.createElement("h2");
             h.textContent = heading;
@@ -752,7 +890,6 @@
             }
         }
 
-        var toastTimer = null;
         function showToast(msg) {
             var t = document.getElementById("toast");
             t.textContent = msg;
@@ -761,7 +898,6 @@
             toastTimer = setTimeout(function () { t.classList.remove("show"); }, 1800);
         }
 
-        // 앱과 같은 규칙: 한 시간이 넘으면 시:분:초, 아니면 분:초
         function formatTime(secs) {
             var total = Math.max(0, Math.floor(secs || 0));
             var h = Math.floor(total / 3600);
@@ -771,8 +907,6 @@
             return h > 0 ? pad(h) + ":" + pad(m) + ":" + pad(s) : pad(m) + ":" + pad(s);
         }
 
-        // 앱(app.js splitSegmentsForDisplay)과 똑같이 1분 문단을 화면에서만 20초 안팎으로 쪼갠다.
-        // 그래야 공유받은 사람이 누르는 위치와 밑줄 단위가 앱에서 보는 것과 같다.
         var DISPLAY_BLOCK_MS = 20000;
         var DISPLAY_BLOCK_MAX_MS = 40000;
 
@@ -832,13 +966,13 @@
 
         function renderKeywords(list) {
             var bar = document.getElementById("keywords-bar");
-            var box = document.getElementById("keywords");
+            var box = document.getElementById("keywords-container");
             box.innerHTML = "";
             if (!list || !list.length) {
-                bar.hidden = true;
+                bar.style.display = "none";
                 return;
             }
-            bar.hidden = false;
+            bar.style.display = "flex";
             list.forEach(function (word) {
                 var pill = document.createElement("span");
                 pill.className = "keyword-pill-interactive";
@@ -848,18 +982,15 @@
             });
         }
 
-        // 본문은 모두 textContent 로 넣는다. 받아쓴 글에 태그처럼 보이는 문자가 섞여도
-        // 그대로 글자로 보여야 하고, 공유 화면에서 스크립트가 실행되면 안 된다.
-        function renderScript(segments) {
-            scriptBox.innerHTML = "";
-            sentences = [];
-            activeSentence = null;
+        // =========================================
+        // 현재 자막을 표시하는 exact Lexical 구조 렌더링
+        // =========================================
+        function renderTranscript(segments) {
+            transcriptBody.innerHTML = "";
+            currentActiveSentence = null;
 
             if (!segments || !segments.length) {
-                var empty = document.createElement("p");
-                empty.style.cssText = "color:var(--color-fg-neutral-subtle); padding:60px 20px; text-align:center;";
-                empty.textContent = "스크립트 내용이 없습니다.";
-                scriptBox.appendChild(empty);
+                transcriptBody.innerHTML = '<p style="color:var(--color-fg-neutral-subtle); padding:60px 20px; text-align:center;">스크립트 내용이 없습니다.</p>';
                 return;
             }
 
@@ -869,92 +1000,159 @@
             blocks.forEach(function (seg, idx) {
                 var startMs = seg.start_time_ms || 0;
                 var nextBlock = blocks[idx + 1];
-                var endMs = seg.end_time_ms || (nextBlock ? nextBlock.start_time_ms : startMs + 10000);
+                var endMs = seg.end_time_ms || (nextBlock ? nextBlock.start_time_ms : Math.max(totalMs, startMs + 10000));
+                var speaker = seg.speaker || "화자 1";
                 var startSec = startMs / 1000;
-                var spanSec = Math.max(0.5, endMs / 1000 - startSec);
+                var endSec = endMs / 1000;
+                var spanSec = Math.max(0.5, endSec - startSec);
+                var formattedTs = formatTime(startSec);
 
-                var p = document.createElement("div");
-                p.className = "lexical__paragraph";
-                p.dataset.ms = String(startMs);
-
-                var head = document.createElement("div");
-                head.className = "para-head";
-                var time = document.createElement("span");
-                time.className = "para-time";
-                time.textContent = formatTime(startSec);
-                time.title = "이 지점부터 듣기";
-                time.addEventListener("click", function () { playAtMs(startMs, true); });
-                head.appendChild(time);
-                var who = document.createElement("span");
-                who.className = "para-speaker";
-                who.textContent = seg.speaker;
-                head.appendChild(who);
-                p.appendChild(head);
-
-                // 앱과 같이 문장마다 글자 수로 시각을 나눠 주고, 재생 중인 문장을 파랗게 칠한다.
-                var body = document.createElement("div");
-                body.className = "paragraph-text-body";
                 var rawText = (seg.content || "").trim();
-                var matches = rawText.match(/[^.!?…。\n]+[.!?…。\n]*\s*/g) || [rawText];
+                var sentenceMatches = rawText.match(/[^.!?…。\n]+[.!?…。\n]*\s*/g) || [rawText];
                 var totalChars = rawText.length || 1;
                 var charOffset = 0;
+                var sentencesHtml = "";
 
-                matches.forEach(function (sentText) {
-                    var trimmed = sentText.trim();
-                    if (!trimmed) return;
-                    var sStart = startSec + (charOffset / totalChars) * spanSec;
-                    var sEnd = startSec + ((charOffset + sentText.length) / totalChars) * spanSec;
+                sentenceMatches.forEach(function (sentText) {
+                    var sentTrimmed = sentText.trim();
+                    if (!sentTrimmed) return;
+                    var sStartT = startSec + (charOffset / totalChars) * spanSec;
+                    var sEndT = startSec + ((charOffset + sentText.length) / totalChars) * spanSec;
                     charOffset += sentText.length;
 
-                    var sent = document.createElement("span");
-                    sent.className = "lexical-sentence";
-                    sent.dataset.startT = sStart.toFixed(2);
-                    sent.dataset.endT = sEnd.toFixed(2);
-
-                    var words = trimmed.split(/\s+/);
+                    var words = sentTrimmed.split(/\s+/);
                     var wCount = words.length || 1;
+                    var wSpan = sEndT - sStartT;
+
+                    var wordsHtml = "";
                     words.forEach(function (w, wIdx) {
-                        var wT = sStart + (wIdx / wCount) * (sEnd - sStart);
-                        var span = document.createElement("span");
-                        span.className = "word";
-                        span.textContent = w + " ";
-                        span.addEventListener("click", function () { playAtMs(wT * 1000, false); });
-                        sent.appendChild(span);
+                        var wT = (sStartT + (wIdx / wCount) * wSpan).toFixed(1);
+                        wordsHtml += '<span t="' + wT + '" data-lexical-text="true" onclick="onLexicalWordClick(event, ' + wT + ')">' + escapeHtml(w) + ' </span>';
                     });
 
-                    body.appendChild(sent);
-                    sentences.push(sent);
+                    sentencesHtml += '<span class="lexical-sentence" data-start-t="' + sStartT.toFixed(2) + '" data-end-t="' + sEndT.toFixed(2) + '">' + wordsHtml + '</span>';
                 });
 
-                p.appendChild(body);
-                scriptBox.appendChild(p);
+                var p = document.createElement("p");
+                p.className = "lexical__paragraph relative text-fg-neutral text-regular15 group/paragraph touch-manipulation py-4 pr-4 pl-4 tablet:pl-[1.25rem] tablet:pr-[1.25rem] rounded-[0.625rem] hover:bg-bg-neutral text-left";
+                p.dir = "ltr";
+                p.dataset.ms = String(startMs);
+                p.dataset.endMs = String(endMs);
+                p.dataset.speaker = speaker;
+                p.id = "para-" + idx;
+
+                p.innerHTML = (
+                    '<div data-lexical-speaker-block-speaker="' + escapeHtml(speaker) + '" data-lexical-speaker-block-time="' + startSec.toFixed(1) + '" data-lexical-decorator="true" contenteditable="false" style="display: flex;">' +
+                        '<div class="mb-2 flex w-full justify-between" data-sentry-component="SpeakerBlock" data-sentry-source-file="SpeakerBlockNode.tsx">' +
+                            '<div class="min-w-0">' +
+                                '<div class="gap-8-new flex min-w-0 items-center">' +
+                                    '<span class="text-regular12 text-fg-neutral-subtle shrink-0 whitespace-nowrap cursor-pointer hover:underline" onclick="playAtMs(' + startMs + ')">' + formattedTs + '</span>' +
+                                    '<span class="speaker-name-badge text-regular12 text-fg-neutral-subtle ml-2 cursor-default">' + escapeHtml(speaker) + '</span>' +
+                                '</div>' +
+                            '</div>' +
+                            '<div class="bookmark shadow-elevation-01 border-stroke-neutral-weak bg-bg-default text-fg-neutral absolute -top-[0.75rem] right-[0.5rem] z-5 hidden grid-cols-2 gap-x-[0.0625rem] rounded-md border p-[0.1875rem] group-hover/paragraph:grid">' +
+                                '<div class="relative" data-sentry-element="unknown" data-sentry-component="TooltipWithArrow" data-sentry-source-file="TooltipWithArrow.tsx">' +
+                                    '<button type="button" class="rounded-2 hover:bg-bg-neutral default-transition p-[0.375rem]" title="단락 복사" onclick="copyParagraphText(this)">' +
+                                        '<svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" fill="none" viewBox="0 0 20 20"><path fill="currentcolor" fill-rule="evenodd" d="M14.538 1.833H9.4c-.335 0-.612 0-.838.015-.235.016-.452.05-.66.137a2 2 0 0 0-1.083 1.083c-.086.209-.12.426-.137.66-.015.227-.015.503-.015.838v.017a.5.5 0 1 0 1 0c0-.356 0-.598.013-.787.012-.183.035-.279.063-.346a1 1 0 0 1 .541-.54c.067-.029.162-.051.346-.064.188-.013.43-.013.787-.013h5.1c.428 0 .72 0 .944.019.22.018.332.05.41.09a1 1 0 0 1 .437.437c.04.078.072.19.09.41.018.225.019.516.019.944V11.5c0 .356 0 .598-.013.786a1.1 1.1 0 0 1-.063.346 1 1 0 0 1-.542.542c-.066.027-.162.05-.345.063-.189.012-.43.013-.787.013a.5.5 0 1 0 0 1h.017c.335 0 .611 0 .838-.016.234-.016.451-.05.66-.137a2 2 0 0 0 1.083-1.082c.086-.209.12-.426.136-.66.016-.227.016-.503.016-.838V4.712c0-.402 0-.734-.022-1.005-.023-.28-.072-.54-.196-.782a2 2 0 0 0-.874-.874c-.243-.124-.501-.173-.782-.196-.27-.022-.603-.022-1.005-.022M10.454 5.75H5.463c-.403 0-.735 0-1.005.022-.281.023-.54.072-.782.196a2 2 0 0 0-.875.874c-.123.242-.172.5-.195.782-.023.27-.023.603-.022 1.005v6.658c0 .402 0 .735.022 1.005.023.281.072.54.195.782a2 2 0 0 0 .875.874c.242.124.5.173.782.196.27.022.602.022 1.005.022h4.991c.403 0 .735 0 1.005-.022.282-.023.54-.072.783-.196a2 2 0 0 0 .874-.874c.123-.242.172-.5.195-.782.023-.27.023-.603.023-1.005V8.629c0-.402 0-.735-.023-1.005-.023-.281-.072-.54-.195-.782a2 2 0 0 0-.874-.874c-.243-.124-.502-.173-.783-.196-.27-.022-.602-.022-1.005-.022m.924 1.018c.22.018.331.05.41.09a1 1 0 0 1 .437.438c.04.078.072.19.09.41.018.224.019.515.019.944v6.616c0 .429 0 .72-.02.945-.017.219-.05.331-.09.41a1 1 0 0 1-.437.436c-.078.04-.19.073-.409.09a13 13 0 0 1-.944.02h-4.95c-.429 0-.72-.001-.945-.02-.22-.017-.331-.05-.41-.09a1 1 0 0 1-.437-.437c-.04-.078-.072-.19-.09-.41a13 13 0 0 1-.018-.944V8.65c0-.429 0-.72.018-.945.018-.219.05-.331.09-.41a1 1 0 0 1 .438-.436c.078-.04.19-.073.409-.09.225-.019.516-.02.945-.02h4.95c.428 0 .719.001.944.02" clip-rule="evenodd"></path></svg>' +
+                                    '</button>' +
+                                '</div>' +
+                                '<div class="relative" data-sentry-element="unknown" data-sentry-component="TooltipWithArrow" data-sentry-source-file="TooltipWithArrow.tsx">' +
+                                    '<button type="button" class="rounded-2 hover:bg-bg-neutral default-transition p-[0.375rem]" title="전체 복사" onclick="copyAllTranscript()">' +
+                                        '<svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 20 20" class="size-[1.25rem] dark:invert"><path fill="#000" fill-rule="evenodd" d="M14.538 1.834H9.4c-.335 0-.611 0-.838.015-.234.016-.451.05-.66.137A2 2 0 0 0 6.819 3.07c-.086.209-.12.426-.137.66-.015.227-.015.503-.015.838v.017a.5.5 0 1 0 1 0c0-.356 0-.598.013-.787.013-.183.035-.279.063-.346a1 1 0 0 1 .541-.54c.067-.029.163-.051.346-.064.189-.013.43-.013.787-.013h5.1c.428 0 .72 0 .944.019.22.018.332.05.41.09a1 1 0 0 1 .437.437c.04.078.072.19.09.41.019.225.019.516.019.944v6.767c0 .356 0 .598-.013.786-.013.184-.035.28-.063.346a1 1 0 0 1-.541.542 1.1 1.1 0 0 1-.346.063c-.189.012-.43.013-.787.013a.5.5 0 1 0 0 1h.017c.335 0 .612 0 .838-.016.234-.016.451-.05.66-.137a2 2 0 0 0 1.083-1.082c.086-.209.12-.426.137-.66.015-.227.015-.503.015-.838V4.713c0-.402 0-.734-.022-1.005-.023-.281-.072-.54-.196-.782a2 2 0 0 0-.874-.874c-.243-.124-.501-.173-.782-.196-.27-.022-.603-.022-1.005-.022" clip-rule="evenodd"></path><path fill="#000" d="M5.462 5.75c-.402 0-.734 0-1.005.022-.28.023-.54.072-.782.196a2 2 0 0 0-.874.874c-.124.243-.173.501-.196.782-.022.27-.022.603-.022 1.005v6.658c0 .403 0 .735.022 1.006.023.28.072.539.196.782a2 2 0 0 0 .874.874c.243.123.501.173.782.196.27.022.603.022 1.005.022h4.992c.402 0 .734 0 1.005-.022.281-.023.54-.073.782-.196a2 2 0 0 0 .874-.874c.124-.243.173-.501.196-.782.022-.271.022-.603.022-1.006V8.63c0-.402 0-.734-.022-1.005-.023-.281-.072-.54-.196-.782a2 2 0 0 0-.874-.874c-.243-.124-.501-.173-.782-.196-.27-.022-.603-.022-1.005-.022z"></path><path fill="#fff" d="M9.548 14.334a.25.25 0 0 1-.11-.02q-.039-.013-.072-.09l-.408-1.072H6.945l-.408 1.072q-.033.077-.072.09a.2.2 0 0 1-.103.02h-.628q-.105 0-.136-.039-.033-.033.006-.123L7.49 9.444q.045-.11.155-.11h.628q.084 0 .11.026a.3.3 0 0 1 .058.09l1.872 4.722q.039.097.006.13-.025.032-.136.032zm-2.3-1.98h1.406l-.7-1.838z"></path></svg>' +
+                                    '</button>' +
+                                '</div>' +
+                            '</div>' +
+                        '</div>' +
+                    '</div>' +
+                    '<div class="paragraph-text-body" contenteditable="false">' +
+                        sentencesHtml +
+                    '</div>'
+                ).replace(/>\n\s*</g, "><");
+
+                transcriptBody.appendChild(p);
             });
         }
 
-        // --- 재생 ---
-        function playAtMs(ms, scroll) {
+        // --- 단어/문단 클릭 및 재생 ---
+        window.onLexicalWordClick = function (event, timeSec) {
+            if (event) event.stopPropagation();
+            playAtMs(timeSec * 1000, false);
+        };
+
+        window.playAtMs = function (ms, scroll) {
             if (!hasAudio) return;
             audio.currentTime = ms / 1000;
             var started = audio.play();
-            if (started && started.catch) started.catch(function () { /* 사용자가 재생을 막아 둔 경우 */ });
+            if (started && started.catch) started.catch(function () {});
             if (scroll) scrollToBlockAt(ms);
-        }
+        };
 
         function scrollToBlockAt(ms) {
             var target = null;
-            scriptBox.querySelectorAll(".lexical__paragraph").forEach(function (p) {
+            var paras = transcriptBody.querySelectorAll(".lexical__paragraph");
+            paras.forEach(function (p) {
                 if ((parseFloat(p.dataset.ms) || 0) <= ms) target = p;
             });
             if (target) target.scrollIntoView({ behavior: "smooth", block: "center" });
         }
 
+        // --- 복사 기능 ---
+        window.copyParagraphText = function (btn) {
+            var p = btn.closest(".lexical__paragraph");
+            if (!p) return;
+            var body = p.querySelector(".paragraph-text-body");
+            var text = body ? body.innerText.trim() : "";
+            if (!text) return;
+            if (navigator.clipboard && navigator.clipboard.writeText) {
+                navigator.clipboard.writeText(text).then(function () {
+                    showToast("단락이 복사되었습니다.");
+                }).catch(function () { fallbackCopy(text); });
+            } else {
+                fallbackCopy(text);
+            }
+        };
+
+        window.copyAllTranscript = function () {
+            var paras = transcriptBody.querySelectorAll(".paragraph-text-body");
+            var lines = [];
+            paras.forEach(function (p) {
+                var t = p.innerText.trim();
+                if (t) lines.push(t);
+            });
+            var text = lines.join("\n\n");
+            if (!text) return;
+            if (navigator.clipboard && navigator.clipboard.writeText) {
+                navigator.clipboard.writeText(text).then(function () {
+                    showToast("전체 스크립트가 복사되었습니다.");
+                }).catch(function () { fallbackCopy(text); });
+            } else {
+                fallbackCopy(text);
+            }
+        };
+
+        function fallbackCopy(text) {
+            var ta = document.createElement("textarea");
+            ta.value = text;
+            ta.style.position = "fixed";
+            ta.style.opacity = "0";
+            document.body.appendChild(ta);
+            ta.select();
+            try {
+                document.execCommand("copy");
+                showToast("클립보드에 복사되었습니다.");
+            } catch (e) {
+                showToast("복사에 실패했습니다.");
+            }
+            document.body.removeChild(ta);
+        }
+
+        // --- 재생기 제어 ---
         function durationSec() {
             return (isFinite(audio.duration) && audio.duration) || knownDurationSec || 0;
         }
 
-        // 말풍선이 양 끝에서 화면 밖으로 반쯤 잘리지 않게 가장자리에서 24px 안쪽에 붙잡아 둔다
         function placeTip(pct) {
-            progressTip.style.left = "clamp(24px, " + pct + "%, calc(100% - 24px))";
+            progressTooltip.style.left = "clamp(24px, " + pct + "%, calc(100% - 24px))";
         }
 
         function setProgress(sec) {
@@ -963,34 +1161,41 @@
             var pct = Math.min(100, Math.max(0, (sec / dur) * 100));
             progressFill.style.width = pct + "%";
             placeTip(pct);
-            progressTip.textContent = formatTime(sec);
-        }
-
-        function highlightSentence(sec) {
-            var found = null;
-            for (var i = 0; i < sentences.length; i++) {
-                var s = parseFloat(sentences[i].dataset.startT) || 0;
-                var e = parseFloat(sentences[i].dataset.endT) || s + 5;
-                if (sec >= s && sec < e) { found = sentences[i]; break; }
-                if (sec >= s) found = sentences[i];
-            }
-            if (found !== activeSentence) {
-                if (activeSentence) activeSentence.classList.remove("active-sentence");
-                if (found) found.classList.add("active-sentence");
-                activeSentence = found;
-            }
+            progressTooltip.textContent = formatTime(sec);
         }
 
         audio.addEventListener("timeupdate", function () {
             var sec = audio.currentTime;
-            timeDisplay.textContent = formatTime(sec);
+            var dur = durationSec();
+            timeDisplay.textContent = dur > 0 ? (formatTime(sec) + " / " + formatTime(dur)) : formatTime(sec);
             setProgress(sec);
-            highlightSentence(sec);
-        });
-        audio.addEventListener("play", function () { playBtn.innerHTML = ICON_PAUSE; });
-        audio.addEventListener("pause", function () { playBtn.innerHTML = ICON_PLAY; });
 
-        function togglePlay() {
+            // 실시간 문장 단위 블루 하이라이트
+            var sentences = document.querySelectorAll(".lexical-sentence");
+            var activeSent = null;
+            for (var i = 0; i < sentences.length; i++) {
+                var s = parseFloat(sentences[i].dataset.startT) || 0;
+                var e = parseFloat(sentences[i].dataset.endT) || (s + 5);
+                if (sec >= s && sec < e) { activeSent = sentences[i]; break; }
+                if (sec >= s) activeSent = sentences[i];
+            }
+
+            if (activeSent && activeSent !== currentActiveSentence) {
+                if (currentActiveSentence) currentActiveSentence.classList.remove("active-sentence");
+                activeSent.classList.add("active-sentence");
+                currentActiveSentence = activeSent;
+            }
+        });
+
+        audio.addEventListener("play", function () {
+            mainPlayBtn.innerHTML = ICON_PAUSE;
+        });
+
+        audio.addEventListener("pause", function () {
+            mainPlayBtn.innerHTML = ICON_PLAY;
+        });
+
+        window.togglePlay = function () {
             if (!hasAudio) return;
             if (audio.paused) {
                 var started = audio.play();
@@ -998,55 +1203,68 @@
             } else {
                 audio.pause();
             }
-        }
+        };
 
-        function seekRelative(sec) {
+        window.seekRelative = function (sec) {
+            if (!hasAudio) return;
             audio.currentTime = Math.max(0, Math.min(durationSec() || 999999, audio.currentTime + sec));
-        }
+        };
 
         function percentAt(event) {
-            var rect = progress.getBoundingClientRect();
+            var rect = progressContainer.getBoundingClientRect();
             return Math.max(0, Math.min(1, (event.clientX - rect.left) / rect.width));
         }
 
-        playBtn.addEventListener("click", togglePlay);
-        document.getElementById("back-btn").addEventListener("click", function () { seekRelative(-3); });
-        document.getElementById("fwd-btn").addEventListener("click", function () { seekRelative(3); });
-
-        progress.addEventListener("click", function (e) {
+        window.onProgressTrackClick = function (e) {
+            if (!hasAudio) return;
             var target = percentAt(e) * durationSec();
             audio.currentTime = target;
             setProgress(target);
             scrollToBlockAt(target * 1000);
-        });
-        progress.addEventListener("mousemove", function (e) {
-            if (!audio.paused) return;
+        };
+
+        window.onProgressTrackHover = function (e) {
+            if (!hasAudio || !audio.paused) return;
             var pct = percentAt(e);
             placeTip(pct * 100);
-            progressTip.textContent = formatTime(pct * durationSec());
-        });
+            progressTooltip.textContent = formatTime(pct * durationSec());
+        };
 
-        var SPEEDS = [1, 1.2, 1.5, 1.8, 2, 0.8];
-        document.getElementById("speed-btn").addEventListener("click", function () {
-            var idx = SPEEDS.findIndex(function (r) { return Math.abs(r - (audio.playbackRate || 1)) < 0.05; });
+        var SPEEDS = [1.0, 1.2, 1.5, 1.8, 2.0, 0.8];
+        window.cycleSpeed = function () {
+            var cur = audio.playbackRate || 1.0;
+            var idx = SPEEDS.findIndex(function (r) { return Math.abs(r - cur) < 0.05; });
             var next = SPEEDS[((idx === -1 ? 0 : idx) + 1) % SPEEDS.length];
             audio.playbackRate = next;
-            this.textContent = next + "x";
-            showToast("재생 속도: " + next + "x");
-        });
+            playbackSpeedBtn.textContent = next.toFixed(1) + "x";
+            showToast("재생 속도: " + next.toFixed(1) + "x");
+        };
 
-        muteBtn.addEventListener("click", function () {
+        window.toggleMute = function () {
             audio.muted = !audio.muted;
-            muteBtn.innerHTML = audio.muted ? ICON_MUTED : ICON_VOLUME;
-        });
-        document.getElementById("volume-slider").addEventListener("input", function () {
-            var vol = parseFloat(this.value);
+            updateVolumeUi();
+        };
+
+        window.changeVolume = function (val) {
+            var vol = parseFloat(val);
             audio.volume = vol;
             audio.muted = vol === 0;
-            muteBtn.innerHTML = audio.muted ? ICON_MUTED : ICON_VOLUME;
-        });
+            updateVolumeUi();
+        };
 
-        // 앱처럼 스페이스바로 재생/일시정지. 검색창에 글을 쓸 때는 건드리지 않는다.
+        function updateVolumeUi() {
+            var slider = document.getElementById("volume-slider");
+            if (slider) slider.value = audio.muted ? 0 : audio.volume;
+            if (audio.muted || audio.volume === 0) {
+                volumeIcon.className = "fa-solid fa-volume-xmark";
+            } else if (audio.volume < 0.5) {
+                volumeIcon.className = "fa-solid fa-volume-low";
+            } else {
+                volumeIcon.className = "fa-solid fa-volume-high";
+            }
+        }
+
+        // 스페이스바로 재생/일시정지
         document.addEventListener("keydown", function (e) {
             if (e.code !== "Space" || !hasAudio) return;
             var tag = (e.target && e.target.tagName) || "";
@@ -1055,25 +1273,45 @@
             togglePlay();
         });
 
-        // --- 검색 · 키워드 ---
-        var searchBar = document.getElementById("search-bar");
-        var searchInput = document.getElementById("search-input");
+        // --- 본문 검색 & 키워드 ---
+        window.toggleScriptSearch = function () {
+            var searchBar = document.getElementById("script-search-bar");
+            var input = document.getElementById("script-find-input");
+            var isHidden = searchBar.style.display === "none";
+            searchBar.style.display = isHidden ? "flex" : "none";
+            if (isHidden) {
+                input.focus();
+            } else {
+                input.value = "";
+                findInTranscript("");
+            }
+        };
 
-        function findInTranscript(q) {
+        window.clearScriptFind = function () {
+            var input = document.getElementById("script-find-input");
+            input.value = "";
+            findInTranscript("");
+            document.getElementById("script-search-bar").style.display = "none";
+        };
+
+        window.findInTranscript = function (q) {
             var query = (q || "").trim().toLowerCase();
             var first = null;
-            scriptBox.querySelectorAll(".lexical__paragraph").forEach(function (p) {
-                var hit = query && p.querySelector(".paragraph-text-body").textContent.toLowerCase().indexOf(query) !== -1;
+            var paras = transcriptBody.querySelectorAll(".lexical__paragraph");
+            paras.forEach(function (p) {
+                var body = p.querySelector(".paragraph-text-body");
+                var text = body ? body.textContent.toLowerCase() : "";
+                var hit = query && text.indexOf(query) !== -1;
                 p.classList.toggle("search-hit", !!hit);
                 p.classList.toggle("search-dim", !!query && !hit);
                 if (hit && !first) first = p;
             });
             if (first) first.scrollIntoView({ behavior: "smooth", block: "center" });
-        }
+        };
 
         function jumpToText(word) {
             var query = (word || "").toLowerCase();
-            var paras = scriptBox.querySelectorAll(".lexical__paragraph");
+            var paras = transcriptBody.querySelectorAll(".lexical__paragraph");
             for (var i = 0; i < paras.length; i++) {
                 if (paras[i].textContent.toLowerCase().indexOf(query) !== -1) {
                     var p = paras[i];
@@ -1086,19 +1324,7 @@
             showToast("본문에서 찾지 못했습니다.");
         }
 
-        document.getElementById("search-toggle").addEventListener("click", function () {
-            searchBar.hidden = !searchBar.hidden;
-            if (!searchBar.hidden) searchInput.focus();
-            else { searchInput.value = ""; findInTranscript(""); }
-        });
-        searchInput.addEventListener("input", function () { findInTranscript(this.value); });
-        document.getElementById("search-clear").addEventListener("click", function () {
-            searchInput.value = "";
-            findInTranscript("");
-            searchBar.hidden = true;
-        });
-
-        // --- 불러오기 ---
+        // --- 데이터 불러오기 ---
         fetch("/api/share/" + encodeURIComponent(token), { headers: { "Accept": "application/json" } })
             .then(function (res) {
                 if (res.status === 404) throw new Error("expired");
@@ -1107,29 +1333,27 @@
             })
             .then(function (data) {
                 var title = data.title || "제목 없음";
-                document.title = title + " · 읽기 전용";
+                document.title = title + " · 읽기 전용 · yeovyVM";
                 var titleEl = document.getElementById("title");
                 titleEl.textContent = title;
                 titleEl.title = title;
                 document.getElementById("duration").textContent = data.duration_str || "";
 
-                // 마지막 문단이 어디서 끝나는지 알려면 전체 길이가 필요하다. 응답에는 "01:23:45"
-                // 문자열만 있어서 초로 되돌린다. (오디오가 열리면 audio.duration 이 우선한다)
                 knownDurationSec = String(data.duration_str || "").split(":").reduce(function (acc, n) {
                     return acc * 60 + (parseInt(n, 10) || 0);
                 }, 0);
 
                 renderKeywords(data.keywords);
-                renderScript(data.segments);
+                renderTranscript(data.segments);
 
                 if (data.has_audio && data.audio_url) {
                     hasAudio = true;
                     audio.src = data.audio_url;
-                    document.getElementById("player-bar").hidden = false;
+                    bottomAudioBar.style.display = "flex";
                 }
 
-                stateBox.hidden = true;
-                doc.hidden = false;
+                stateBox.style.display = "none";
+                doc.style.display = "flex";
             })
             .catch(function (err) {
                 document.getElementById("title").textContent = "공유된 스크립트";

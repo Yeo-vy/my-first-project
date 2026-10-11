@@ -10,6 +10,7 @@ let boards = [];
 let selectedBoardIds = new Set();
 let isUserEditing = false;
 let isModified = false;
+let isLeavingWithSave = false;
 // 다른 창으로 갔다 돌아오면 브라우저는 마지막으로 포커스돼 있던 문단에 focus 이벤트를 다시 쏜다.
 // 문단 focus 는 "그 문단부터 재생"이라 그대로 두면 재생이 그 문단 시작으로 되감긴다.
 // 창을 떠날 때 포커스돼 있던 요소를 기억해 두고, 돌아와서 같은 요소에 오는 focus 는 무시한다.
@@ -1079,7 +1080,8 @@ function renderTranscript(segments) {
         body.addEventListener("input", () => { isModified = true; });
         body.addEventListener("blur", () => {
             isUserEditing = false;
-            if (isModified) {
+            // ESC 로 나갈 때는 saveAndLeaveDetail 이 저장을 기다렸다가 화면을 떠난다
+            if (isModified && !isLeavingWithSave) {
                 saveTranscriptChanges();
                 isModified = false;
             }
@@ -1167,15 +1169,35 @@ async function saveTranscriptChanges() {
     });
 
     try {
-        await fetch(`/api/boards/${currentBoard.id}/transcript`, {
+        const res = await fetch(`/api/boards/${currentBoard.id}/transcript`, {
             method: "PUT",
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify({ segments })
         });
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
         showToast("저장되었습니다.");
+        return true;
     } catch (e) {
         console.error("저장 실패:", e);
+        return false;
     }
+}
+
+// 자막 수정 중 ESC: 고친 내용을 저장한 뒤 목록으로 나간다.
+// 화면을 먼저 숨기면 blur 저장이 불리지 않아 수정분이 사라질 수 있다.
+async function saveAndLeaveDetail(body) {
+    isLeavingWithSave = true;
+    body.blur();   // 한글 조합 중이던 글자도 여기서 확정된다
+    isLeavingWithSave = false;
+    if (isModified) {
+        isModified = false;
+        if (!(await saveTranscriptChanges())) {
+            isModified = true;
+            showToast("저장에 실패해 화면을 떠나지 않았습니다.");
+            return;
+        }
+    }
+    showDashboard();
 }
 
 async function regenerateKeywords() {
@@ -1655,6 +1677,12 @@ function setupKeyboardShortcuts() {
         if (e.key === "F2") { e.preventDefault(); togglePlay(); }
         if (e.key === "F3") { e.preventDefault(); seekRelative(3); }
         if (e.key === "Escape" && document.getElementById("board-detail-view").style.display === "flex") {
+            const active = document.activeElement;
+            if (active && active.classList.contains("paragraph-text-body")) {
+                e.preventDefault();
+                saveAndLeaveDetail(active);
+                return;
+            }
             showDashboard();
         }
     });
