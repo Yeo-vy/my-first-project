@@ -1450,7 +1450,9 @@ def auth_change_password(
     user: User = Depends(auth.get_current_user),
 ):
     if not auth.verify_password(req.current_password or "", user.password_hash):
-        raise HTTPException(status_code=401, detail="현재 비밀번호가 올바르지 않습니다.")
+        # 401 을 주면 app.js 의 fetch 인터셉터가 '세션 만료'로 보고 페이지를 새로고침해 버려서
+        # 안내 문구가 뜨지도 않는다. 로그인은 살아 있으므로 400 으로 돌려준다.
+        raise HTTPException(status_code=400, detail="현재 비밀번호가 올바르지 않습니다.")
     auth.validate_password(req.new_password)
     user.password_hash = auth.hash_password(req.new_password)
     db.commit()
