@@ -1140,13 +1140,40 @@ function clearScriptFind() {
 }
 
 async function saveBoardTitle(newTitle) {
-    if (!currentBoard || !newTitle.trim()) return;
-    await fetch(`/api/boards/${currentBoard.id}`, {
-        method: "PATCH",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ title: newTitle.trim() })
-    });
-    showToast("제목이 변경되었습니다.");
+    const title = newTitle.trim();
+    // 비었거나 그대로면 올릴 것이 없다 (나가도 된다)
+    if (!currentBoard || !title || title === currentBoard.title) return true;
+    try {
+        const res = await fetch(`/api/boards/${currentBoard.id}`, {
+            method: "PATCH",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ title })
+        });
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        currentBoard.title = title;
+        showToast("제목이 변경되었습니다.");
+        return true;
+    } catch (e) {
+        console.error("제목 저장 실패:", e);
+        return false;
+    }
+}
+
+function onTitleBlur(el) {
+    // ESC 로 나갈 때는 saveTitleAndLeaveDetail 이 저장을 기다렸다가 화면을 떠난다
+    if (!isLeavingWithSave) saveBoardTitle(el.innerText);
+}
+
+// 제목 수정 중 ESC: 자막과 똑같이 저장한 뒤 목록으로 나간다.
+async function saveTitleAndLeaveDetail(el) {
+    isLeavingWithSave = true;
+    el.blur();   // 한글 조합 중이던 글자도 여기서 확정된다
+    isLeavingWithSave = false;
+    if (!(await saveBoardTitle(el.innerText))) {
+        showToast("저장에 실패해 화면을 떠나지 않았습니다.");
+        return;
+    }
+    showDashboard();
 }
 
 async function saveTranscriptChanges() {
@@ -1681,6 +1708,11 @@ function setupKeyboardShortcuts() {
             if (active && active.classList.contains("paragraph-text-body")) {
                 e.preventDefault();
                 saveAndLeaveDetail(active);
+                return;
+            }
+            if (active && active.id === "detail-title") {
+                e.preventDefault();
+                saveTitleAndLeaveDetail(active);
                 return;
             }
             showDashboard();
