@@ -912,6 +912,157 @@ def find_moved_board(db: Session, new_path: str, mtime: datetime.datetime):
     return candidates[0] if len(candidates) == 1 else None
 
 
+# -----------------
+# 탐색기에서 이름 변경 → 웹 제목·오디오·텍스트가 모두 같은 이름이 되게 (이름 동기화)
+# -----------------
+# 같은 녹음인지 가릴 때 비교하는 본문 앞부분 길이. 너무 짧으면 비슷한 인사말끼리 붙는다.
+FINGERPRINT_CHARS = 40
+FINGERPRINT_MIN_CHARS = 12
+
+
+def transcript_fingerprint(text: str) -> str:
+    """타임스탬프와 공백을 걷어 낸 본문 앞부분.
+
+    txt 는 세그먼트를 1분 내외 문단으로 묶어 쓰므로 줄 구성은 DB 와 다르지만,
+    공백을 빼고 이어 붙이면 앞부분 글자는 똑같다.
+    """
+    return re.sub(r"\s+", "", strip_timestamps(text or ""))[:FINGERPRINT_CHARS]
+
+
+def board_fingerprint(db: Session, board: Board) -> str:
+    rows = (
+        db.query(TranscriptSegment.content)
+        .filter(TranscriptSegment.board_id == board.id)
+        .order_by(TranscriptSegment.sequence)
+        .limit(30)
+        .all()
+    )
+    return transcript_fingerprint("".join(r[0] or "" for r in rows))
+
+
+def same_fingerprint(a: str, b: str) -> bool:
+    n = min(len(a), len(b))
+    return n >= FINGERPRINT_MIN_CHARS and a[:n] == b[:n]
+
+
+def is_transcript_file(name: str) -> bool:
+    """`강의 녹음 변환` 안에서 보드의 변환 텍스트로 볼 파일인지 (동반 파일·청크 조각 제외)."""
+    return (
+        name.lower().endswith(".txt")
+        and not any(name.endswith(s) for s in TRANSCRIPT_COMPANION_SUFFIXES)
+        and "_chunk_" not in name
+    )
+
+
+def rename_board_files(board: Board, new_stem: str) -> list:
+    """보드의 오디오·텍스트(와 동반 파일) 이름을 new_stem 으로 맞춘다. 폴더·확장자는 그대로 둔다.
+
+    탐색기에서 한쪽 파일 이름을 바꿨거나 웹에서 제목을 바꿨을 때, 나머지도 따라 바꿔서
+    세 이름이 늘 같게 유지한다. 이미 그 이름인 파일은 건너뛰고, 같은 이름의 다른 파일이
+    있으면 덮어쓰지 않고 그대로 둔다.
+    """
+    stem = sanitize_filename(new_stem)
+    renamed = []
+    for key, src in board_file_targets(board):
+        if not os.path.isfile(src) or not is_managed_file(src) or is_inside(src, TRASH_DIR):
+            continue
+        if key.startswith("extra:"):
+            suffix = TRANSCRIPT_COMPANION_SUFFIXES[int(key.split(":", 1)[1])]
+        else:
+            suffix = os.path.splitext(src)[1]
+        dest = os.path.join(os.path.dirname(src), stem + suffix)
+        if os.path.normcase(dest) == os.path.normcase(src):
+            continue
+        if os.path.exists(dest):
+            print(f"[RENAME-SYNC-WARN] #{board.id} 같은 이름의 파일이 이미 있어 두었습니다: {dest}", flush=True)
+            continue
+        try:
+            os.rename(src, dest)
+        except OSError as e:
+            print(f"[RENAME-SYNC-WARN] #{board.id} {key} 이름 변경 실패 ({src}): {e}", flush=True)
+            continue
+        if key == "audio_path":
+            board.audio_path = dest
+            board.audio_filename = os.path.basename(dest)
+        elif key == "txt_path":
+            board.txt_path = dest
+        renamed.append(f"{os.path.basename(src)} -> {os.path.basename(dest)}")
+    return renamed
+
+
+def sync_renamed_transcripts(db: Session) -> None:
+    """탐색기에서 이름을 바꾼 변환 텍스트를 원래 보드에 다시 잇는다.
+
+    txt 이름이 바뀌면 보드의 txt_path 가 끊기고, 서버를 다시 켤 때 그 txt 가 '처음 보는
+    파일'로 등록되어 오디오 없는 중복 보드가 생겼다 (그 보드엔 다시 받아쓰기 버튼이 없다).
+    txt 가 끊긴 보드와 주인 없는 txt 를 본문 앞부분으로 짝지어, 보드 제목과 오디오 이름까지
+    새 txt 이름으로 맞춘다. 예전 서버가 이미 만들어 둔 오디오 없는 중복 보드가 그 txt 를
+    쥐고 있으면 원래 보드로 돌려주고 중복 보드는 휴지통으로 보낸다.
+    """
+    if not os.path.isdir(RESULT_DIR):
+        return
+
+    boards = db.query(Board).filter(Board.txt_path.isnot(None), Board.txt_path != "").all()
+    orphans = [
+        b for b in boards
+        if not b.is_deleted
+        and b.status != "PROCESSING"
+        and is_inside(b.txt_path, RESULT_DIR)
+        and not os.path.exists(b.txt_path)
+    ]
+    if not orphans:
+        return
+
+    fingerprints = {b.id: board_fingerprint(db, b) for b in orphans}
+    orphans = [b for b in orphans if fingerprints[b.id]]
+    if not orphans:
+        return
+    owners = {os.path.normcase(b.txt_path): b for b in boards}
+
+    for root_dir, _, files in os.walk(RESULT_DIR):
+        for f in files:
+            if not orphans:
+                return
+            if not is_transcript_file(f):
+                continue
+            path = os.path.join(root_dir, f)
+            owner = owners.get(os.path.normcase(path))
+            # 오디오가 있는 보드의 txt 는 제자리에 있는 것이다
+            if owner is not None and (owner.is_deleted or owner.audio_path):
+                continue
+            try:
+                with open(path, "r", encoding="utf-8") as tf:
+                    fp = transcript_fingerprint(tf.read(4000))
+            except (OSError, UnicodeDecodeError):
+                continue
+            matches = [b for b in orphans if same_fingerprint(fp, fingerprints[b.id])]
+            # 둘 이상이면 어느 쪽인지 확신할 수 없으므로 손대지 않는다
+            if len(matches) != 1:
+                continue
+
+            board = matches[0]
+            old_title = board.title
+            if owner is not None:
+                owner.txt_path = None
+                owner.is_deleted = True
+                print(
+                    f"[RENAME-SYNC] 오디오 없는 중복 보드를 휴지통으로 보냈습니다: #{owner.id} {owner.title} "
+                    f"(원래 보드 #{board.id} 로 합침)",
+                    flush=True,
+                )
+            stem = os.path.splitext(f)[0]
+            board.txt_path = path
+            board.title = stem
+            renamed = rename_board_files(board, stem)
+            db.commit()
+            orphans.remove(board)
+            detail = f" (파일: {', '.join(renamed)})" if renamed else ""
+            print(
+                f"[RENAME-SYNC] txt 이름 변경을 따라 보드를 맞췄습니다: #{board.id} {old_title} -> {stem}{detail}",
+                flush=True,
+            )
+
+
 def sync_deleted_audio_to_boards(db: Session, missing_streaks: dict) -> None:
     """원본 오디오가 사라진 보드를 정리한다. 스캔마다 한 번씩 호출된다."""
     if FILE_DELETE_SYNC == "off":
@@ -1074,6 +1225,9 @@ def background_audio_watcher():
             if force:
                 repair_stale_media_paths(db)
 
+            # txt 이름을 바꿨다면 보드 제목과 오디오 이름을 먼저 맞춰 둔다
+            sync_renamed_transcripts(db)
+
             for root_dir, _, files in os.walk(AUDIO_DIR):
                 audio_files = [f for f in files if f.lower().endswith(VALID_AUDIO_EXTS)]
                 # 오디오가 없는 빈 디렉터리로 삭제된 폴더가 되살아나지 않도록 건너뛴다
@@ -1096,7 +1250,11 @@ def background_audio_watcher():
 
                     base_name = os.path.splitext(f)[0]
                     file_mtime = datetime.datetime.fromtimestamp(os.path.getmtime(full_path))
-                    board = db.query(Board).filter_by(folder_id=folder.id, title=base_name).first()
+                    # 파일 경로로 먼저 찾는다. 제목은 웹에서 바뀔 수 있고, 같은 제목의 다른 보드
+                    # (휴지통으로 보낸 중복 보드 등)가 있을 수도 있다.
+                    board = db.query(Board).filter(Board.audio_path == full_path).first()
+                    if board is None:
+                        board = db.query(Board).filter_by(folder_id=folder.id, title=base_name).first()
 
                     if board is None:
                         # 새 파일처럼 보여도, 탐색기에서 이름을 바꾸거나 폴더를 옮긴 것일 수 있다.
@@ -1111,11 +1269,14 @@ def background_audio_watcher():
                             if moved.is_deleted:
                                 moved.is_deleted = False
                                 shutil.rmtree(board_trash_dir(moved.id), ignore_errors=True)
+                            # 변환 텍스트도 오디오와 같은 이름으로 바꿔 둔다
+                            renamed = rename_board_files(moved, base_name)
                             db.commit()
                             board = moved
+                            detail = f" (파일: {', '.join(renamed)})" if renamed else ""
                             print(
                                 f"[FILE-SYNC] 파일이 이동/이름변경된 것으로 보고 보드를 따라 옮겼습니다: "
-                                f"#{moved.id} {old_label} -> {full_path}",
+                                f"#{moved.id} {old_label} -> {full_path}{detail}",
                                 flush=True,
                             )
 
@@ -1214,6 +1375,8 @@ def startup_event():
         auth.purge_expired_sessions(db)
         # 프로젝트 폴더 이동으로 끊긴 경로를 먼저 복구해야 삭제 동기화가 오작동하지 않는다
         repair_stale_media_paths(db)
+        # 이름이 바뀐 txt 를 원래 보드에 먼저 이어야 아래 동기화가 중복 보드를 만들지 않는다
+        sync_renamed_transcripts(db)
         sync_filesystem_to_db(db)
         # 큐에만 들어가 있던(=아직 한 글자도 변환 안 된) 보드는 허가 대기로 되돌린다.
         # 큐는 프로세스와 함께 사라지므로, 여기서 되돌리지 않으면 사람 확인 없이 다시 돌아 버린다.
@@ -1825,7 +1988,12 @@ def update_board(board_id: int, req: BoardUpdate, db: Session = Depends(get_db))
     if not b:
         raise HTTPException(status_code=404, detail="보드를 찾을 수 없습니다.")
     if req.title is not None:
-        b.title = req.title.strip()
+        new_title = req.title.strip()
+        if new_title and new_title != b.title:
+            b.title = new_title
+            # 탐색기의 오디오·txt 이름도 함께 바꾼다. 변환 중인 파일은 워커가 쥐고 있으니 건드리지 않는다
+            if b.status != "PROCESSING":
+                rename_board_files(b, new_title)
     if req.folder_id is not None:
         b.folder_id = req.folder_id
     if req.is_starred is not None:

@@ -147,6 +147,15 @@ def sync_filesystem_to_db(db: Session):
                 base = os.path.splitext(f)[0]
                 audio_map[base] = os.path.join(root_dir, f)
 
+    # 이미 어떤 보드가 가리키고 있는 파일은 다시 등록하지 않는다. 제목으로만 찾으면 웹에서
+    # 제목을 바꾸거나 탐색기에서 이름을 바꾼 파일이 '처음 보는 파일'이 되어, 오디오 없는
+    # 중복 보드가 생긴다 (그 보드에는 다시 받아쓰기 버튼도 없다).
+    owned_paths = set()
+    for audio_path, txt_path in db.query(Board.audio_path, Board.txt_path).all():
+        for path in (audio_path, txt_path):
+            if path:
+                owned_paths.add(os.path.normcase(path))
+
     # 3. '강의 녹음 변환' 폴더의 txt 파일들을 Board로 등록
     for root_dir, _, files in os.walk(RESULT_DIR):
         txt_files = [
@@ -162,6 +171,8 @@ def sync_filesystem_to_db(db: Session):
         for f in txt_files:
             base_name = os.path.splitext(f)[0]
             txt_full_path = os.path.join(root_dir, f)
+            if os.path.normcase(txt_full_path) in owned_paths:
+                continue
 
             # DB에 이미 있는지 확인 (title과 folder_id로 확인)
             existing_board = db.query(Board).filter_by(folder_id=current_folder.id, title=base_name).first()
@@ -264,6 +275,8 @@ def sync_filesystem_to_db(db: Session):
         for f in audio_files:
             base_name = os.path.splitext(f)[0]
             full_audio_path = os.path.join(root_dir, f)
+            if os.path.normcase(full_audio_path) in owned_paths:
+                continue
             existing = db.query(Board).filter_by(folder_id=current_folder.id, title=base_name).first()
             if not existing:
                 # 허가 대기(WAITING)로 등록한다. 사람이 `받아쓰기 시작`을 누르면 PENDING 이 되고
