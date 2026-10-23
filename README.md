@@ -16,7 +16,44 @@ python run_server.py
 - 다른 기기(같은 와이파이)에서 접속하려면 `.env` 에 `HOST=0.0.0.0` 을 두고, PC 의 내부 IP
   (`ipconfig` → IPv4, 예: `192.168.0.10`)로 `http://192.168.0.10:8000` 에 들어갑니다.
 - 인터넷에 열어 둔다면 `LOGIN_PATH` 를 임의 문자열로 바꾸고, HTTPS(리버스 프록시)와
-  `COOKIE_SECURE=1` 을 쓰는 것을 권장합니다.
+  `COOKIE_SECURE=1` 을 쓰는 것을 권장합니다. → [인터넷에 https 로 열기](#인터넷에-https-로-열기-caddy)
+
+## 인터넷에 https 로 열기 (Caddy)
+
+포트는 **바깥(443)** 과 **안쪽(8000)** 두 겹입니다.
+
+```
+폰/브라우저 ──443(https)──▶ Caddy ──8000(http)──▶ uvicorn (run_server.py)
+        └─── 바깥: 인터넷 ───┘      └─── 안쪽: VM 내부(127.0.0.1) ───┘
+```
+
+- **443** — 사용자가 쓰는 포트. Caddy 가 받아 https 를 처리하고 인증서도 알아서 받고 갱신합니다.
+  https 의 기본 포트라 주소에 `:443` 을 적을 필요가 없습니다.
+- **8000** — Caddy 가 우리 서버로 넘겨줄 때만 쓰는 내부 통로. `HOST=127.0.0.1` 이라
+  바깥에서 `:8000` 으로 직접 붙을 수 없고, 반드시 Caddy 를 거칩니다.
+- **80** — 인증서 발급·갱신과 http → https 자동 이동에 씁니다. 닫으면 안 됩니다.
+
+설정 (VM 에서):
+
+1. `.env`
+   ```
+   HOST=127.0.0.1
+   PORT=8000
+   COOKIE_SECURE=1
+   ```
+   서버를 재시작합니다. (예전에 uvicorn 을 80 번에 띄워 뒀다면 먼저 꺼야 Caddy 가 80 을 씁니다)
+2. `/etc/caddy/Caddyfile`
+   ```
+   yeovy.koreacentral.cloudapp.azure.com {
+       reverse_proxy 127.0.0.1:8000
+   }
+   ```
+   `sudo systemctl reload caddy` → `journalctl -u caddy -f` 에 `certificate obtained` 가 나오면 성공.
+3. Azure NSG 인바운드: **80, 443 열기 / 8000 은 닫기**.
+4. 접속: `https://yeovy.koreacentral.cloudapp.azure.com/<LOGIN_PATH>` (http 로 들어와도 https 로 넘어갑니다)
+
+> 태블릿 앱에는 `https://` 주소로 저장해야 합니다. 녹음 업로드는 http → https 이동을 따라가지
+> 못해 `HTTP 308` 로 계속 실패합니다. 앱에 도메인만 적으면(포트 없이) 알아서 https 를 붙입니다.
 
 ## 받아쓰기는 허가해야 시작합니다
 
@@ -135,6 +172,8 @@ python run_server.py
 
 ### 쓰기 시작하기
 1. APK 설치 → 앱 실행 → **서버 주소** 를 한 줄로 입력 (`192.168.0.10:8000`, `http://` 생략 가능)
+   - IP·localhost·포트를 적으면 `http://`, 도메인만 적으면 `https://` 가 붙습니다
+     (예: `yeovy.koreacentral.cloudapp.azure.com/gate-7f21c9` → https 로 접속)
    - 서버 `.env` 에서 `LOGIN_PATH` 를 바꿔 뒀다면 **그 경로까지** 적습니다:
      `192.168.0.10:8000/gate-7f21c9`. 안 적으면 로그인 화면 대신 `Not Found` 가 뜹니다.
      (앱은 저장할 때 이 경로를 갈라 두므로, 업로드가 쓰는 `/api/...` 주소에는 섞이지 않습니다)
