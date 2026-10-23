@@ -364,6 +364,7 @@ class MainActivity : ComponentActivity() {
             .setTitle("서버 주소")
             .setMessage(
                 "yeovyVM 서버 주소를 넣어 주세요. http:// 는 빼도 됩니다.\n" +
+                    "(IP·포트를 적으면 http, 도메인만 적으면 https 로 접속합니다)\n" +
                     "서버 .env 에서 로그인 주소(LOGIN_PATH)를 바꿔 뒀다면 그 경로까지 붙여 적으세요."
             )
             .setView(box)

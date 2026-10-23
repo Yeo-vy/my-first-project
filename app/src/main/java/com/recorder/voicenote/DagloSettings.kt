@@ -102,6 +102,7 @@ class DagloSettings(context: Context) {
          *
          * "192.168.0.10:8000/gate-7f21c9" -> ("http://192.168.0.10:8000", "gate-7f21c9")
          * "192.168.0.10:8000"             -> ("http://192.168.0.10:8000", "")
+         * "yeovy.example.com/gate-7f21c9" -> ("https://yeovy.example.com", "gate-7f21c9")
          *
          * 업로드는 기준 주소에 `/api/...` 를 붙여 부르기 때문에, 사용자가 로그인 경로까지 적어도
          * 그 경로가 API 주소에 섞이면 안 된다. 그래서 저장할 때 갈라 둔다.
@@ -112,12 +113,26 @@ class DagloSettings(context: Context) {
             if (!value.startsWith("http://", ignoreCase = true) &&
                 !value.startsWith("https://", ignoreCase = true)
             ) {
-                value = "http://$value"
+                value = "${defaultScheme(value.substringBefore('/'))}://$value"
             }
             val schemeEnd = value.indexOf("://") + 3
             val slash = value.indexOf('/', schemeEnd)
             if (slash < 0) return value to ""
             return value.substring(0, slash) to value.substring(slash).trim('/')
+        }
+
+        /**
+         * 스킴 없이 적은 주소에 붙일 스킴.
+         *
+         * 집 안 IP·localhost 나 포트를 직접 적은 주소는 uvicorn 에 바로 붙는 것이라 http,
+         * 포트 없는 도메인은 Caddy 같은 https 프록시 뒤에 있는 것이라 https 로 본다.
+         * 업로드는 http -> https 리다이렉트를 따라가지 못하므로 처음부터 맞는 스킴이어야 한다.
+         */
+        private fun defaultScheme(hostPort: String): String {
+            val host = hostPort.substringBefore(':').lowercase()
+            val hasPort = hostPort.contains(':')
+            val isIp = host.isNotEmpty() && host.all { it.isDigit() || it == '.' }
+            return if (hasPort || isIp || host == "localhost") "http" else "https"
         }
     }
 }
