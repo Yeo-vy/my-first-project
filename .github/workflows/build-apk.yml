@@ -28,6 +28,18 @@ jobs:
       - name: gradlew 실행 권한 부여
         run: chmod +x gradlew
 
+      - name: 고정 서명 키 풀기
+        # 빌드마다 서명이 바뀌면 태블릿에서 덮어 설치가 안 되고, 앱을 지우면 못 올린 녹음도
+        # 사라진다. 키는 저장소에 없으므로 Secret 에서 꺼낸다. 없으면 여기서 멈춘다.
+        env:
+          DEBUG_KEYSTORE_BASE64: ${{ secrets.DEBUG_KEYSTORE_BASE64 }}
+        run: |
+          if [ -z "$DEBUG_KEYSTORE_BASE64" ]; then
+            echo "::error::Secret DEBUG_KEYSTORE_BASE64 가 없습니다. 저장소 Settings > Secrets and variables > Actions 에 등록하세요."
+            exit 1
+          fi
+          echo "$DEBUG_KEYSTORE_BASE64" | base64 -d > app/debug.keystore
+
       - name: 디버그 APK 빌드
         # 빌드 출력을 파일로도 남긴다. 실패했을 때 아래 단계에서 원인을 요약하기 위함이다.
         run: |

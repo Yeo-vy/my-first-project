@@ -19,12 +19,16 @@ android {
     signingConfigs {
         // CI 런너는 빌드마다 새 디버그 키를 만든다. 그러면 서명이 매번 달라서 기존 앱 위에
         // 덮어 설치가 안 되고(지워야만 설치됨), 지우는 순간 못 올린 녹음까지 사라진다.
-        // 그래서 저장소에 넣어 둔 고정 키로 서명한다.
-        getByName("debug") {
-            storeFile = file("debug.keystore")
-            storePassword = "android"
-            keyAlias = "androiddebugkey"
-            keyPassword = "android"
+        // 그래서 고정 키로 서명한다. 키는 저장소에 넣지 않고(.gitignore), CI 는 GitHub Secret
+        // DEBUG_KEYSTORE_BASE64 를 풀어 이 자리에 놓는다. 파일이 없으면 기본 디버그 키를 쓴다.
+        val fixedKey = file("debug.keystore")
+        if (fixedKey.isFile) {
+            getByName("debug") {
+                storeFile = fixedKey
+                storePassword = "android"
+                keyAlias = "androiddebugkey"
+                keyPassword = "android"
+            }
         }
     }
 

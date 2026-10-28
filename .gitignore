@@ -36,3 +36,7 @@ Thumbs.db
 daglo.db-shm
 daglo.db-wal
 .gitignore
+
+# 앱 서명 키 (CI 는 Secret DEBUG_KEYSTORE_BASE64 로 받는다)
+*.keystore
+*.jks
