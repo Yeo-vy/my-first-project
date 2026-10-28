@@ -10,6 +10,8 @@ import androidx.work.Data
 import androidx.work.ExistingWorkPolicy
 import androidx.work.NetworkType
 import androidx.work.OneTimeWorkRequestBuilder
+import androidx.work.OutOfQuotaPolicy
+import androidx.work.WorkInfo
 import androidx.work.WorkManager
 import androidx.work.Worker
 import androidx.work.WorkerParameters
@@ -60,6 +62,13 @@ class UploadWorker(context: Context, params: WorkerParameters) : Worker(context,
                 // 서버가 꺼져 있거나 와이파이 밖인 경우. WorkManager 가 시간을 두고 다시 부른다
                 // (30초에서 시작해 두 배씩 늘어나므로, 강의 한 타임을 밖에서 보내도 따라잡는다).
                 if (runAttemptCount < MAX_ATTEMPTS) {
+                    // 다시 시도하는 동안에도 알림을 남긴다. 조용히 기다리면 녹음이 사라진 줄 안다.
+                    // 같은 파일은 같은 알림 자리를 쓰므로 시도할 때마다 내용만 바뀐다.
+                    notify(
+                        file,
+                        "녹음을 올리는 중 · ${runAttemptCount + 1}번째 시도 실패",
+                        "$folder · 잠시 뒤 다시 시도합니다. (${result.message})"
+                    )
                     Result.retry()
                 } else {
                     notify(file, "녹음을 아직 올리지 못했습니다", "앱을 열면 다시 시도합니다. (${result.message})")
@@ -142,11 +151,30 @@ class UploadWorker(context: Context, params: WorkerParameters) : Worker(context,
                         .setRequiredNetworkType(NetworkType.NOT_REQUIRED)
                         .build()
                 )
+                .apply {
+                    // 보통 작업은 삼성 절전이 화면이 꺼진 동안 수십 분씩 미룬다(녹음 끝나고 가방에
+                    // 넣으면 그대로 멈춰 있었다). 급한 작업으로 올려 곧바로 돌게 한다.
+                    // 12 미만에서는 급한 작업이 포그라운드 알림을 요구해서, 12 부터만 건다.
+                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+                        setExpedited(OutOfQuotaPolicy.RUN_AS_NON_EXPEDITED_WORK_REQUEST)
+                    }
+                }
                 .build()
 
             // 파일 경로마다 하나씩만 돌게 해서, 다시 시도할 때 같은 파일이 겹쳐 올라가지 않게 한다.
-            WorkManager.getInstance(context.applicationContext)
-                .enqueueUniqueWork("upload:${file.name}", ExistingWorkPolicy.KEEP, request)
+            // 다만 이미 올리는 중이 아니면 새 요청으로 갈아 끼운다. 예전 버전이 '인터넷 확인된
+            // 연결' 조건을 걸어 넣어 둔 작업이나, 백오프로 한참 뒤에 잡힌 작업이 그대로 남아
+            // 앱을 열어도 안 올라가던 문제가 있었다.
+            val workManager = WorkManager.getInstance(context.applicationContext)
+            val name = "upload:${file.name}"
+            val running = try {
+                workManager.getWorkInfosForUniqueWork(name).get()
+                    .any { it.state == WorkInfo.State.RUNNING }
+            } catch (e: Exception) {
+                false
+            }
+            if (running) return
+            workManager.enqueueUniqueWork(name, ExistingWorkPolicy.REPLACE, request)
         }
 
         /**

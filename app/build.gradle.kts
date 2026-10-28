@@ -12,8 +12,20 @@ android {
         // MediaRecorder.setNextOutputFile (조각 이어받기) 가 8.0 부터라 그 아래는 받지 않는다
         minSdk = 26
         targetSdk = 34
-        versionCode = 4
-        versionName = "2.1-offline"
+        versionCode = 5
+        versionName = "2.2-upload"
+    }
+
+    signingConfigs {
+        // CI 런너는 빌드마다 새 디버그 키를 만든다. 그러면 서명이 매번 달라서 기존 앱 위에
+        // 덮어 설치가 안 되고(지워야만 설치됨), 지우는 순간 못 올린 녹음까지 사라진다.
+        // 그래서 저장소에 넣어 둔 고정 키로 서명한다.
+        getByName("debug") {
+            storeFile = file("debug.keystore")
+            storePassword = "android"
+            keyAlias = "androiddebugkey"
+            keyPassword = "android"
+        }
     }
 
     buildTypes {
