@@ -111,6 +111,10 @@ class RecorderBridge(
     @JavascriptInterface
     fun recentFolders(): String = JSONArray(DagloSettings(context).recentFolders).toString()
 
+    /** 마지막으로 서버에 닿았을 때 받아 둔 실제 폴더 이름들. 오프라인 화면이 고를 목록이다. */
+    @JavascriptInterface
+    fun serverFolders(): String = JSONArray(DagloSettings(context).serverFolders).toString()
+
     /**
      * 아직 서버로 올리지 못하고 기다리는 녹음들. 오프라인 화면이 "3개 기다리는 중" 으로 보여 준다.
      * 녹음이 사라진 것이 아니라 순서를 기다릴 뿐이라는 것을 눈으로 확인시켜 주는 용도다.

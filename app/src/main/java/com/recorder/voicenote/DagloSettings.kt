@@ -79,6 +79,19 @@ class DagloSettings(context: Context) {
         prefs.edit().putString(KEY_RECENT_FOLDERS, next.joinToString("\n")).apply()
     }
 
+    /**
+     * 마지막으로 서버에 닿았을 때 받아 둔 폴더 이름들 (서버 순서 그대로).
+     * 오프라인 화면이 손으로 치지 않고 고를 수 있게 보여 준다.
+     */
+    var serverFolders: List<String>
+        get() = (prefs.getString(KEY_SERVER_FOLDERS, "") ?: "")
+            .split("\n")
+            .map { it.trim() }
+            .filter { it.isNotEmpty() }
+        set(value) {
+            prefs.edit().putString(KEY_SERVER_FOLDERS, value.joinToString("\n")).apply()
+        }
+
     /** 설정 화면에서 받은 주소 한 줄을 기준 주소와 로그인 경로로 나눠 저장한다. */
     fun save(rawAddress: String) {
         val (base, path) = splitAddress(rawAddress)
@@ -94,6 +107,7 @@ class DagloSettings(context: Context) {
         private const val KEY_LOGIN_PATH = "login_path"
         private const val KEY_ASKED_BATTERY = "asked_battery"
         private const val KEY_RECENT_FOLDERS = "recent_folders"
+        private const val KEY_SERVER_FOLDERS = "server_folders"
         /** 오프라인 화면에 한눈에 들어올 만큼만 남긴다 */
         private const val MAX_RECENT_FOLDERS = 8
 

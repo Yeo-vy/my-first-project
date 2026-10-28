@@ -80,6 +80,7 @@
     -webkit-user-select: text;
     user-select: text;
   }
+  .folder-hint { color: #fbbf24; font-size: 13px; margin: 8px 0 0; }
   .chips { margin-top: 10px; }
   .chip {
     display: inline-block;
@@ -163,6 +164,7 @@
     <div id="folder-box">
       <label for="folder">어느 폴더로 올릴까요</label>
       <input type="text" id="folder" value="기본 폴더" autocomplete="off" spellcheck="false">
+      <p class="folder-hint" id="folder-hint" style="display:none"></p>
       <div class="chips" id="chips"></div>
     </div>
 
@@ -237,21 +239,46 @@
 
   // ---- 폴더 --------------------------------------------------------------------
 
+  // 고를 수 있는 폴더 이름들. 최근에 녹음한 폴더를 앞에, 서버에서 받아 둔 나머지를 뒤에 둔다.
+  var knownFolders = [];
+
   function loadFolders() {
     if (!native || !native.recentFolders) return;
-    var names = parse(native.recentFolders(), []);
-    if (!names.length) return;
-    $("folder").value = names[0];
+    var recent = parse(native.recentFolders(), []);
+    var server = native.serverFolders ? parse(native.serverFolders(), []) : [];
+    var seen = {};
+    knownFolders = [];
+    recent.concat(server).forEach(function (name) {
+      var key = name.toLowerCase();
+      if (seen[key]) return;
+      seen[key] = true;
+      knownFolders.push(name);
+    });
+    if (recent.length) $("folder").value = recent[0];
     var box = $("chips");
     box.innerHTML = "";
-    names.forEach(function (name) {
+    knownFolders.forEach(function (name) {
       var chip = document.createElement("button");
       chip.className = "chip";
       chip.type = "button";
       chip.textContent = name;
-      chip.addEventListener("click", function () { $("folder").value = name; });
+      chip.addEventListener("click", function () {
+        $("folder").value = name;
+        checkFolder();
+      });
       box.appendChild(chip);
     });
+    checkFolder();
+  }
+
+  // 목록에 없는 이름이면 서버가 새 폴더를 만든다. 오타일 수 있으니 미리 알려 준다.
+  function checkFolder() {
+    var name = folderName();
+    var known = !knownFolders.length || name === "기본 폴더" ||
+      knownFolders.some(function (f) { return f === name; });
+    var hint = $("folder-hint");
+    hint.textContent = known ? "" : "'" + name + "' 폴더가 없어서 올릴 때 새로 만들어집니다.";
+    hint.style.display = known ? "none" : "block";
   }
 
   function folderName() {
@@ -388,6 +415,7 @@
       : "연결이 없어 대기열에 넣었습니다. 와이파이가 잡히면 올라갑니다.");
   }
 
+  $("folder").addEventListener("input", checkFolder);
   $("main-btn").addEventListener("click", onMain);
   $("pause-btn").addEventListener("click", onPause);
   $("discard-btn").addEventListener("click", onDiscard);

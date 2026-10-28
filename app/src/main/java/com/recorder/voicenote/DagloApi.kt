@@ -1,5 +1,6 @@
 package com.recorder.voicenote
 
+import org.json.JSONArray
 import org.json.JSONObject
 import java.io.File
 import java.io.InputStream
@@ -28,6 +29,26 @@ class DagloApi(private val serverUrl: String) {
     fun ping(): ApiResult {
         if (serverUrl.isEmpty()) return ApiResult.Fatal("서버 주소가 없습니다")
         return request("$serverUrl/api/ping") { conn -> conn.requestMethod = "GET" }
+    }
+
+    /**
+     * 서버에 있는 폴더 이름들. 받아오지 못하면 null.
+     *
+     * 오프라인 화면에서 폴더를 손으로 치다 오타가 나면 서버가 비슷한 이름의 새 폴더를 만든다.
+     * 연결돼 있을 때 실제 목록을 받아 두었다가 그 화면에서 고르게 한다.
+     */
+    fun folders(): List<String>? {
+        if (serverUrl.isEmpty()) return null
+        val result = request("$serverUrl/api/folders") { conn -> conn.requestMethod = "GET" }
+        if (result !is ApiResult.Success) return null
+        return try {
+            val array = JSONArray(result.body)
+            (0 until array.length())
+                .mapNotNull { array.optJSONObject(it)?.optString("name")?.trim() }
+                .filter { it.isNotEmpty() }
+        } catch (e: Exception) {
+            null
+        }
     }
 
     /**

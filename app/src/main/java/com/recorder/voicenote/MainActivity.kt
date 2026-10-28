@@ -187,7 +187,11 @@ class MainActivity : ComponentActivity() {
                 // 남아 있으면 지금이 올리기 제일 좋은 때다.
                 val base = settings.serverUrl
                 if (base.isNotEmpty() && url.startsWith(base)) {
-                    Thread { UploadWorker.retryPending(applicationContext) }.start()
+                    Thread {
+                        UploadWorker.retryPending(applicationContext)
+                        // 닿는 김에 폴더 목록도 받아 둔다. 오프라인 화면에서 이 목록으로 고른다.
+                        DagloApi(base).folders()?.let { settings.serverFolders = it }
+                    }.start()
                 }
             }
 
