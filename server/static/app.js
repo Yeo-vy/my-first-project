@@ -2426,6 +2426,7 @@ let recordMimeType = "";
 let recordTimerId = null;
 let recordStartedAt = 0;      // 이번 구간이 시작된 시각
 let recordElapsedMs = 0;      // 일시정지로 끊긴 구간까지 합친 길이
+let recordBeganAt = 0;        // 녹음을 처음 시작한 시각 (파일 이름에 쓴다)
 let recordAudioCtx = null;
 let recordAnalyser = null;
 let recordLevelRaf = null;
@@ -2657,6 +2658,7 @@ async function startRecording() {
 
     recordElapsedMs = 0;
     recordStartedAt = Date.now();
+    recordBeganAt = recordStartedAt;
     startRecordTimer();
     startLevelMeter();
     requestWakeLock();
@@ -2729,7 +2731,7 @@ async function finishRecording() {
     const folderName = select.options[select.selectedIndex]
         ? select.options[select.selectedIndex].text
         : "기본 폴더";
-    const fileName = `${folderName}_${recordingStamp()}${extensionForMime(recordMimeType)}`;
+    const fileName = `${folderName}_${recordingStamp(new Date(recordBeganAt))}${extensionForMime(recordMimeType)}`;
 
     const formData = new FormData();
     formData.append("file", blob, fileName);
@@ -2765,8 +2767,7 @@ async function finishRecording() {
 }
 
 /** 파일 이름에 쓰는 시각 (앱이 쓰던 규칙과 같게 [폴더명]_YYYYMMDD_HHMMSS) */
-function recordingStamp() {
-    const now = new Date();
+function recordingStamp(now) {
     const pad = (n) => String(n).padStart(2, "0");
     return `${now.getFullYear()}${pad(now.getMonth() + 1)}${pad(now.getDate())}_` +
         `${pad(now.getHours())}${pad(now.getMinutes())}${pad(now.getSeconds())}`;

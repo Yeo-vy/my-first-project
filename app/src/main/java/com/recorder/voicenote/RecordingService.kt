@@ -399,7 +399,11 @@ class RecordingService : Service() {
                 return "녹음된 내용이 없습니다"
             }
 
-            val stamp = SimpleDateFormat("yyyyMMdd_HHmmss", Locale.US).format(Date())
+            // 파일 이름에는 정지한 시각이 아니라 녹음을 시작한 시각을 찍는다.
+            // 세션 폴더 이름(session_<시작 시각 ms>)에 남아 있어서, 앱이 죽었다 살려 낸 녹음도 같다.
+            val startedAt = sessionDir.name.removePrefix("session_").toLongOrNull()
+                ?: System.currentTimeMillis()
+            val stamp = SimpleDateFormat("yyyyMMdd_HHmmss", Locale.US).format(Date(startedAt))
             val safeFolder = folderName.ifBlank { DEFAULT_FOLDER }.replace(Regex("[\\\\/:*?\"<>|]"), "_")
             val output = File(uploadsDir(context), "${safeFolder}_$stamp.m4a")
 
