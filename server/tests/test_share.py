@@ -87,8 +87,8 @@ anon = TestClient(main.app)  # 로그인하지 않은 브라우저
 state = client.get(f"/api/boards/{shared_id}/share").json()
 check("공유 전에는 꺼져 있다", state["shared"] is False and state["url"] is None, str(state))
 
-check("로그인 없이 보드 상세는 막힌다", anon.get(f"/api/boards/{shared_id}").status_code == 401)
-check("로그인 없이 목록은 막힌다", anon.get("/api/boards").status_code == 401)
+check("로그인 없이 보드 상세는 막힌다", anon.get(f"/api/boards/{shared_id}").status_code == 404)
+check("로그인 없이 목록은 막힌다", anon.get("/api/boards").status_code == 404)
 check("아무 토큰이나 넣으면 404", anon.get("/api/share/아무거나-틀린토큰").status_code == 404)
 check("아무 토큰이나 넣은 공유 화면도 404", anon.get("/share/아무거나-틀린토큰").status_code == 404)
 
@@ -130,11 +130,11 @@ check("폴더 이름이 새지 않는다", "비밀 폴더" not in body)
 check("다른 보드 제목이 새지 않는다", "보이면 안 되는" not in body)
 check("보드 번호가 새지 않는다", "folder_id" not in data and "id" not in data, str(sorted(data.keys())))
 
-check("토큰이 있어도 목록은 막힌다", anon.get("/api/boards").status_code == 401)
-check("토큰이 있어도 다른 보드는 막힌다", anon.get(f"/api/boards/{other_id}").status_code == 401)
-check("토큰이 있어도 다른 보드 오디오는 막힌다", anon.get(f"/api/audio/{other_id}").status_code == 401)
-check("토큰이 있어도 폴더 목록은 막힌다", anon.get("/api/folders").status_code == 401)
-check("토큰이 있어도 사용자 목록은 막힌다", anon.get("/api/auth/users").status_code == 401)
+check("토큰이 있어도 목록은 막힌다", anon.get("/api/boards").status_code == 404)
+check("토큰이 있어도 다른 보드는 막힌다", anon.get(f"/api/boards/{other_id}").status_code == 404)
+check("토큰이 있어도 다른 보드 오디오는 막힌다", anon.get(f"/api/audio/{other_id}").status_code == 404)
+check("토큰이 있어도 폴더 목록은 막힌다", anon.get("/api/folders").status_code == 404)
+check("토큰이 있어도 사용자 목록은 막힌다", anon.get("/api/auth/users").status_code == 404)
 check("공유 화면에서 메인은 안 열린다", anon.get("/").status_code == 404)
 
 
@@ -142,18 +142,18 @@ check("공유 화면에서 메인은 안 열린다", anon.get("/").status_code =
 # 5. 고칠 수 없어야 한다
 # -----------------
 check("공유 주소로 스크립트 수정 불가",
-      anon.put(f"/api/boards/{shared_id}/transcript", json={"segments": []}).status_code == 401)
+      anon.put(f"/api/boards/{shared_id}/transcript", json={"segments": []}).status_code == 404)
 check("공유 주소로 제목 수정 불가",
-      anon.patch(f"/api/boards/{shared_id}", json={"title": "바꿔치기"}).status_code == 401)
+      anon.patch(f"/api/boards/{shared_id}", json={"title": "바꿔치기"}).status_code == 404)
 check("공유 주소로 보드 삭제 불가",
-      anon.delete(f"/api/boards/{shared_id}").status_code == 401)
+      anon.delete(f"/api/boards/{shared_id}").status_code == 404)
 check("공유 주소로 공유 해제 불가",
-      anon.delete(f"/api/boards/{shared_id}/share").status_code == 401)
-# /api/share 밑으로 쓰기 요청이 와도 게이트가 먼저 막는다 (405 가 아니라 401 이어야 한다)
+      anon.delete(f"/api/boards/{shared_id}/share").status_code == 404)
+# /api/share 밑으로 쓰기 요청이 와도 게이트가 먼저 막는다 (405 가 아니라 없는 경로와 같은 404 여야 한다)
 check("공유 접두사 밑 POST 는 게이트가 막는다",
-      anon.post(f"/api/share/{token}", json={"title": "바꿔치기"}).status_code == 401)
+      anon.post(f"/api/share/{token}", json={"title": "바꿔치기"}).status_code == 404)
 check("공유 접두사 밑 DELETE 도 게이트가 막는다",
-      anon.delete(f"/api/share/{token}").status_code == 401)
+      anon.delete(f"/api/share/{token}").status_code == 404)
 
 unchanged = client.get(f"/api/boards/{shared_id}").json()
 check("내용이 그대로다", unchanged["title"] == "공유할 강의" and len(unchanged["segments"]) == 1)

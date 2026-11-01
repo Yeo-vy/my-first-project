@@ -29,15 +29,27 @@ let currentUser = null;
 
 // -----------------------------------------
 // 0. 인증
-// 세션이 만료되면 어느 요청이든 401을 받는다. 호출부마다 처리하는 대신
-// fetch 를 한 번 감싸서 곧바로 로그인 페이지로 보낸다.
+// 세션이 만료되면 서버는 어느 요청이든 '없는 경로' 와 똑같은 404 를 준다 (예전에는 401).
+// 404 는 '없는 보드' 같은 정상 응답에도 쓰이므로, 404 를 받으면 /api/auth/me 로 세션이 살아
+// 있는지 한 번 더 물어보고, 죽었으면 새로고침한다. 그러면 화면이 404 가 되고, 비밀 로그인
+// 주소로 다시 들어가면 된다. 호출부마다 처리하는 대신 fetch 를 한 번 감싸서 처리한다.
 // -----------------------------------------
 const rawFetch = window.fetch.bind(window);
 let redirectingToLogin = false;
 
+async function sessionLost(response) {
+    if (response.status === 401) return true;
+    if (response.status !== 404) return false;
+    try {
+        return (await rawFetch("/api/auth/me")).status === 404;
+    } catch (e) {
+        return false;
+    }
+}
+
 window.fetch = async function (...args) {
     const response = await rawFetch(...args);
-    if (response.status === 401 && !redirectingToLogin) {
+    if (!redirectingToLogin && await sessionLost(response)) {
         redirectingToLogin = true;
         window.location.replace("/");
     }
@@ -54,7 +66,7 @@ async function loadCurrentUser() {
         document.getElementById("user-avatar").textContent = name.slice(0, 2);
         document.getElementById("user-menu-btn").title = `${name} (${currentUser.username})`;
     } catch (e) {
-        /* 인터셉터가 401을 처리하므로 여기서는 조용히 넘어간다 */
+        /* 세션이 끊긴 경우는 인터셉터가 처리하므로 여기서는 조용히 넘어간다 */
     }
 }
 

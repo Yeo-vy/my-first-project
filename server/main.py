@@ -52,7 +52,14 @@ from server.ai_service import (
     sanitize_filename,
 )
 
-app = FastAPI(title="yeovyVM 풀스택 서버", version="3.0.0")
+# /docs·/redoc·/openapi.json 은 로그인한 사람에게도 열지 않는다. API 전체 지도를 그대로 내주는 셈이다.
+app = FastAPI(
+    title="yeovyVM 풀스택 서버",
+    version="3.0.0",
+    docs_url=None,
+    redoc_url=None,
+    openapi_url=None,
+)
 
 # 쿠키 인증을 쓰므로 와일드카드 오리진은 허용하지 않는다.
 # 외부 프론트엔드에서 접근해야 한다면 .env 에 ALLOWED_ORIGINS 를 쉼표로 나열한다.
@@ -77,6 +84,7 @@ LOGIN_PATH = "/" + (os.getenv("LOGIN_PATH", "login").strip().strip("/") or "logi
 
 # 로그인 화면이 쓰는 세 갈래도 같은 비밀 주소 밑에 둔다.
 # /api/auth/... 처럼 뻔한 자리에 두면 주소를 숨겨 놔도 봇이 그쪽으로 200 을 받아 간다.
+# 게이트는 이 주소 밑 전체를 통과시키므로, 로그인용 경로를 새로 만들 때도 LOGIN_PATH 밑에 붙이기만 하면 된다.
 LOGIN_STATUS_PATH = LOGIN_PATH + "/status"
 LOGIN_SUBMIT_PATH = LOGIN_PATH + "/submit"
 LOGIN_SETUP_PATH = LOGIN_PATH + "/setup"
@@ -90,31 +98,28 @@ LOGIN_REDIRECT = os.getenv("LOGIN_REDIRECT", "off").strip().lower() in ("1", "on
 # 모니터링 도구를 붙일 때만 .env 에 PING_PUBLIC=on 을 적는다.
 PING_PUBLIC = os.getenv("PING_PUBLIC", "off").strip().lower() in ("1", "on", "true", "yes")
 
-# 로그인하지 않은 사람에게 200 을 돌려주는 경로는 여기 적힌 것이 전부다.
-PUBLIC_PATHS = {
-    LOGIN_PATH,
-    LOGIN_STATUS_PATH,
-    LOGIN_SUBMIT_PATH,
-    LOGIN_SETUP_PATH,
-}
-if PING_PUBLIC:
-    PUBLIC_PATHS.add("/api/ping")
-
 # 공유 링크(/share/<토큰>)로 들어온 사람만 통과하는 두 갈래.
 # 목록·다른 보드·수정 API 는 여기 없으므로, 토큰을 들고 있어도 그 보드의 스크립트와
-# 오디오 말고는 아무것도 열리지 않는다. 읽기(GET/HEAD)만 허용한다.
+# 오디오 말고는 아무것도 열리지 않는다. 읽기(GET/HEAD)만, 그리고 살아 있는 토큰일 때만 통과한다.
 SHARE_PAGE_PREFIX = "/share/"
 SHARE_API_PREFIX = "/api/share/"
 
 
-def is_public_share_path(path: str, method: str) -> bool:
-    """공유 링크로 로그인 없이 열어 줄 요청인지 판별한다.
+def is_login_path(path: str) -> bool:
+    return path == LOGIN_PATH or path.startswith(LOGIN_PATH + "/")
+
+
+def share_token_of(path: str, method: str) -> Optional[str]:
+    """공유 링크 요청이면 경로에 든 토큰을, 아니면 None 을 돌려준다.
 
     뒤에 누가 이 접두사 밑에 쓰기 API 를 만들더라도 게이트가 먼저 막도록 메서드를 함께 본다.
     """
     if method not in ("GET", "HEAD"):
-        return False
-    return path.startswith(SHARE_PAGE_PREFIX) or path.startswith(SHARE_API_PREFIX)
+        return None
+    for prefix in (SHARE_PAGE_PREFIX, SHARE_API_PREFIX):
+        if path.startswith(prefix):
+            return path[len(prefix):].split("/", 1)[0] or None
+    return None
 
 if LOGIN_PATH == "/login":
     print(
@@ -142,37 +147,105 @@ async def static_revalidate(request: Request, call_next):
     return response
 
 
-@app.middleware("http")
-async def auth_gate(request: Request, call_next):
-    path = request.url.path
+class AuthGate:
+    """로그인하지 않은 요청에는 FastAPI 가 없는 경로에 주는 404 와 똑같은 응답만 돌려준다.
 
-    if path in PUBLIC_PATHS or request.method == "OPTIONS":
-        return await call_next(request)
+    밖에서 보면 '있는 경로' 와 '없는 경로' 가 구분되지 않아야 한다. 401·405·307·422 하나만 새도
+    봇은 그 경로가 있다는 걸 안다. 그래서 라우팅·요청 검증·정적 파일보다 먼저, 모든 미들웨어
+    바깥에서 돈다 (등록은 이 파일 맨 끝에서 한다). BaseHTTPMiddleware 가 아니라 순수 ASGI 로
+    짠 것은 안쪽에서 난 예외와 응답 상태를 직접 붙잡아 404 로 바꾸기 위해서다.
 
-    if is_public_share_path(path, request.method):
-        return await call_next(request)
+    로그인 없이 안쪽까지 들어가는 요청은 셋뿐이다.
+      - 비밀 로그인 주소(LOGIN_PATH)와 그 밑: 주소 자체가 비밀이라 메서드를 가리지 않는다
+      - 살아 있는 공유 토큰으로 들어온 GET/HEAD
+      - PING_PUBLIC 을 켰을 때의 GET /api/ping (기본은 꺼져 있다)
+    LOGIN_REDIRECT 를 켜면 GET / 만은 404 대신 로그인 주소로 302 를 보낸다 (이것도 기본은 꺼져 있다).
+    이렇게 들어간 요청도 404·405·307·308·5xx 가 나오면 기본 404 로 바꾼다.
+    로그인 화면이 쓰는 401(비밀번호 틀림)·422·429 는 그대로 둔다.
+    """
 
-    # 자동화 스크립트/외부 클라이언트는 YEOVYVM_API_TOKEN / DAGLO_API_TOKEN 헤더로 통과할 수 있다.
-    if auth.api_token_ok(request):
-        return await call_next(request)
+    NOT_FOUND = JSONResponse({"detail": "Not Found"}, status_code=404)
+    MASKED_STATUSES = {404, 405, 307, 308}
 
-    db = SessionLocal()
-    try:
-        user = auth.resolve_session_user(db, auth.get_session_token(request))
-    finally:
-        db.close()
+    def __init__(self, app):
+        self.app = app
 
-    if user is None:
-        if path.startswith("/api/"):
-            return JSONResponse(status_code=401, content={"detail": "로그인이 필요합니다."})
-        # 로그인 안내는 루트로 들어온 사람에게만 한다.
-        # /login·/admin·/wp-login.php 처럼 봇이 찍어 보는 경로는 리다이렉트로 힌트를 주지 않고
-        # 그냥 없는 페이지로 응답한다. (스캐너 입장에서는 빈 서버로 보인다)
-        if LOGIN_REDIRECT and path == "/":
-            return RedirectResponse(url=LOGIN_PATH, status_code=302)
-        return Response(content="Not Found", status_code=404, media_type="text/plain")
+    async def __call__(self, scope, receive, send):
+        if scope["type"] != "http":
+            return await self.app(scope, receive, send)
 
-    return await call_next(request)
+        try:
+            if self._authenticated(scope):
+                return await self.app(scope, receive, send)
+            open_to_anyone = self._open_to_anyone(scope)
+        except Exception as e:
+            print(f"[AUTH-GATE-ERROR] {scope.get('method')} {scope.get('path')}: {e}", flush=True)
+            open_to_anyone = False
+
+        if not open_to_anyone:
+            # 로그인 안내는 루트로 들어온 사람에게만 한다. 켜면 302 Location 에 비밀 주소가 실려 나간다.
+            if LOGIN_REDIRECT and scope["path"] == "/" and scope["method"] == "GET":
+                return await RedirectResponse(url=LOGIN_PATH, status_code=302)(scope, receive, send)
+            return await self.NOT_FOUND(scope, receive, send)
+        await self._call_masked(scope, receive, send)
+
+    def _authenticated(self, scope) -> bool:
+        request = Request(scope)
+        # 자동화 스크립트/외부 클라이언트는 YEOVYVM_API_TOKEN / DAGLO_API_TOKEN 헤더로 통과할 수 있다.
+        if auth.api_token_ok(request):
+            return True
+        token = auth.get_session_token(request)
+        if not token:
+            return False
+        db = SessionLocal()
+        try:
+            return auth.resolve_session_user(db, token) is not None
+        finally:
+            db.close()
+
+    def _open_to_anyone(self, scope) -> bool:
+        path, method = scope["path"], scope["method"]
+        if is_login_path(path):
+            return True
+        if PING_PUBLIC and path == "/api/ping" and method == "GET":
+            return True
+        token = share_token_of(path, method)
+        if token is None:
+            return False
+        db = SessionLocal()
+        try:
+            return find_shared_board(db, token) is not None
+        finally:
+            db.close()
+
+    async def _call_masked(self, scope, receive, send):
+        """안쪽 응답이 경로의 존재를 드러내는 상태면 시작 전에 가로채 기본 404 로 바꾼다."""
+        started = False
+        masked = False
+
+        async def masked_send(message):
+            nonlocal started, masked
+            if message["type"] == "http.response.start":
+                status = message["status"]
+                if status in self.MASKED_STATUSES or status >= 500:
+                    masked = True
+                    return
+                started = True
+            elif masked:
+                return
+            await send(message)
+
+        try:
+            await self.app(scope, receive, masked_send)
+        except Exception as e:
+            print(f"[AUTH-GATE-ERROR] {scope.get('method')} {scope.get('path')}: {e}", flush=True)
+            if started:
+                # 오디오 스트림처럼 이미 보내기 시작한 응답은 되돌릴 수 없다. 연결을 끊게 둔다.
+                raise
+            masked = True
+
+        if masked:
+            await self.NOT_FOUND(scope, receive, send)
 
 
 BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -2911,3 +2984,8 @@ def serve_login(request: Request, db: Session = Depends(get_db)):
     if os.path.exists(login_path):
         return FileResponse(login_path)
     return {"message": "로그인 페이지를 찾을 수 없습니다."}
+
+
+# 게이트는 반드시 마지막에 등록한다. Starlette 는 나중에 add_middleware 한 것이 바깥쪽이라,
+# 이래야 CORS·static_revalidate 를 포함한 모든 미들웨어보다 먼저 요청을 받는다.
+app.add_middleware(AuthGate)
