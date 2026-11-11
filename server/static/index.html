@@ -179,7 +179,6 @@
                                 <button onclick="exportFile('txt')"><i class="fa-regular fa-file-lines"></i> 텍스트 다운로드 (.txt)</button>
                                 <button onclick="exportFile('audio')"><i class="fa-solid fa-file-audio"></i> 원본 녹음파일 다운로드</button>
                                 <button onclick="openExportModal()"><i class="fa-solid fa-arrow-up-from-bracket"></i> 내보내기 전체 옵션</button>
-                                <button onclick="openGlossaryModal()"><i class="fa-solid fa-book"></i> 단어장</button>
                                 <button onclick="openSpeakerModal()"><i class="fa-solid fa-user-pen"></i> 화자 이름 변경</button>
                                 <button onclick="retranscribeCurrentBoard()"><i class="fa-solid fa-rotate-right"></i> 다시 받아쓰기</button>
                                 <button class="danger" onclick="deleteCurrentBoard()"><i class="fa-regular fa-trash-can"></i> 보드 삭제</button>
@@ -400,33 +399,6 @@
                 </footer>
             </section>
         </main>
-    </div>
-
-    <!-- 모달: 단어장 -->
-    <div id="glossary-modal" class="modal-backdrop" style="display: none;">
-        <div class="modal-card glossary-card">
-            <h3>단어장</h3>
-            <p class="modal-desc">
-                받아쓰기할 때 AI가 이 표기를 그대로 쓰도록 알려 줍니다. 한 줄에 하나씩 적고,
-                설명이 필요하면 <code>단어 | 메모</code> 처럼 세로줄 뒤에 덧붙이세요.
-                등록 후 <b>다시 받아쓰기</b>를 해야 스크립트에 반영됩니다.
-            </p>
-            <div class="form-group">
-                <label id="glossary-folder-label">이 폴더 전용</label>
-                <textarea id="glossary-folder-terms" rows="7" spellcheck="false" placeholder="퍼지 로직 | fuzzy logic&#10;IB | 투자은행"></textarea>
-            </div>
-            <div class="form-group">
-                <label>모든 폴더 공통</label>
-                <textarea id="glossary-common-terms" rows="4" spellcheck="false" placeholder="모든 녹음에 공통으로 적용할 단어"></textarea>
-            </div>
-            <p class="glossary-hint" id="glossary-subject-hint"></p>
-            <p class="glossary-hint" id="glossary-count-hint"></p>
-            <div class="modal-actions">
-                <button class="btn-secondary" onclick="closeGlossaryModal()">취소</button>
-                <button class="btn-secondary" onclick="saveGlossary(false)">저장</button>
-                <button class="primary-btn" id="glossary-save-retry-btn" onclick="saveGlossary(true)">저장하고 다시 받아쓰기</button>
-            </div>
-        </div>
     </div>
 
     <!-- 모달: 폴더 추가 -->

@@ -11,7 +11,7 @@
     - 변환 중인 보드는 폴더만 바꾸고, 변환이 끝난 뒤에 파일을 옮긴다
     - 휴지통의 보드는 복원될 자리가 새 폴더로 바뀐다
     - 없는 폴더로는 옮기지 않는다
-    - 폴더 이름을 바꾸면 양쪽 디렉터리 이름과 보드 경로가 함께 바뀌고 단어장은 그대로 따라온다
+    - 폴더 이름을 바꾸면 양쪽 디렉터리 이름과 보드 경로가 함께 바뀐다
     - 못 쓰는 이름(빈 이름, 겹치는 이름, 기본 폴더, 디렉터리로 못 쓰는 문자)은 거절한다
     - 변환 중인 녹음이 있는 폴더는 이름을 바꾸지 않는다
     - 받아쓰기 프롬프트에 폴더 이름이 주제로 들어가고, 뜻 없는 이름은 들어가지 않는다
@@ -35,7 +35,7 @@ from fastapi import HTTPException  # noqa: E402
 from fastapi.testclient import TestClient  # noqa: E402
 
 from server.database import SessionLocal, init_db  # noqa: E402
-from server.models import Board, Folder, GlossaryTerm  # noqa: E402
+from server.models import Board, Folder  # noqa: E402
 from server import ai_service, auth, main, migrator  # noqa: E402
 
 AUDIO_DIR = os.path.join(_tmp_dir, "녹음파일원본")
@@ -275,7 +275,6 @@ g2 = make_board(db, algol, "알골 2주차", audio_dir=os.path.join(AUDIO_DIR, "
 g3 = make_board(db, algol, "알골 휴지통")
 main.move_board_files_to_trash(g3)
 g3.is_deleted = True
-db.add(GlossaryTerm(folder_id=algol.id, term="다익스트라", note="Dijkstra"))
 db.commit()
 
 res = main.rename_folder(algol.id, main.FolderUpdate(name="  알고리즘 설계  "), db)
@@ -295,8 +294,6 @@ check("이름 변경: 보드의 txt 경로가 따라감",
 check("이름 변경: 하위 디렉터리의 파일도 따라감",
       same(g2.audio_path, os.path.join(AUDIO_DIR, "알고리즘 설계", "보강", "알골 2주차.m4a")) and os.path.isfile(g2.audio_path),
       str(g2.audio_path))
-check("이름 변경: 단어장은 그대로 따라옴",
-      [t_["term"] for t_ in ai_service.load_glossary_terms(db, algol.id)] == ["다익스트라"])
 check("이름 변경: 보드는 같은 폴더에 그대로", g1.folder_id == algol.id and g2.folder_id == algol.id)
 main.restore_board_files_from_trash(g3)
 g3.is_deleted = False
@@ -390,10 +387,6 @@ check("주제: 따옴표·줄바꿈을 걷어 냄",
       and "''" not in ai_service.build_subject_prompt("알고\n리즘 '설계'", None))
 check("주제: 한 글자 폴더 이름도 참고함 (C 언어 등)", "'C' 폴더" in ai_service.build_subject_prompt("C", None))
 
-terms = [{"term": "다익스트라", "note": "Dijkstra"}]
-check("단어장 번호: 주제가 없으면 5번", ai_service.build_glossary_prompt(terms).startswith("5. "))
-check("단어장 번호: 주제가 있으면 6번", ai_service.build_glossary_prompt(terms, number=6).startswith("6. "))
-
 # 실제 변환 경로에서 프롬프트가 어떻게 조립되는지 본다 (AI·ffmpeg 호출만 가짜로 바꾼다)
 prompts = []
 _real = {name: getattr(ai_service, name) for name in (
@@ -417,8 +410,6 @@ try:
     check("변환: 끝까지 돌았음", s.status == "COMPLETED", f"{s.status} {s.error_message}")
     check("변환: 프롬프트에 폴더 이름이 주제로 들어감",
           bool(prompts) and all("'자료구조' 폴더" in p_ for p_ in prompts), prompts[0][-400:] if prompts else "")
-    check("변환: 폴더 단어장은 그다음 번호로 이어짐",
-          bool(prompts) and "\n6. 아래는 이 녹음에 자주 나오는" in prompts[0] and "- 다익스트라 (Dijkstra)" in prompts[0])
     check("변환: 기본 규칙 4개는 그대로", bool(prompts) and "\n4. 인사말" in prompts[0] and "\n5. 이 녹음은" in prompts[0])
 
     prompts.clear()
@@ -431,10 +422,6 @@ try:
 finally:
     for name, fn in _real.items():
         setattr(ai_service, name, fn)
-
-# 단어장 화면이 폴더 이름을 참고하는지 알려 준다
-check("단어장 API: 참고되는 폴더 이름을 알려 줌", main.get_glossary(algol.id, db).get("folder_subject") == "자료구조")
-check("단어장 API: 기본 폴더는 참고되지 않음", main.get_glossary(default.id, db).get("folder_subject") == "")
 
 # -----------------
 # 10. HTTP 로 불러도 같은 답이 온다 (웹 화면과 태블릿 앱이 기대하는 모양)

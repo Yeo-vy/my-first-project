@@ -22,7 +22,7 @@ from pydantic import BaseModel
 from server.database import init_db, get_db, SessionLocal
 from server.models import (
     Folder, Board, TranscriptSegment, BoardSummary, BoardChat, Bookmark,
-    GlossaryTerm, User, BoardShare, BoardShareView,
+    User, BoardShare, BoardShareView,
 )
 from server import auth
 from server.migrator import (
@@ -41,11 +41,9 @@ from server.ai_service import (
     api_keys,
     drop_repeated_pieces,
     group_by_sentence,
-    GLOSSARY_MAX_TERMS,
     STT_SUBJECT_HINT,
     build_subject_prompt,
     subject_from_name,
-    load_glossary_terms,
     resolve_end_times,
     terminate_active_media_processes,
     extract_keywords_ai,
@@ -1745,17 +1743,6 @@ class BookmarkCreateRequest(BaseModel):
     timestamp_str: str
     note: Optional[str] = ""
 
-class GlossaryItem(BaseModel):
-    term: str
-    note: Optional[str] = ""
-
-
-class GlossaryReplaceRequest(BaseModel):
-    # folder_id 가 없으면 모든 폴더에 적용되는 공통 용어를 교체한다
-    folder_id: Optional[int] = None
-    terms: List[GlossaryItem] = []
-
-
 class SummaryRequest(BaseModel):
     summary_type: str = "BASIC"  # BASIC, MEETING, ACTION_ITEM, QUIZ, SLIDE
 
@@ -2043,8 +2030,7 @@ def rename_folder(folder_id: int, req: FolderUpdate, db: Session = Depends(get_d
 
     이름만 바꾸고 디렉터리를 그대로 두면, 감시 스레드가 옛 이름의 디렉터리를 보고 옛 폴더를
     다시 만들어 낸다. 받아쓰기는 폴더 이름을 주제로 참고하므로(ai_service.build_subject_prompt)
-    폴더 이름을 알맞게 고칠 수 있어야 용어가 제대로 나온다. 폴더 단어장은 폴더 번호에 달려
-    있어서 이름을 바꿔도 그대로 따라온다.
+    폴더 이름을 알맞게 고칠 수 있어야 용어가 제대로 나온다.
     """
     new_name = (req.name or "").strip()
     with _fs_sync_lock:
@@ -2137,9 +2123,6 @@ def delete_folder(folder_id: int, with_boards: bool = False, db: Session = Depen
         # 폴더 행을 지우면 딸린 보드까지 같이 사라지므로(cascade) 반드시 먼저 옮겨 둔다
         b.folder_id = default_folder.id
     db.flush()
-
-    # 이 폴더에서만 쓰던 단어장은 폴더와 함께 정리한다 (남으면 주인 없는 행이 된다)
-    db.query(GlossaryTerm).filter_by(folder_id=folder.id).delete(synchronize_session=False)
 
     db.delete(folder)
     db.commit()
@@ -2539,93 +2522,6 @@ def batch_approve_boards(req: BatchApproveRequest, db: Session = Depends(get_db)
         "board_ids": [b.id for b in approved],
         "skipped": len(targets) - len(approved),
         "queue_depth": stt_queue.qsize(),
-    }
-
-
-# -----------------
-# 2-1. 단어장 — 받아쓰기 프롬프트에 실어 보내는 고유명사/전문용어
-# -----------------
-@app.get("/api/glossary")
-def get_glossary(folder_id: Optional[int] = Query(None), db: Session = Depends(get_db)):
-    """폴더 전용 용어와 공통 용어를 나눠서 돌려준다."""
-    folder = db.query(Folder).filter_by(id=folder_id).first() if folder_id else None
-
-    def dump(rows):
-        return [{"id": r.id, "term": r.term, "note": r.note or ""} for r in rows]
-
-    common = (
-        db.query(GlossaryTerm)
-        .filter(GlossaryTerm.folder_id.is_(None))
-        .order_by(GlossaryTerm.id)
-        .all()
-    )
-    folder_rows = []
-    if folder:
-        folder_rows = (
-            db.query(GlossaryTerm)
-            .filter(GlossaryTerm.folder_id == folder.id)
-            .order_by(GlossaryTerm.id)
-            .all()
-        )
-    return {
-        "folder_id": folder.id if folder else None,
-        "folder_name": folder.name if folder else None,
-        # 받아쓰기가 이 폴더 이름을 주제로 참고하는지 (참고할 만한 이름이 아니면 빈 문자열)
-        "folder_subject": subject_from_name(folder.name) if (folder and STT_SUBJECT_HINT) else "",
-        "folder_terms": dump(folder_rows),
-        "common_terms": dump(common),
-        "max_terms": GLOSSARY_MAX_TERMS,
-    }
-
-
-@app.put("/api/glossary")
-def replace_glossary(req: GlossaryReplaceRequest, db: Session = Depends(get_db)):
-    """한 범위(특정 폴더 또는 공통)의 용어 목록을 통째로 교체한다.
-
-    편집 화면이 여러 줄 텍스트를 통째로 보내는 구조라, 항목별 추가/삭제 대신 교체가 단순하다.
-    """
-    if req.folder_id is not None and not db.query(Folder).filter_by(id=req.folder_id).first():
-        raise HTTPException(status_code=404, detail="폴더를 찾을 수 없습니다.")
-
-    cleaned = []
-    seen = set()
-    for item in req.terms:
-        term = (item.term or "").strip()
-        if not term:
-            continue
-        key = term.lower()
-        if key in seen:          # 같은 용어를 두 번 넣어도 프롬프트에는 한 번만 들어가게 한다
-            continue
-        seen.add(key)
-        cleaned.append((term[:200], (item.note or "").strip()[:300]))
-        if len(cleaned) >= GLOSSARY_MAX_TERMS:
-            break
-
-    scope = db.query(GlossaryTerm)
-    if req.folder_id is None:
-        scope = scope.filter(GlossaryTerm.folder_id.is_(None))
-    else:
-        scope = scope.filter(GlossaryTerm.folder_id == req.folder_id)
-    scope.delete(synchronize_session=False)
-
-    for term, note in cleaned:
-        db.add(GlossaryTerm(folder_id=req.folder_id, term=term, note=note))
-    db.commit()
-    return {"ok": True, "count": len(cleaned), "dropped": max(0, len(req.terms) - len(cleaned))}
-
-
-@app.get("/api/boards/{board_id}/glossary-preview")
-def preview_board_glossary(board_id: int, db: Session = Depends(get_db)):
-    """이 보드를 다시 받아쓸 때 실제로 적용될 용어 목록(폴더 + 공통)을 보여 준다."""
-    b = db.query(Board).filter_by(id=board_id).first()
-    if not b:
-        raise HTTPException(status_code=404, detail="보드를 찾을 수 없습니다.")
-    folder = db.query(Folder).filter_by(id=b.folder_id).first() if b.folder_id else None
-    return {
-        "folder_id": b.folder_id,
-        "terms": load_glossary_terms(db, b.folder_id),
-        # 폴더 이름·제목을 주제로 알려 주는 문장 (참고할 이름이 없으면 빈 문자열)
-        "subject_prompt": build_subject_prompt(folder.name if folder else None, b.title),
     }
 
 

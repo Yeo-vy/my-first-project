@@ -764,10 +764,7 @@ def transcribe_segments(audio_path: str, segments: List[tuple], label: str, prom
 
     return run_with_api_keys(label, work)
 
-# 프롬프트에 넣는 용어 개수 상한. 너무 많이 넣으면 정작 본문 받아쓰기 품질이 떨어진다.
-GLOSSARY_MAX_TERMS = 200
-
-# 규칙 번호는 build_subject_prompt / build_glossary_prompt 가 5번부터 이어 붙이므로 4번까지만 쓴다.
+# 규칙 번호는 build_subject_prompt 가 5번을 이어 붙이므로 4번까지만 쓴다.
 STT_BASE_PROMPT = """
 아래에 긴 녹음을 순서대로 잘라 낸 오디오 조각 {count}개가 있어. 조각마다 바로 앞에 <<번호>> 표시가 붙어 있어.
 조각마다 처음부터 끝까지 빠짐없이 텍스트로 받아쓰기(Transcription) 해줘. 작성할 때 아래 규칙을 엄격하게 지켜:
@@ -778,23 +775,6 @@ STT_BASE_PROMPT = """
 3. 말이 없는 조각은 번호만 적고 본문은 비워 둬. 들리지 않는 말을 지어내지 마.
 4. 인사말, 부연 설명, [MM:SS] 같은 타임스탬프 없이 번호 표시와 본문만 출력해.
 """
-
-
-def load_glossary_terms(db, folder_id: Optional[int]) -> List[Dict[str, str]]:
-    """해당 폴더의 용어 + 모든 폴더 공통 용어(folder_id 가 비어 있는 것)를 모은다."""
-    from server.models import GlossaryTerm
-
-    query = db.query(GlossaryTerm)
-    if folder_id:
-        query = query.filter(
-            (GlossaryTerm.folder_id == folder_id) | (GlossaryTerm.folder_id.is_(None))
-        )
-    else:
-        query = query.filter(GlossaryTerm.folder_id.is_(None))
-    return [
-        {"term": t.term, "note": t.note or ""}
-        for t in query.order_by(GlossaryTerm.folder_id.isnot(None), GlossaryTerm.id).all()
-    ]
 
 
 # -----------------
@@ -855,26 +835,6 @@ def build_subject_prompt(folder_name: Optional[str], title: Optional[str] = None
     )
 
 
-def build_glossary_prompt(terms: List[Dict[str, str]], number: int = 5) -> str:
-    """단어장을 받아쓰기 프롬프트에 덧붙일 문장으로 만든다. 용어가 없으면 빈 문자열."""
-    lines = []
-    for t in terms[:GLOSSARY_MAX_TERMS]:
-        term = (t.get("term") or "").strip()
-        if not term:
-            continue
-        note = (t.get("note") or "").strip()
-        lines.append(f"- {term} ({note})" if note else f"- {term}")
-    if not lines:
-        return ""
-    joined = "\n".join(lines)
-    return (
-        f"{number}. 아래는 이 녹음에 자주 나오는 고유명사·전문용어 목록이야. 비슷하게 들리더라도 "
-        "이 목록에 있는 표기를 그대로 써. 목록에 없는 말을 억지로 끼워 넣지는 마:\n"
-        + joined
-        + "\n"
-    )
-
-
 def process_audio_file_to_board(board_id: int, audio_path: str, db_session_factory, progress_callback: Optional[Callable[[int], None]] = None):
     """오디오 파일을 조각으로 나누고 Gemini STT를 실행하여 Board에 저장하는 완전 자동화 파이프라인"""
     from server.models import Board, TranscriptSegment, BoardSummary, Folder
@@ -901,12 +861,7 @@ def process_audio_file_to_board(board_id: int, audio_path: str, db_session_facto
                 flush=True,
             )
 
-        # 폴더 단어장을 프롬프트에 실어 보낸다 (고유명사·전문용어 표기 고정)
-        glossary = load_glossary_terms(db, board.folder_id)
-        glossary_prompt = build_glossary_prompt(glossary, number=6 if subject_prompt else 5)
-        if glossary:
-            print(f"[AI-GLOSSARY] Board #{board.id} 용어 {len(glossary)}개를 프롬프트에 적용합니다.", flush=True)
-        extra_prompt = subject_prompt + glossary_prompt
+        extra_prompt = subject_prompt
 
         # 브라우저에서 바로 녹음한 파일(webm/ogg)은 헤더에 길이·탐색 색인이 없다.
         # 청크를 잘라 쓰기 전에 컨테이너만 한 번 다시 써서 이후 단계가 신경 쓸 일을 없앤다.

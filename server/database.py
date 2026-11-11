@@ -38,8 +38,29 @@ def _set_sqlite_pragmas(dbapi_conn, _record):
 
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 
+# 없앤 기능이 남긴 표. 서버를 켤 때 비어 있으면 지운다.
+# (행이 남아 있으면 건드리지 않는다 — 그때는 사람이 보고 지운다)
+RETIRED_TABLES = ("glossary_terms",)
+
+
+def drop_retired_tables():
+    with engine.begin() as conn:
+        for table in RETIRED_TABLES:
+            exists = conn.exec_driver_sql(
+                "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?", (table,)
+            ).first()
+            if not exists:
+                continue
+            if conn.exec_driver_sql(f'SELECT 1 FROM "{table}" LIMIT 1').first():
+                print(f"[DB] 쓰지 않는 표 '{table}' 에 행이 남아 있어 지우지 않았습니다.", flush=True)
+                continue
+            conn.exec_driver_sql(f'DROP TABLE "{table}"')
+            print(f"[DB] 쓰지 않는 표 '{table}' 을 지웠습니다.", flush=True)
+
+
 def init_db():
     Base.metadata.create_all(bind=engine)
+    drop_retired_tables()
 
 def get_db():
     db = SessionLocal()
