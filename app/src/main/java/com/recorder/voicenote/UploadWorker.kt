@@ -1,10 +1,7 @@
 package com.recorder.voicenote
 
-import android.app.NotificationChannel
-import android.app.NotificationManager
 import android.content.Context
 import android.os.Build
-import androidx.core.app.NotificationCompat
 import androidx.work.Constraints
 import androidx.work.Data
 import androidx.work.ExistingWorkPolicy
@@ -15,6 +12,7 @@ import androidx.work.WorkInfo
 import androidx.work.WorkManager
 import androidx.work.Worker
 import androidx.work.WorkerParameters
+import org.json.JSONObject
 import java.io.File
 
 /** 아직 못 올리고 기다리는 녹음 한 개 (오프라인 화면이 목록으로 보여 준다). */
@@ -55,7 +53,7 @@ class UploadWorker(context: Context, params: WorkerParameters) : Worker(context,
         return when (val result = DagloApi(settings.serverUrl).upload(file, folder)) {
             is ApiResult.Success -> {
                 cleanup(file)
-                notify(file, "녹음을 올렸습니다", "$folder · 웹에서 받아쓰기를 시작해 주세요")
+                notifyUploaded(file, folder, result.body)
                 Result.success()
             }
             is ApiResult.Retryable -> {
@@ -93,33 +91,46 @@ class UploadWorker(context: Context, params: WorkerParameters) : Worker(context,
         }
     }
 
-    private fun notify(file: File, title: String, text: String) {
-        val manager = applicationContext.getSystemService(NotificationManager::class.java) ?: return
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-            manager.createNotificationChannel(
-                NotificationChannel(CHANNEL_ID, "업로드", NotificationManager.IMPORTANCE_LOW)
-            )
-        }
-        val notification = NotificationCompat.Builder(applicationContext, CHANNEL_ID)
-            .setSmallIcon(android.R.drawable.stat_sys_upload_done)
-            .setContentTitle(title)
-            .setContentText(text)
-            .setStyle(NotificationCompat.BigTextStyle().bigText(text))
-            .setAutoCancel(true)
-            .setPriority(NotificationCompat.PRIORITY_LOW)
-            .build()
-        try {
-            manager.notify(file.name.hashCode(), notification)
+    /**
+     * 다 올라갔다고 알린다. 알림을 누르면 앱에서 그 녹음이 열리고, 서버가 받아쓰기 허가를
+     * 기다리고 있으면 `받아쓰기 시작` 버튼을 함께 붙인다 ([UploadNotice]).
+     *
+     * 서버는 올린 녹음의 번호(`board_id`)와 허가가 필요한지(`needs_approval`)를 답에 실어 준다.
+     */
+    private fun notifyUploaded(file: File, folder: String, body: String) {
+        val answer = try {
+            JSONObject(body)
         } catch (e: Exception) {
-            // 알림 권한이 없으면 조용히 넘어간다 (업로드 결과는 웹 목록에서 확인할 수 있다)
-            e.printStackTrace()
+            JSONObject()
         }
+        val boardId = answer.optLong("board_id", UploadNotice.NO_BOARD)
+        val needsApproval = answer.optBoolean("needs_approval", false)
+        val text = when {
+            needsApproval && boardId > 0 ->
+                "$folder · 아래 버튼으로 받아쓰기를 시작할 수 있습니다. 알림을 누르면 앱에서 열립니다."
+            needsApproval -> "$folder · 알림을 눌러 앱에서 받아쓰기를 시작해 주세요."
+            answer.has("needs_approval") -> "$folder · 받아쓰기가 시작됐습니다. 알림을 누르면 앱에서 열립니다."
+            else -> "$folder · 알림을 누르면 앱에서 열립니다."
+        }
+        UploadNotice.show(
+            applicationContext,
+            file.name.hashCode(),
+            "녹음을 올렸습니다",
+            text,
+            boardId = boardId,
+            offerApprove = needsApproval,
+            label = folder
+        )
+    }
+
+    /** 올리는 중이거나 올리지 못했다고 알린다. 눌러도 앱이 열린다 (다시 올리는 길이 앱 안에 있다). */
+    private fun notify(file: File, title: String, text: String) {
+        UploadNotice.show(applicationContext, file.name.hashCode(), title, text)
     }
 
     companion object {
         private const val KEY_FILE = "file"
         private const val KEY_FOLDER = "folder"
-        private const val CHANNEL_ID = "daglo_upload"
         private const val DEFAULT_FOLDER = "기본 폴더"
         /**
          * 몇 번까지 스스로 다시 시도할지.

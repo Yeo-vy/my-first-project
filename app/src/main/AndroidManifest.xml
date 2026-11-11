@@ -47,6 +47,11 @@
             android:name=".RecordingService"
             android:exported="false"
             android:foregroundServiceType="microphone" />
+
+        <!-- 업로드 알림의 '받아쓰기 시작' 버튼. 앱이 스스로에게만 보내므로 밖에 열지 않는다 -->
+        <receiver
+            android:name=".ApproveReceiver"
+            android:exported="false" />
     </application>
 
 </manifest>

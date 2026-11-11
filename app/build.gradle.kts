@@ -12,8 +12,8 @@ android {
         // MediaRecorder.setNextOutputFile (조각 이어받기) 가 8.0 부터라 그 아래는 받지 않는다
         minSdk = 26
         targetSdk = 34
-        versionCode = 6
-        versionName = "2.3-folders"
+        versionCode = 7
+        versionName = "2.4-notify"
     }
 
     signingConfigs {

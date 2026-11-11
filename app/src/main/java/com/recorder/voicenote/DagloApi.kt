@@ -13,12 +13,19 @@ sealed class ApiResult {
     data class Success(val body: String) : ApiResult()
     /** 네트워크 끊김·서버 꺼짐·5xx — 나중에 다시 시도한다 */
     data class Retryable(val message: String) : ApiResult()
-    /** 로그인 만료·파일 거부 — 다시 보내도 같으므로 사람이 손대야 한다 */
-    data class Fatal(val message: String, val authFailed: Boolean = false) : ApiResult()
+    /**
+     * 로그인 만료·파일 거부 — 다시 보내도 같으므로 사람이 손대야 한다.
+     * [conflict] 는 서버가 "이미 그렇게 돼 있다"(409)고 답한 경우다. 받아쓰기 허가에서는 실패가 아니다.
+     */
+    data class Fatal(
+        val message: String,
+        val authFailed: Boolean = false,
+        val conflict: Boolean = false
+    ) : ApiResult()
 }
 
 /**
- * 서버로 녹음을 올리는 것 하나만 하는 HTTP 클라이언트.
+ * 서버로 녹음을 올리고, 올린 녹음의 받아쓰기를 허가하는 HTTP 클라이언트.
  *
  * 외부 라이브러리 없이 HttpURLConnection 만 쓴다. 3시간짜리 녹음도 메모리에 통째로 올리지 않고
  * 스트리밍으로 흘려보낸다.
@@ -77,6 +84,21 @@ class DagloApi(private val serverUrl: String) {
         }
     }
 
+    /**
+     * 올려 둔 녹음의 받아쓰기를 허가한다. 웹 화면의 `받아쓰기 시작` 버튼과 같은 주소를 부른다.
+     * 이미 시작됐거나 끝난 녹음이면 서버가 409 를 주고, 그때는 [ApiResult.Fatal.conflict] 로 돌아온다.
+     */
+    fun approve(boardId: Long): ApiResult {
+        if (serverUrl.isEmpty()) return ApiResult.Fatal("서버 주소가 없습니다")
+        return request("$serverUrl/api/boards/$boardId/approve") { conn ->
+            conn.requestMethod = "POST"
+            // 보낼 내용이 없는 POST 다. 길이 0 을 분명히 적어 보낸다.
+            conn.doOutput = true
+            conn.setFixedLengthStreamingMode(0)
+            conn.outputStream.close()
+        }
+    }
+
     // ------------------------------------------------------------------------------
 
     private fun request(urlString: String, prepare: (HttpURLConnection) -> Unit): ApiResult {
@@ -106,6 +128,11 @@ class DagloApi(private val serverUrl: String) {
                     authFailed = true
                 )
                 code == 413 -> ApiResult.Fatal("파일이 서버 허용 크기를 넘습니다.")
+                // 이미 그 상태라는 뜻이라 다시 보내도 같다 (업로드는 409 를 받을 일이 없다)
+                code == 409 -> ApiResult.Fatal(
+                    detailOf(body) ?: "이미 처리된 요청입니다.",
+                    conflict = true
+                )
                 code == 400 -> ApiResult.Fatal(detailOf(body) ?: "서버가 요청을 거부했습니다.")
                 else -> ApiResult.Retryable(detailOf(body) ?: "서버 오류 (HTTP $code)")
             }

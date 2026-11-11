@@ -419,6 +419,7 @@
                 <label>모든 폴더 공통</label>
                 <textarea id="glossary-common-terms" rows="4" spellcheck="false" placeholder="모든 녹음에 공통으로 적용할 단어"></textarea>
             </div>
+            <p class="glossary-hint" id="glossary-subject-hint"></p>
             <p class="glossary-hint" id="glossary-count-hint"></p>
             <div class="modal-actions">
                 <button class="btn-secondary" onclick="closeGlossaryModal()">취소</button>
@@ -455,6 +456,22 @@
                 <button class="btn-secondary" onclick="closeShareModal()">닫기</button>
                 <button class="btn-secondary danger" id="share-revoke-btn" style="display: none;" onclick="revokeShareLink()">공유 해제</button>
                 <button class="primary-btn" id="share-create-btn" style="display: none;" onclick="createShareLink()">공유 링크 만들기</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- 모달: 폴더 이름 바꾸기 (탐색기의 폴더 이름도 함께 바뀐다) -->
+    <div id="folder-rename-modal" class="modal-backdrop" style="display: none;">
+        <div class="modal-card">
+            <h3>폴더 이름 바꾸기</h3>
+            <p class="modal-desc">
+                탐색기의 폴더 이름도 함께 바뀝니다. 받아쓰기는 폴더 이름을 주제로 참고하므로,
+                과목이나 주제가 드러나는 이름일수록 용어가 정확하게 나옵니다.
+            </p>
+            <input type="text" id="rename-folder-input" maxlength="100" placeholder="새 폴더 이름" onkeydown="if(event.key==='Enter') submitRenameFolder()">
+            <div class="modal-actions">
+                <button class="btn-secondary" onclick="closeRenameFolderModal()">취소</button>
+                <button class="primary-btn" id="rename-folder-submit-btn" onclick="submitRenameFolder()">바꾸기</button>
             </div>
         </div>
     </div>

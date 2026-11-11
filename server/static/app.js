@@ -298,7 +298,7 @@ function renderFolderList() {
         const item = document.createElement("div");
         item.className = `folder-item ${currentFolderId === f.id ? "active" : ""}`;
         item.onclick = () => selectFolder(f.id, f.name);
-        // 기본 폴더는 서버에서도 삭제를 막으므로 버튼을 아예 만들지 않는다
+        // 기본 폴더는 서버에서도 삭제·이름 변경을 막으므로 버튼을 아예 만들지 않는다
         const canDelete = f.name !== "기본 폴더";
         item.innerHTML = `
             <div class="folder-info">
@@ -308,13 +308,18 @@ function renderFolderList() {
             <div class="folder-meta">
                 <span class="badge">${f.board_count || 0}</span>
                 ${canDelete
-                    ? `<button class="folder-del-btn" title="폴더 삭제"><i class="fa-solid fa-trash"></i></button>`
+                    ? `<button class="folder-del-btn folder-rename-btn" title="폴더 이름 바꾸기"><i class="fa-solid fa-pen"></i></button>` +
+                      `<button class="folder-del-btn folder-trash-btn" title="폴더 삭제"><i class="fa-solid fa-trash"></i></button>`
                     : `<span class="folder-del-spacer"></span>`}
             </div>
         `;
         if (canDelete) {
-            item.querySelector(".folder-del-btn").onclick = (e) => {
+            item.querySelector(".folder-rename-btn").onclick = (e) => {
                 e.stopPropagation();   // 폴더 선택으로 번지지 않게 한다
+                openRenameFolderModal(f);
+            };
+            item.querySelector(".folder-trash-btn").onclick = (e) => {
+                e.stopPropagation();
                 openDeleteFolderModal(f);
             };
         }
@@ -801,14 +806,37 @@ async function batchDeleteBoards() {
 async function batchMoveBoards() {
     const targetFolderId = prompt("이동할 대상 폴더의 번호(ID)를 입력하세요:\n" + folders.map(f => `${f.id}: ${f.name}`).join("\n"));
     if (!targetFolderId) return;
+    const folderId = parseInt(targetFolderId, 10);
+    if (!Number.isInteger(folderId)) {
+        showToast("폴더 번호를 숫자로 입력해 주세요.");
+        return;
+    }
 
-    await fetch("/api/boards/batch-move", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ board_ids: Array.from(selectedBoardIds), folder_id: parseInt(targetFolderId) })
-    });
+    let data = {};
+    try {
+        const res = await fetch("/api/boards/batch-move", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ board_ids: Array.from(selectedBoardIds), folder_id: folderId })
+        });
+        data = await res.json().catch(() => ({}));
+        if (!res.ok) {
+            showToast(data.detail || "폴더를 옮기지 못했습니다.");
+            return;
+        }
+    } catch (e) {
+        showToast("폴더를 옮기지 못했습니다.");
+        return;
+    }
     selectedBoardIds.clear();
-    showToast("폴더가 이동되었습니다.");
+    // 탐색기의 원본 녹음·변환 텍스트도 서버가 함께 옮긴다
+    if (data.deferred) {
+        showToast(`폴더를 옮겼습니다. 변환 중인 ${data.deferred}개는 변환이 끝나면 파일이 옮겨집니다.`);
+    } else if (data.moved_files) {
+        showToast("폴더를 옮겼습니다. 원본 파일도 함께 옮겼습니다.");
+    } else {
+        showToast("폴더를 옮겼습니다.");
+    }
     loadBoards();
     loadFolders();
 }
@@ -2099,6 +2127,66 @@ async function submitCreateFolder() {
     }
 }
 
+// 이름을 바꾸려는 폴더. 받아쓰기가 폴더 이름을 주제로 참고하므로 이름을 고칠 수 있어야 한다.
+let folderPendingRename = null;
+
+function openRenameFolderModal(folder) {
+    folderPendingRename = folder;
+    const input = document.getElementById("rename-folder-input");
+    input.value = folder.name;
+    document.getElementById("folder-rename-modal").style.display = "flex";
+    input.focus();
+    input.select();
+}
+
+function closeRenameFolderModal() {
+    document.getElementById("folder-rename-modal").style.display = "none";
+    folderPendingRename = null;
+}
+
+async function submitRenameFolder() {
+    const folder = folderPendingRename;
+    if (!folder) return;
+    const name = document.getElementById("rename-folder-input").value.trim();
+    if (!name) return;
+    if (name === folder.name) {
+        closeRenameFolderModal();
+        return;
+    }
+
+    const btn = document.getElementById("rename-folder-submit-btn");
+    btn.disabled = true;
+    try {
+        const res = await fetch(`/api/folders/${folder.id}`, {
+            method: "PATCH",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ name })
+        });
+        const data = await res.json().catch(() => ({}));
+        if (!res.ok) {
+            alert(data.detail || "폴더 이름을 바꾸지 못했습니다.");
+            return;
+        }
+        closeRenameFolderModal();
+        showToast("폴더 이름을 바꿨습니다. 탐색기의 폴더 이름도 함께 바뀌었습니다.");
+
+        // 지금 보고 있는 화면에 옛 이름이 남지 않게 한다
+        if (currentFilter === "folder" && currentFolderId === folder.id) {
+            document.getElementById("current-folder-title").textContent = data.name || name;
+        }
+        if (currentBoard && currentBoard.folder_id === folder.id) {
+            currentBoard.folder_name = data.name || name;
+            document.getElementById("detail-folder-name").textContent = currentBoard.folder_name;
+        }
+        loadFolders();
+        loadBoards();
+    } catch (e) {
+        alert("폴더 이름을 바꾸지 못했습니다.");
+    } finally {
+        btn.disabled = false;
+    }
+}
+
 // 삭제 확인 모달이 떠 있는 동안 어떤 폴더를 지우려는지 들고 있는다
 let folderPendingDelete = null;
 
@@ -2246,6 +2334,20 @@ async function openGlossaryModal() {
         folderBox.value = termsToText(data.folder_terms || []);
         folderBox.disabled = !glossaryFolderId;
         document.getElementById("glossary-common-terms").value = termsToText(data.common_terms || []);
+
+        // 폴더 이름도 받아쓰기의 주제로 넘어간다는 것을 알려 준다 (단어장과 함께 쓰는 실마리)
+        const subjectHint = document.getElementById("glossary-subject-hint");
+        if (data.folder_subject) {
+            subjectHint.textContent =
+                `폴더 이름 '${data.folder_subject}'도 받아쓰기의 주제로 참고됩니다. ` +
+                "과목이나 주제가 드러나는 이름일수록 용어가 정확해집니다.";
+        } else if (data.folder_name) {
+            subjectHint.textContent =
+                `폴더 이름 '${data.folder_name}'은 주제를 알려 주지 못해 받아쓰기에 참고되지 않습니다. ` +
+                "과목 이름의 폴더로 옮기면 용어가 더 정확해집니다.";
+        } else {
+            subjectHint.textContent = "";
+        }
 
         folderBox.oninput = updateGlossaryHint;
         document.getElementById("glossary-common-terms").oninput = updateGlossaryHint;
@@ -2501,7 +2603,8 @@ function nativeRecorderTick() {
     // 녹음이 끝나 업로드로 넘어간 순간. 목록을 다시 읽어 새 보드를 띄운다.
     // 업로드는 앱이 백그라운드에서 하므로 보드는 몇 초 뒤에 생긴다. 그래서 한 번 더 훑는다.
     if (nativeWasBusy && !busy) {
-        setRecordState("올렸습니다. 변환이 시작됩니다.", false);
+        // 앱이 백그라운드에서 올린다. 다 올라가면 앱 알림이 뜨고, 거기서 바로 받아쓰기를 시작할 수 있다.
+        setRecordState("녹음을 서버로 올립니다. 다 올라가면 알림으로 알려 드립니다.", false);
         if (timeEl) timeEl.textContent = "00:00:00";
         loadBoards();
         loadFolders();

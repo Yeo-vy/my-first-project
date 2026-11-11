@@ -57,6 +57,8 @@ class MainActivity : ComponentActivity() {
     private var fileChooserCallback: ValueCallback<Array<Uri>>? = null
     /** 오프라인 화면을 띄운 이유. 그 화면 맨 위에 한 줄로 적어 준다. */
     private var offlineReason: String = ""
+    /** 알림을 눌러 열어 보는 중인 녹음 화면 주소. 로그인이 풀려 있으면 로그인 화면으로 물러난다. */
+    private var boardUrlOnTrial: String? = null
 
     /** 웹의 '파일에서 올리기' 가 앱 안에서도 되도록 파일 선택 화면을 띄운다 */
     private val filePicker = registerForActivityResult(ActivityResultContracts.GetContent()) { uri ->
@@ -107,6 +109,8 @@ class MainActivity : ComponentActivity() {
             !settings.isConfigured -> showAddressDialog()
             // 붙은 네트워크가 아예 없다. 웹이 뜨기를 기다릴 이유가 없으므로 바로 녹음하게 한다.
             !hasNetwork() -> loadOffline(REASON_NO_NETWORK)
+            // 업로드 알림을 눌러 들어왔다. 방금 올린 그 녹음의 화면부터 연다.
+            wantsBoard(intent) -> openBoard(boardIdOf(intent))
             else -> loadWeb()
         }
     }
@@ -115,7 +119,15 @@ class MainActivity : ComponentActivity() {
         super.onNewIntent(intent)
         if (wantsSettings(intent)) showAddressDialog()
         if (wantsRecording(intent)) loadOffline(REASON_SHORTCUT)
+        // 앱이 이미 떠 있을 때 업로드 알림을 누르면 여기로 온다
+        if (wantsBoard(intent)) openBoard(boardIdOf(intent))
     }
+
+    /** 업로드 알림을 눌러 들어왔는지 (어느 녹음인지 번호가 함께 온다) */
+    private fun wantsBoard(intent: Intent?): Boolean =
+        intent?.action == ACTION_OPEN_BOARD && boardIdOf(intent) > 0
+
+    private fun boardIdOf(intent: Intent?): Long = intent?.getLongExtra(EXTRA_BOARD_ID, -1L) ?: -1L
 
     /** 홈 화면의 '서버 주소' 바로가기로 들어왔는지 */
     private fun wantsSettings(intent: Intent?): Boolean = intent?.action == ACTION_SETTINGS
@@ -203,6 +215,14 @@ class MainActivity : ComponentActivity() {
                 super.onReceivedHttpError(view, request, errorResponse)
                 if (request?.isForMainFrame != true) return
                 if (errorResponse?.statusCode != 404) return
+                // 알림을 눌러 녹음 화면으로 바로 가려 했는데 로그인이 풀려 있었다 (서버는 로그인
+                // 안 한 요청에 404 를 준다). 안내 대신 로그인 화면부터 연다. 한 번만 물러난다.
+                val trial = boardUrlOnTrial
+                if (trial != null && request?.url?.toString() == trial) {
+                    boardUrlOnTrial = null
+                    loadWeb()
+                    return
+                }
                 // 로그인 주소를 숨겨 둔 서버(.env 의 LOGIN_PATH)는 그 경로가 아니면 404 를 준다.
                 // "Not Found" 한 줄만 뜨면 무엇이 잘못됐는지 알 수 없으므로 안내로 바꿔 준다.
                 showHint(
@@ -272,6 +292,27 @@ class MainActivity : ComponentActivity() {
         webView.loadUrl(url)
         // 주소를 넣고 화면이 뜬 뒤에 권한다 (첫 실행에 대화상자가 겹치지 않게)
         maybeAskBatteryExemption()
+    }
+
+    /**
+     * 업로드 알림에서 고른 녹음의 화면을 연다.
+     *
+     * 화면을 앱에서 새로 그리지 않는다. 웹은 `/?board=번호` 로 들어오면 그 녹음부터 보여 주므로
+     * (app.js 의 applyInitialRoute) 그 주소를 열기만 한다. 로그인은 이미 돼 있어서(방금 그
+     * 쿠키로 올렸다) 로그인 경로를 거치지 않는다.
+     */
+    private fun openBoard(boardId: Long) {
+        val base = settings.serverUrl
+        when {
+            base.isEmpty() -> showAddressDialog()
+            !hasNetwork() -> loadOffline(REASON_NO_NETWORK)
+            else -> {
+                val url = "$base/?board=$boardId"
+                boardUrlOnTrial = url
+                webView.loadUrl(url)
+                maybeAskBatteryExemption()
+            }
+        }
     }
 
     /**
@@ -436,6 +477,9 @@ class MainActivity : ComponentActivity() {
         const val ACTION_SETTINGS = "com.recorder.voicenote.SETTINGS"
         /** 홈 화면 바로가기 '바로 녹음' — 서버를 거치지 않고 녹음 화면부터 연다 */
         const val ACTION_RECORD = "com.recorder.voicenote.RECORD"
+        /** 업로드 알림을 눌렀을 때 — [EXTRA_BOARD_ID] 의 녹음 화면부터 연다 ([UploadNotice]) */
+        const val ACTION_OPEN_BOARD = "com.recorder.voicenote.OPEN_BOARD"
+        const val EXTRA_BOARD_ID = "board_id"
         /** 안내 페이지의 '서버 주소 바꾸기' 링크 */
         private const val SETTINGS_SCHEME = "daglo://settings"
         /** 안내 페이지의 '그냥 녹음하기' 링크 */

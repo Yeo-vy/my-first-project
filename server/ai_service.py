@@ -767,7 +767,7 @@ def transcribe_segments(audio_path: str, segments: List[tuple], label: str, prom
 # 프롬프트에 넣는 용어 개수 상한. 너무 많이 넣으면 정작 본문 받아쓰기 품질이 떨어진다.
 GLOSSARY_MAX_TERMS = 200
 
-# 규칙 번호는 build_glossary_prompt 가 5번을 이어 붙이므로 4번까지만 쓴다.
+# 규칙 번호는 build_subject_prompt / build_glossary_prompt 가 5번부터 이어 붙이므로 4번까지만 쓴다.
 STT_BASE_PROMPT = """
 아래에 긴 녹음을 순서대로 잘라 낸 오디오 조각 {count}개가 있어. 조각마다 바로 앞에 <<번호>> 표시가 붙어 있어.
 조각마다 처음부터 끝까지 빠짐없이 텍스트로 받아쓰기(Transcription) 해줘. 작성할 때 아래 규칙을 엄격하게 지켜:
@@ -797,7 +797,65 @@ def load_glossary_terms(db, folder_id: Optional[int]) -> List[Dict[str, str]]:
     ]
 
 
-def build_glossary_prompt(terms: List[Dict[str, str]]) -> str:
+# -----------------
+# 폴더 이름을 주제로 참고하기
+# -----------------
+# 받아쓰기 모델은 소리만 듣고는 `퍼지 로직`과 `버지 로직`, `다익스트라`와 `다이크스트라` 를
+# 가리지 못한다. 무슨 과목의 녹음인지 알려 주면 그 분야의 말로 고른다. 사용자는 이미 폴더를
+# 과목·주제별로 나눠 두므로 폴더 이름(과 제목)을 그 실마리로 넘긴다.
+# 끄고 싶으면 .env 에 STT_SUBJECT_HINT=off 를 둔다.
+STT_SUBJECT_HINT = os.getenv("STT_SUBJECT_HINT", "on").strip().lower() not in ("off", "0", "false", "no")
+SUBJECT_MAX_CHARS = 80
+
+# 주제를 알려 주지 못하는 말들. 이런 말과 숫자·기호를 걷어 내고 남는 것이 없으면 참고하지 않는다.
+# (`음성 260909_132904` 같은 자동 제목이나 `기본 폴더`, `새 폴더` 를 주제로 넘기면 오히려 헷갈린다.)
+_GENERIC_NAME_WORDS = (
+    "기본 폴더", "새 폴더", "폴더", "새 녹음", "녹음파일", "녹음", "음성", "메모", "파일", "제목 없음",
+    "new folder", "folder", "recording", "record", "voice", "audio", "untitled", "default", "memo", "file",
+)
+_NON_SUBJECT_CHARS = re.compile(r"[\d\W_]+")
+
+
+def subject_from_name(name: Optional[str], min_chars: int = 1) -> str:
+    """폴더 이름이나 제목이 주제의 실마리가 되면 다듬어서 돌려주고, 아니면 빈 문자열을 돌려준다."""
+    text = re.sub(r"[\s'\"`]+", " ", name or "").strip()
+    if not text:
+        return ""
+    core = text.lower()
+    for word in sorted(_GENERIC_NAME_WORDS, key=len, reverse=True):
+        core = core.replace(word, " ")
+    if len(_NON_SUBJECT_CHARS.sub("", core)) < min_chars:
+        return ""
+    return text[:SUBJECT_MAX_CHARS]
+
+
+def build_subject_prompt(folder_name: Optional[str], title: Optional[str] = None, number: int = 5) -> str:
+    """폴더 이름과 제목을 `이 녹음의 주제`로 알려 주는 규칙 문장을 만든다. 쓸 만한 이름이 없으면 빈 문자열."""
+    if not STT_SUBJECT_HINT:
+        return ""
+    folder = subject_from_name(folder_name)
+    # 제목은 자동으로 붙은 것이 많아서 폴더보다 엄격하게 본다
+    name = subject_from_name(title, min_chars=2)
+    if name == folder:
+        name = ""
+    if folder and name:
+        where = f"이 녹음은 '{folder}' 폴더에 들어 있고 제목은 '{name}'이야."
+    elif folder:
+        where = f"이 녹음은 '{folder}' 폴더에 들어 있어."
+    elif name:
+        where = f"이 녹음의 제목은 '{name}'이야."
+    else:
+        return ""
+    return (
+        f"{number}. {where} 이 이름이 과목·주제를 가리킨다고 보고 받아써. "
+        "그 분야에서 쓰는 전문용어·고유명사·약어는 그 분야의 표준 표기로 적고, "
+        "발음이 비슷한 말이 여럿이면 이 주제에 맞는 쪽을 골라. "
+        "다만 실제로 들린 말만 적어. 주제에 맞춘다고 들리지 않은 말을 지어내거나 다른 말로 바꾸지는 마. "
+        "이름이 녹음 내용과 상관없어 보이면 이 항목은 무시해.\n"
+    )
+
+
+def build_glossary_prompt(terms: List[Dict[str, str]], number: int = 5) -> str:
     """단어장을 받아쓰기 프롬프트에 덧붙일 문장으로 만든다. 용어가 없으면 빈 문자열."""
     lines = []
     for t in terms[:GLOSSARY_MAX_TERMS]:
@@ -810,7 +868,7 @@ def build_glossary_prompt(terms: List[Dict[str, str]]) -> str:
         return ""
     joined = "\n".join(lines)
     return (
-        "5. 아래는 이 녹음에 자주 나오는 고유명사·전문용어 목록이야. 비슷하게 들리더라도 "
+        f"{number}. 아래는 이 녹음에 자주 나오는 고유명사·전문용어 목록이야. 비슷하게 들리더라도 "
         "이 목록에 있는 표기를 그대로 써. 목록에 없는 말을 억지로 끼워 넣지는 마:\n"
         + joined
         + "\n"
@@ -833,11 +891,22 @@ def process_audio_file_to_board(board_id: int, audio_path: str, db_session_facto
         board.progress_percent = 5
         db.commit()
 
+        # 폴더 이름(과 제목)을 주제로 알려 준다 (그 분야의 용어로 받아쓰게 한다)
+        subject_folder = db.query(Folder).filter_by(id=board.folder_id).first() if board.folder_id else None
+        subject_prompt = build_subject_prompt(subject_folder.name if subject_folder else None, board.title)
+        if subject_prompt:
+            print(
+                f"[AI-SUBJECT] Board #{board.id} 폴더 '{subject_folder.name if subject_folder else ''}', "
+                f"제목 '{board.title}' 을 주제로 참고합니다.",
+                flush=True,
+            )
+
         # 폴더 단어장을 프롬프트에 실어 보낸다 (고유명사·전문용어 표기 고정)
         glossary = load_glossary_terms(db, board.folder_id)
-        glossary_prompt = build_glossary_prompt(glossary)
+        glossary_prompt = build_glossary_prompt(glossary, number=6 if subject_prompt else 5)
         if glossary:
             print(f"[AI-GLOSSARY] Board #{board.id} 용어 {len(glossary)}개를 프롬프트에 적용합니다.", flush=True)
+        extra_prompt = subject_prompt + glossary_prompt
 
         # 브라우저에서 바로 녹음한 파일(webm/ogg)은 헤더에 길이·탐색 색인이 없다.
         # 청크를 잘라 쓰기 전에 컨테이너만 한 번 다시 써서 이후 단계가 신경 쓸 일을 없앤다.
@@ -866,7 +935,7 @@ def process_audio_file_to_board(board_id: int, audio_path: str, db_session_facto
             if progress_callback:
                 progress_callback(board.progress_percent or 0)
 
-            prompt = STT_BASE_PROMPT.format(count=len(batch)) + glossary_prompt
+            prompt = STT_BASE_PROMPT.format(count=len(batch)) + extra_prompt
             transcript_text = transcribe_segments(
                 audio_path, batch, f"board_{board_id}_chunk_{i+1}", prompt
             )

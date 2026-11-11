@@ -42,6 +42,9 @@ from server.ai_service import (
     drop_repeated_pieces,
     group_by_sentence,
     GLOSSARY_MAX_TERMS,
+    STT_SUBJECT_HINT,
+    build_subject_prompt,
+    subject_from_name,
     load_glossary_terms,
     resolve_end_times,
     terminate_active_media_processes,
@@ -333,6 +336,7 @@ def _mark_board_failed(board_id: int, message) -> None:
 def _run_one_board(board_id: int) -> None:
     db = SessionLocal()
     audio_path = None
+    folder_id_at_start = None
     try:
         board = db.query(Board).filter_by(id=board_id).first()
         if board is None:
@@ -343,6 +347,7 @@ def _run_one_board(board_id: int) -> None:
             # 여기서 한 번 더 확인해 같은 파일을 두 번 변환하지 않는다.
             print(f"[STT-SKIP] Board #{board_id} 는 지금 {board.status} 라 변환하지 않습니다.", flush=True)
             return
+        folder_id_at_start = board.folder_id
         if board.audio_path and os.path.exists(board.audio_path):
             audio_path = board.audio_path
             board.status = "PROCESSING"
@@ -363,6 +368,21 @@ def _run_one_board(board_id: int) -> None:
             SessionLocal,
             progress_callback=lambda _pct, _bid=board_id: _heartbeat(_bid),
         )
+        _settle_if_folder_changed(board_id, folder_id_at_start)
+
+
+def _settle_if_folder_changed(board_id: int, folder_id_at_start) -> None:
+    """변환하는 동안 웹에서 폴더를 옮겼다면, 그때 미뤄 둔 파일 이동을 지금 한다."""
+    db = SessionLocal()
+    try:
+        board = db.query(Board).filter_by(id=board_id).first()
+        changed = board is not None and board.folder_id != folder_id_at_start
+    except Exception:
+        changed = False
+    finally:
+        db.close()
+    if changed:
+        settle_board_files(board_id)
 
 
 def stt_worker():
@@ -754,16 +774,70 @@ def restore_board_files_from_trash(board: Board) -> bool:
     return bool(restored)
 
 
-def move_board_files_to_folder(board: Board, folder_name: str) -> bool:
+def folder_dir_in(base: str, folder_name: str) -> str:
+    """base(`녹음파일원본` 또는 `강의 녹음 변환`) 안에서 이 폴더의 파일을 둘 디렉터리를 고른다.
+
+    바로 아래에 같은 이름이 있으면 그곳을 쓴다. 없더라도 `Default/Dreampath` 처럼 안쪽에
+    이미 그 이름의 디렉터리가 있으면 그 자리를 쓴다 — 바로 아래에 또 만들면 탐색기에
+    같은 폴더가 둘로 보인다. 어디에도 없으면 바로 아래에 새로 만들 자리를 돌려준다.
+    """
+    sub = sanitize_filename(folder_name)
+    direct = os.path.join(base, sub)
+    if os.path.isdir(direct) or folder_name == "기본 폴더" or not os.path.isdir(base):
+        return direct
+    names = {folder_name, sub}
+    best = None
+    for root, dirs, _ in os.walk(base):
+        for d in dirs:
+            if d in names:
+                candidate = os.path.join(root, d)
+                if best is None or candidate.count(os.sep) < best.count(os.sep):
+                    best = candidate
+    return best or direct
+
+
+def dir_belongs_to_folder(directory: str, base: str, folder_name: str) -> bool:
+    """이 디렉터리의 파일이 이미 그 폴더 것으로 보이는지 판별한다 (감시 스레드와 같은 기준).
+
+    감시 스레드는 디렉터리의 마지막 이름으로 폴더를 정하고, base 바로 아래는 `기본 폴더` 다.
+    이미 그 폴더로 보이는 자리의 파일은 옮길 이유가 없다.
+    """
+    return get_folder_name(directory, base) in (folder_name, sanitize_filename(folder_name))
+
+
+def retarget_trash_originals(board: Board, folder_name: str) -> bool:
+    """휴지통에 있는 보드가 `복원될 자리`를 새 폴더로 바꿔 적는다.
+
+    휴지통 안의 파일은 그대로 두되 되돌아갈 경로만 고친다. 안 고치면 복원했을 때 파일이
+    옛 폴더로 돌아가서, 웹에서는 새 폴더인데 탐색기에서는 옛 폴더에 있게 된다.
+    """
+    meta = read_trash_meta(board.id)
+    files = meta.get("files") or {}
+    changed = False
+    for info in files.values():
+        original = (info or {}).get("original")
+        if not original or not is_managed_file(original) or is_inside(original, TRASH_DIR):
+            continue
+        base = AUDIO_DIR if is_inside(original, AUDIO_DIR) else RESULT_DIR
+        if dir_belongs_to_folder(os.path.dirname(original), base, folder_name):
+            continue
+        info["original"] = os.path.join(folder_dir_in(base, folder_name), os.path.basename(original))
+        changed = True
+    if changed:
+        write_trash_meta(board.id, meta)
+    return changed
+
+
+def move_board_files_to_folder(board: Board, folder_name: str, label: str = "FOLDER-DELETE") -> bool:
     """보드에 딸린 파일을 다른 폴더의 디렉터리로 옮기고 DB 경로도 함께 고친다.
 
-    폴더를 지우면서 보드는 살려 둘 때 쓴다. DB에서 폴더만 바꾸면 파일은 지워질
-    디렉터리에 그대로 남고, 감시 스레드가 그 파일을 보고 폴더를 다시 만들어 낸다.
+    웹에서 보드를 다른 폴더로 옮길 때와, 폴더를 지우면서 보드는 살려 둘 때 쓴다.
+    DB에서 폴더만 바꾸면 파일은 옛 디렉터리에 그대로 남아 탐색기와 웹이 어긋나고,
+    지운 폴더라면 감시 스레드가 그 파일을 보고 폴더를 다시 만들어 낸다.
     """
     if WEB_DELETE_SYNC == "off":
         return False
 
-    sub = sanitize_filename(folder_name)
     moved = []
     for key, src in board_file_targets(board):
         if not os.path.isfile(src) or not is_managed_file(src):
@@ -771,7 +845,9 @@ def move_board_files_to_folder(board: Board, folder_name: str) -> bool:
         if is_inside(src, TRASH_DIR):      # 휴지통 안의 파일은 되돌아갈 자리가 따로 적혀 있다
             continue
         base = AUDIO_DIR if is_inside(src, AUDIO_DIR) else RESULT_DIR
-        dest_dir = os.path.join(base, sub) if sub else base
+        if dir_belongs_to_folder(os.path.dirname(src), base, folder_name):
+            continue
+        dest_dir = folder_dir_in(base, folder_name)
         if is_same_dir(os.path.dirname(src), dest_dir):
             continue
         try:
@@ -779,7 +855,7 @@ def move_board_files_to_folder(board: Board, folder_name: str) -> bool:
             dest = unique_path(os.path.join(dest_dir, os.path.basename(src)))
             shutil.move(src, dest)
         except OSError as e:
-            print(f"[FOLDER-DELETE-WARN] #{board.id} {key} 이동 실패 ({src}): {e}", flush=True)
+            print(f"[{label}-WARN] #{board.id} {key} 이동 실패 ({src}): {e}", flush=True)
             continue
         if key == "audio_path":
             board.audio_path = dest
@@ -788,13 +864,145 @@ def move_board_files_to_folder(board: Board, folder_name: str) -> bool:
             board.txt_path = dest
         moved.append(os.path.basename(dest))
 
+    # 휴지통에 있는 보드는 파일 대신 `복원될 자리`를 새 폴더로 돌려 둔다
+    retargeted = retarget_trash_originals(board, folder_name)
+
     if moved:
         print(
-            f"[FOLDER-DELETE] #{board.id} {board.title}: 파일 {len(moved)}개를 '{folder_name}' 로 옮겼습니다 "
+            f"[{label}] #{board.id} {board.title}: 파일 {len(moved)}개를 '{folder_name}' 로 옮겼습니다 "
             f"({', '.join(moved)})",
             flush=True,
         )
-    return bool(moved)
+    return bool(moved) or retargeted
+
+
+def move_board_to_folder(board: Board, folder: Folder) -> str:
+    """보드를 다른 폴더로 옮긴다. 폴더 번호를 바꾸고 파일도 그 폴더의 디렉터리로 옮긴다.
+
+    돌려주는 값:
+        "moved"    파일까지 옮겼다
+        "deferred" 지금 변환 중이라 폴더만 바꿨다. 워커가 원본을 조각조각 읽는 중이라
+                   옮기면 변환이 깨진다. 변환이 끝나면 `settle_board_files` 가 마저 옮긴다.
+        "db-only"  옮길 파일이 없었다 (이미 그 자리에 있거나, 파일이 없거나, 동기화가 꺼져 있다)
+    """
+    board.folder_id = folder.id
+    if board.status == "PROCESSING":
+        return "deferred"
+    return "moved" if move_board_files_to_folder(board, folder.name, label="BOARD-MOVE") else "db-only"
+
+
+def settle_board_files(board_id: int) -> bool:
+    """변환하는 동안 폴더가 바뀐 보드의 파일을 새 폴더 자리로 마저 옮긴다."""
+    with _fs_sync_lock:
+        db = SessionLocal()
+        try:
+            board = db.query(Board).filter_by(id=board_id).first()
+            if board is None or board.status == "PROCESSING":
+                return False
+            folder = db.query(Folder).filter_by(id=board.folder_id).first()
+            if folder is None:
+                return False
+            moved = move_board_files_to_folder(board, folder.name, label="BOARD-MOVE")
+            if moved:
+                db.commit()
+            return moved
+        except Exception as e:
+            print(f"[BOARD-MOVE-WARN] #{board_id} 변환 뒤 파일 정리 실패: {e}", flush=True)
+            return False
+        finally:
+            db.close()
+
+
+def remap_path(path: str, pairs: list) -> str:
+    """디렉터리(또는 파일)를 옮긴 기록 (옛 경로, 새 경로) 들을 순서대로 적용해 새 경로를 구한다."""
+    if not path:
+        return path
+    for old, new in pairs:
+        if is_same_dir(path, old):
+            path = new
+        elif is_inside(path, old):
+            path = os.path.join(new, os.path.relpath(os.path.abspath(path), os.path.abspath(old)))
+    return path
+
+
+def undo_moves(pairs: list) -> None:
+    """`rename_folder_dirs` 가 옮긴 것을 거꾸로 되돌린다 (할 수 있는 만큼)."""
+    for old, new in reversed(pairs):
+        try:
+            os.makedirs(os.path.dirname(old), exist_ok=True)
+            shutil.move(new, old)
+        except OSError as undo_err:
+            print(f"[FOLDER-RENAME-WARN] 되돌리기 실패 ({new} -> {old}): {undo_err}", flush=True)
+
+
+def rename_folder_dirs(old_name: str, new_name: str) -> list:
+    """폴더의 실제 디렉터리 이름을 바꾸고, 옮긴 기록 (옛 경로, 새 경로) 목록을 돌려준다.
+
+    `녹음파일원본` 과 `강의 녹음 변환` 양쪽에서, 안쪽에 들어 있는 것까지 같은 이름의 디렉터리를
+    모두 바꾼다. 새 이름의 디렉터리가 이미 있으면(빈 디렉터리 등) 덮어쓰지 않고 그 안으로
+    파일을 하나씩 옮겨 합친다. 도중에 실패하면 이미 바꾼 것을 되돌리고 예외를 다시 던진다.
+    """
+    pairs = []
+    try:
+        for src in folder_dirs_on_disk(old_name):      # 깊은 것부터 나온다
+            if not os.path.isdir(src) or not is_managed_file(src):
+                continue
+            dest = os.path.join(os.path.dirname(src), new_name)
+            if not os.path.exists(dest) or is_same_dir(src, dest):
+                os.rename(src, dest)
+                pairs.append((src, dest))
+                continue
+            for entry in os.listdir(src):
+                entry_src = os.path.join(src, entry)
+                entry_dest = unique_path(os.path.join(dest, entry))
+                shutil.move(entry_src, entry_dest)
+                pairs.append((entry_src, entry_dest))
+            os.rmdir(src)
+    except OSError:
+        undo_moves(pairs)
+        raise
+    return pairs
+
+
+def apply_folder_rename_to_boards(db: Session, pairs: list) -> int:
+    """디렉터리 이름을 바꾼 뒤, 그 안의 파일을 가리키던 보드 경로를 새 경로로 고친다.
+
+    폴더 번호가 아니라 `경로가 그 디렉터리 안인지`로 고른다. 예전에 웹에서 폴더만 옮겨서
+    파일은 이 디렉터리에 남아 있던 다른 폴더의 보드도 경로가 끊기면 안 되기 때문이다.
+    휴지통에 있는 보드는 `복원될 자리`를 고친다.
+    """
+    if not pairs:
+        return 0
+    updated = 0
+    for b in db.query(Board).all():
+        changed = False
+        for attr in ("audio_path", "txt_path"):
+            old = getattr(b, attr)
+            if not old or is_inside(old, TRASH_DIR):
+                continue
+            new = remap_path(old, pairs)
+            if new != old:
+                setattr(b, attr, new)
+                if attr == "audio_path":
+                    b.audio_filename = os.path.basename(new)
+                changed = True
+        if b.is_deleted:
+            meta = read_trash_meta(b.id)
+            meta_changed = False
+            for info in (meta.get("files") or {}).values():
+                original = (info or {}).get("original")
+                if not original:
+                    continue
+                new = remap_path(original, pairs)
+                if new != original:
+                    info["original"] = new
+                    meta_changed = True
+            if meta_changed:
+                write_trash_meta(b.id, meta)
+                changed = True
+        if changed:
+            updated += 1
+    return updated
 
 
 def folder_dirs_on_disk(folder_name: str) -> list:
@@ -1216,6 +1424,11 @@ WATCH_INTERVAL_SECONDS = float(os.getenv("WATCH_INTERVAL_SECONDS", "5"))
 # 복사가 끝났다고 볼 때까지 파일이 조용해야 하는 시간
 FILE_SETTLE_SECONDS = 4
 
+# 웹에서 보드를 옮기거나 폴더 이름을 바꾸면 `파일 이동 → DB 기록` 두 단계를 거친다.
+# 그 사이에 감시 스레드가 끼어들면 옮기다 만 모습을 보고 옛 이름의 폴더를 다시 만들거나
+# 새 이름의 폴더를 먼저 만들어 버린다. 그래서 스캔 한 바퀴와 이런 작업은 이 잠금으로 번갈아 돈다.
+_fs_sync_lock = threading.RLock()
+
 # 웹에서 `새로고침`을 눌렀을 때 감시 스레드를 바로 깨우기 위한 신호.
 # 스캔은 언제나 감시 스레드 한 곳에서만 돌아야 같은 파일로 보드가 두 번 생기지 않는다.
 _scan_wakeup = threading.Event()
@@ -1290,6 +1503,7 @@ def background_audio_watcher():
             force = serving > _scan_served
 
         db = None
+        _fs_sync_lock.acquire()
         try:
             db = SessionLocal()
             live_paths = set()
@@ -1403,6 +1617,7 @@ def background_audio_watcher():
         finally:
             if db is not None:
                 db.close()
+            _fs_sync_lock.release()
 
         # 파일 스캔이 실패해도 대기열 회수는 반드시 돌아야 한다.
         # (예전에는 같은 try 안에 있어서, 스캔에서 예외가 한 번 나면
@@ -1819,14 +2034,75 @@ def create_folder(req: FolderCreate, db: Session = Depends(get_db)):
     os.makedirs(os.path.join(RESULT_DIR, folder.name), exist_ok=True)
     return {"id": folder.id, "name": folder.name, "board_count": 0}
 
+FOLDER_NAME_MAX_CHARS = 100
+
+
 @app.patch("/api/folders/{folder_id}")
 def rename_folder(folder_id: int, req: FolderUpdate, db: Session = Depends(get_db)):
-    folder = db.query(Folder).filter_by(id=folder_id).first()
-    if not folder:
-        raise HTTPException(status_code=404, detail="폴더를 찾을 수 없습니다.")
-    folder.name = req.name.strip()
-    db.commit()
-    return {"id": folder.id, "name": folder.name}
+    """폴더 이름을 바꾼다. 웹의 이름뿐 아니라 탐색기의 디렉터리 이름도 함께 바꾼다.
+
+    이름만 바꾸고 디렉터리를 그대로 두면, 감시 스레드가 옛 이름의 디렉터리를 보고 옛 폴더를
+    다시 만들어 낸다. 받아쓰기는 폴더 이름을 주제로 참고하므로(ai_service.build_subject_prompt)
+    폴더 이름을 알맞게 고칠 수 있어야 용어가 제대로 나온다. 폴더 단어장은 폴더 번호에 달려
+    있어서 이름을 바꿔도 그대로 따라온다.
+    """
+    new_name = (req.name or "").strip()
+    with _fs_sync_lock:
+        folder = db.query(Folder).filter_by(id=folder_id).first()
+        if not folder:
+            raise HTTPException(status_code=404, detail="폴더를 찾을 수 없습니다.")
+        if folder.name == "기본 폴더":
+            raise HTTPException(status_code=400, detail="기본 폴더는 이름을 바꿀 수 없습니다.")
+        if not new_name:
+            raise HTTPException(status_code=400, detail="폴더 이름을 입력해 주세요.")
+        if new_name == folder.name:
+            return {"id": folder.id, "name": folder.name, "renamed_dirs": 0, "updated_boards": 0}
+        if new_name == "기본 폴더":
+            raise HTTPException(status_code=400, detail="'기본 폴더'는 쓸 수 없는 이름입니다.")
+        if len(new_name) > FOLDER_NAME_MAX_CHARS:
+            raise HTTPException(
+                status_code=400, detail=f"폴더 이름이 너무 깁니다. (최대 {FOLDER_NAME_MAX_CHARS}자)"
+            )
+        # 폴더 이름이 곧 디렉터리 이름이다. 디렉터리로 못 쓰는 이름이면 둘이 어긋난다.
+        if sanitize_filename(new_name) != new_name:
+            raise HTTPException(
+                status_code=400,
+                detail='폴더 이름에 쓸 수 없는 문자가 있습니다. (\\ / : * ? " < > | 는 못 쓰고, 마침표로 끝날 수 없습니다.)',
+            )
+        if db.query(Folder).filter(Folder.name == new_name, Folder.id != folder.id).first():
+            raise HTTPException(status_code=400, detail="이미 존재하는 폴더 이름입니다.")
+
+        # 변환 중인 녹음은 워커가 원본을 경로로 조각조각 읽고 있다. 디렉터리 이름을 바꾸면 변환이 깨진다.
+        old_name = folder.name
+        old_dirs = folder_dirs_on_disk(old_name)
+        for b in db.query(Board).filter(Board.status == "PROCESSING").all():
+            if b.folder_id == folder.id or any(is_inside(b.audio_path, d) for d in old_dirs):
+                raise HTTPException(
+                    status_code=409,
+                    detail="이 폴더에 변환 중인 녹음이 있습니다. 변환이 끝난 뒤 다시 시도해 주세요.",
+                )
+
+        try:
+            pairs = rename_folder_dirs(old_name, new_name)
+        except OSError as e:
+            raise HTTPException(status_code=500, detail=f"폴더의 디렉터리 이름을 바꾸지 못했습니다: {e}")
+
+        try:
+            updated = apply_folder_rename_to_boards(db, pairs)
+            folder.name = new_name
+            db.commit()
+        except Exception as e:
+            db.rollback()
+            undo_moves(pairs)
+            print(f"[FOLDER-RENAME-WARN] '{old_name}' -> '{new_name}' 기록 실패, 되돌렸습니다: {e}", flush=True)
+            raise HTTPException(status_code=500, detail="폴더 이름을 바꾸지 못했습니다.")
+
+        print(
+            f"[FOLDER-RENAME] '{old_name}' -> '{new_name}' "
+            f"(디렉터리 {len(pairs)}곳, 보드 경로 {updated}개 갱신)",
+            flush=True,
+        )
+        return {"id": folder.id, "name": folder.name, "renamed_dirs": len(pairs), "updated_boards": updated}
 
 @app.delete("/api/folders/{folder_id}")
 def delete_folder(folder_id: int, with_boards: bool = False, db: Session = Depends(get_db)):
@@ -2057,6 +2333,14 @@ def get_board_detail(board_id: int, db: Session = Depends(get_db)):
 
 @app.patch("/api/boards/{board_id}")
 def update_board(board_id: int, req: BoardUpdate, db: Session = Depends(get_db)):
+    if req.folder_id is None:
+        return _update_board(board_id, req, db)
+    # 폴더를 옮기면 파일도 옮긴다. 감시 스레드가 옮기다 만 모습을 보지 않도록 잠그고 한다.
+    with _fs_sync_lock:
+        return _update_board(board_id, req, db)
+
+
+def _update_board(board_id: int, req: BoardUpdate, db: Session) -> dict:
     b = db.query(Board).filter_by(id=board_id).first()
     if not b:
         raise HTTPException(status_code=404, detail="보드를 찾을 수 없습니다.")
@@ -2067,12 +2351,17 @@ def update_board(board_id: int, req: BoardUpdate, db: Session = Depends(get_db))
             # 탐색기의 오디오·txt 이름도 함께 바꾼다. 변환 중인 파일은 워커가 쥐고 있으니 건드리지 않는다
             if b.status != "PROCESSING":
                 rename_board_files(b, new_title)
-    if req.folder_id is not None:
-        b.folder_id = req.folder_id
+    move = None
+    if req.folder_id is not None and req.folder_id != b.folder_id:
+        target = db.query(Folder).filter_by(id=req.folder_id).first()
+        if not target:
+            raise HTTPException(status_code=404, detail="옮길 폴더를 찾을 수 없습니다.")
+        # 탐색기의 오디오·txt 도 그 폴더의 디렉터리로 함께 옮긴다
+        move = move_board_to_folder(b, target)
     if req.is_starred is not None:
         b.is_starred = req.is_starred
     db.commit()
-    return {"ok": True}
+    return {"ok": True, "move": move}
 
 @app.post("/api/boards/{board_id}/star")
 def toggle_star_board(board_id: int, db: Session = Depends(get_db)):
@@ -2281,6 +2570,8 @@ def get_glossary(folder_id: Optional[int] = Query(None), db: Session = Depends(g
     return {
         "folder_id": folder.id if folder else None,
         "folder_name": folder.name if folder else None,
+        # 받아쓰기가 이 폴더 이름을 주제로 참고하는지 (참고할 만한 이름이 아니면 빈 문자열)
+        "folder_subject": subject_from_name(folder.name) if (folder and STT_SUBJECT_HINT) else "",
         "folder_terms": dump(folder_rows),
         "common_terms": dump(common),
         "max_terms": GLOSSARY_MAX_TERMS,
@@ -2329,7 +2620,13 @@ def preview_board_glossary(board_id: int, db: Session = Depends(get_db)):
     b = db.query(Board).filter_by(id=board_id).first()
     if not b:
         raise HTTPException(status_code=404, detail="보드를 찾을 수 없습니다.")
-    return {"folder_id": b.folder_id, "terms": load_glossary_terms(db, b.folder_id)}
+    folder = db.query(Folder).filter_by(id=b.folder_id).first() if b.folder_id else None
+    return {
+        "folder_id": b.folder_id,
+        "terms": load_glossary_terms(db, b.folder_id),
+        # 폴더 이름·제목을 주제로 알려 주는 문장 (참고할 이름이 없으면 빈 문자열)
+        "subject_prompt": build_subject_prompt(folder.name if folder else None, b.title),
+    }
 
 
 @app.post("/api/boards/batch-delete")
@@ -2348,11 +2645,23 @@ def batch_delete_boards(req: BatchDeleteRequest, db: Session = Depends(get_db)):
 
 @app.post("/api/boards/batch-move")
 def batch_move_boards(req: BatchMoveRequest, db: Session = Depends(get_db)):
-    db.query(Board).filter(Board.id.in_(req.board_ids)).update(
-        {Board.folder_id: req.folder_id}, synchronize_session=False
-    )
-    db.commit()
-    return {"ok": True, "count": len(req.board_ids)}
+    """보드 여러 개를 다른 폴더로 옮긴다. 탐색기의 오디오·txt 도 그 폴더의 디렉터리로 함께 옮긴다."""
+    with _fs_sync_lock:
+        target = db.query(Folder).filter_by(id=req.folder_id).first()
+        if not target:
+            raise HTTPException(status_code=404, detail="옮길 폴더를 찾을 수 없습니다.")
+        boards = db.query(Board).filter(Board.id.in_(req.board_ids)).all()
+        moved_files = 0
+        deferred = 0
+        for b in boards:
+            if b.folder_id == target.id:
+                continue
+            result = move_board_to_folder(b, target)
+            moved_files += result == "moved"
+            deferred += result == "deferred"
+            # 하나씩 확정한다. 중간에 하나가 실패해도 이미 옮긴 파일과 DB가 어긋나지 않는다.
+            db.commit()
+    return {"ok": True, "count": len(boards), "moved_files": moved_files, "deferred": deferred}
 
 # -----------------
 # 3. Transcript, Speaker & Bookmarks
